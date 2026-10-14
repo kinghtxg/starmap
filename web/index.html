@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拓扑总览 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56 p-6 flex flex-col h-screen box-border">
+  <header class="flex items-center justify-between mb-4 shrink-0">
+    <div>
+      <h1 class="text-xl font-bold">拓扑总览</h1>
+      <p class="text-xs text-slate-400 mt-1">节点风险三色 · 边粗细映射流量 · 双击聚合节点下钻</p>
+    </div>
+    <div class="flex gap-2">
+      <button id="btnBack" onclick="backToTop()" class="hidden px-3 py-1.5 text-xs rounded bg-riskMid/20 text-riskMid border border-riskMid/40 hover:bg-riskMid/30 transition-colors">← 返回上级</button>
+      <button id="btnRelayout" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent transition-colors">重新布局</button>
+      <button id="btnRefresh" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent transition-colors">刷新数据</button>
+      <button id="btnPNG" class="px-3 py-1.5 text-xs rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30 transition-colors">导出 PNG</button>
+      <button id="btnPDF" class="px-3 py-1.5 text-xs rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30 transition-colors">导出 PDF</button>
+    </div>
+  </header>
+
+  <div id="statsBar" class="grid grid-cols-4 gap-3 mb-4 shrink-0"></div>
+
+  <div class="flex gap-4 flex-1 min-h-0">
+    <div class="relative flex-1 bg-card/70 rounded-xl border border-slate-700/60 overflow-hidden">
+      <div id="cy" class="absolute inset-0"></div>
+      <div id="cyOverlay" class="absolute inset-0 bg-base/60 flex items-center justify-center hidden"></div>
+      <div class="absolute left-3 bottom-3 text-xs text-slate-400 bg-base/70 rounded px-3 py-2 space-y-1 pointer-events-none">
+        <div><span class="inline-block w-2 h-2 rounded-full mr-2" style="background:#F87171"></span>高风险</div>
+        <div><span class="inline-block w-2 h-2 rounded-full mr-2" style="background:#FB923C"></span>中风险</div>
+        <div><span class="inline-block w-2 h-2 rounded-full mr-2" style="background:#4ADE80"></span>正常/低</div>
+      </div>
+    </div>
+    <aside id="detailPanel" class="w-80 shrink-0 bg-card rounded-xl border border-slate-700/60 p-5 overflow-y-auto hidden">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-bold text-accent">节点详情</h2>
+        <button onclick="closeDetail()" class="text-slate-400 hover:text-body text-lg leading-none">&times;</button>
+      </div>
+      <div id="detailBody" class="space-y-4 text-sm"></div>
+    </aside>
+  </div>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+let cy = null, snapshot = null, maxBytes = 1;
+
+function isAggNode(n) {
+  return n.Aggregated || (n.ID && (n.ID.indexOf('subnet') === 0 || n.ID.indexOf('/') > 0));
+}
+function nodeCIDR(n) {
+  if (n.CIDR) return n.CIDR;
+  if (n.IPs && n.IPs.length && n.IPs[0].indexOf('/') > 0) return n.IPs[0];
+  if (n.ID && n.ID.indexOf('/') > 0) return n.ID.replace(/^subnet:/, '');
+  return null;
+}
+
+function nodeLabel(n) {
+  if (n.IPs && n.IPs.length) return n.IPs[0];
+  return n.ID;
+}
+
+function renderStats(st) {
+  st = st || {};
+  const items = [
+    ['节点数', st.NodeCount != null ? st.NodeCount : (snapshot && snapshot.Nodes ? snapshot.Nodes.length : 0)],
+    ['链路边数', st.EdgeCount != null ? st.EdgeCount : (snapshot && snapshot.Edges ? snapshot.Edges.length : 0)],
+    ['风险事件', st.EventCount != null ? st.EventCount : '-'],
+    ['快照时间', snapshot && snapshot.GeneratedAt ? UI.fmtTime(snapshot.GeneratedAt) : '-'],
+  ];
+  document.getElementById('statsBar').innerHTML = items.map(i =>
+    '<div class="bg-card rounded-xl border border-slate-700/60 px-4 py-3">' +
+    '<div class="text-xs text-slate-400">' + i[0] + '</div>' +
+    '<div class="text-lg font-bold text-accent mt-1">' + UI.esc(i[1]) + '</div></div>').join('');
+}
+
+function buildGraph(data) {
+  snapshot = data;
+  maxBytes = Math.max(1, ...data.Edges.map(e => Number(e.Bytes) || 0));
+  renderStats(data.Stats);
+  const elements = [];
+  for (const n of data.Nodes) {
+    elements.push({ data: {
+      id: n.ID,
+      label: nodeLabel(n),
+      color: UI.riskColor(n.RiskLevel),
+      agg: isAggNode(n),
+      cidr: nodeCIDR(n),
+      inactive: n.Active === false,
+    }});
+  }
+  for (const e of data.Edges) {
+    const w = 1 + 6 * Math.sqrt((Number(e.Bytes) || 0) / maxBytes);
+    elements.push({ data: {
+      id: e.ID || (e.SrcID + '->' + e.DstID),
+      source: e.SrcID, target: e.DstID,
+      width: w, inactive: e.Active === false,
+      protocol: e.Protocol, bytes: e.Bytes, packets: e.Packets,
+    }});
+  }
+
+  if (cy) { cy.destroy(); }
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements,
+    wheelSensitivity: 0.3,
+    style: [
+      { selector: 'node', style: {
+        'background-color': 'data(color)',
+        'label': 'data(label)',
+        'color': '#E2E8F0', 'font-size': 9,
+        'text-valign': 'bottom', 'text-margin-y': 4,
+        'width': 22, 'height': 22,
+        'border-width': 1.5, 'border-color': '#0F172A',
+      }},
+      { selector: 'node[?agg]', style: { 'shape': 'round-rectangle', 'width': 34, 'height': 26 } },
+      { selector: 'node[?inactive]', style: { 'opacity': 0.35 } },
+      { selector: 'edge', style: {
+        'width': 'data(width)',
+        'line-color': '#38BDF8', 'opacity': 0.35,
+        'curve-style': 'bezier',
+      }},
+      { selector: 'edge[?inactive]', style: { 'opacity': 0.12, 'line-style': 'dashed' } },
+      { selector: ':selected', style: { 'border-width': 3, 'border-color': '#38BDF8' } },
+    ],
+    layout: { name: 'cose', animate: true, nodeRepulsion: 8000, idealEdgeLength: 90 },
+  });
+
+  cy.on('tap', 'node', ev => showDetail(ev.target.id()));
+  cy.on('tap', ev => { if (ev.target === cy) closeDetail(); });
+  cy.on('dbltap', 'node', ev => {
+    const d = ev.target.data();
+    if (d.agg && d.cidr) drilldown(d.cidr);
+  });
+  cy.on('mouseover', 'edge', ev => {
+    const d = ev.target.data();
+    UI.toast(UI.esc(d.protocol || '?') + ' · ' + UI.fmtBytes(d.bytes) + ' · ' + (d.packets || 0) + ' 包', 'info');
+  });
+}
+
+let topSnapshot = null; // 上级快照，用于「返回上级」
+
+async function drilldown(cidr) {
+  UI.toast('正在下钻子网 ' + cidr + ' …', 'info');
+  const ov = document.getElementById('cyOverlay');
+  ov.classList.remove('hidden');
+  ov.innerHTML = UI.loadingHTML('加载子网拓扑 ' + cidr + ' …');
+  try {
+    const data = await API.subnetTopology(cidr);
+    if (!data.Nodes || !data.Nodes.length) {
+      ov.innerHTML = UI.emptyHTML('子网 ' + cidr + ' 内暂无节点');
+      return;
+    }
+    topSnapshot = snapshot; // 保存上级
+    buildGraph(data);
+    ov.classList.add('hidden');
+    document.getElementById('btnBack').classList.remove('hidden');
+    UI.toast('已进入子网 ' + cidr, 'ok');
+  } catch (e) {
+    ov.innerHTML = UI.errorHTML(e);
+    UI.toast('下钻失败：' + e.message, 'err');
+  }
+}
+
+function backToTop() {
+  if (!topSnapshot) return;
+  buildGraph(topSnapshot);
+  topSnapshot = null;
+  document.getElementById('btnBack').classList.add('hidden');
+  UI.toast('已返回上级拓扑', 'ok');
+}
+
+async function showDetail(id) {
+  const panel = document.getElementById('detailPanel');
+  const body = document.getElementById('detailBody');
+  panel.classList.remove('hidden');
+  body.innerHTML = UI.loadingHTML('加载节点详情…');
+  try {
+    const resp = await API.node(id);
+    const n = resp.Node || resp;
+    const peers = (snapshot.Edges || [])
+      .filter(e => e.SrcID === id || e.DstID === id)
+      .map(e => {
+        const other = e.SrcID === id ? e.DstID : e.SrcID;
+        const on = (snapshot.Nodes || []).find(x => x.ID === other);
+        return { id: other, label: on ? nodeLabel(on) : other, proto: e.Protocol, bytes: e.Bytes };
+      });
+    body.innerHTML =
+      row('节点 ID', n.ID) +
+      row('IP 地址', (n.IPs || []).map(UI.esc).join('<br/>') || '-') +
+      row('MAC', n.MAC || '-') +
+      row('归属网络域', n.Domain || '-') +
+      row('风险等级', UI.riskBadge(n.RiskLevel)) +
+      row('标签', (n.Labels || []).length ? (n.Labels || []).map(l => '<span class="inline-block px-2 py-0.5 mr-1 mb-1 rounded bg-accent/15 text-accent text-xs border border-accent/30">' + UI.esc(l) + '</span>').join('') : '-') +
+      row('首次发现', UI.fmtTime(n.FirstSeen)) +
+      row('最后活跃', UI.fmtTime(n.LastSeen)) +
+      '<div><div class="text-xs text-slate-400 mb-1.5">通信对端（' + peers.length + '）</div>' +
+      (peers.length ? '<div class="max-h-40 overflow-y-auto space-y-1">' + peers.map(p =>
+        '<div class="flex justify-between text-xs bg-base/60 rounded px-2 py-1.5">' +
+        '<span class="text-accent cursor-pointer hover:underline" onclick="showDetail(\'' + UI.esc(p.id) + '\')">' + UI.esc(p.label) + '</span>' +
+        '<span class="text-slate-400">' + UI.esc(p.proto || '') + ' ' + UI.fmtBytes(p.bytes) + '</span></div>').join('') + '</div>'
+        : '<div class="text-xs text-slate-500">暂无对端</div>') + '</div>';
+  } catch (e) {
+    body.innerHTML = UI.errorHTML(e);
+  }
+}
+function row(k, v) {
+  return '<div><div class="text-xs text-slate-400 mb-0.5">' + k + '</div><div class="break-all">' + (v == null || v === '' ? '-' : v) + '</div></div>';
+}
+function closeDetail() { document.getElementById('detailPanel').classList.add('hidden'); }
+
+async function load() {
+  const ov = document.getElementById('cyOverlay');
+  ov.classList.remove('hidden');
+  ov.innerHTML = UI.loadingHTML('正在获取拓扑快照…');
+  try {
+    const data = await API.topology();
+    topSnapshot = null;
+    document.getElementById('btnBack').classList.add('hidden');
+    if (!data.Nodes || !data.Nodes.length) {
+      ov.innerHTML = UI.emptyHTML('暂无拓扑数据', '请先在「数据接入」页导入 PCAP 或启动实时抓包');
+      renderStats(null);
+      return;
+    }
+    buildGraph(data);
+    ov.classList.add('hidden');
+  } catch (e) {
+    ov.innerHTML = UI.errorHTML(e);
+    renderStats(null);
+  }
+}
+
+document.getElementById('btnRelayout').onclick = () => {
+  if (cy) cy.layout({ name: 'cose', animate: true, nodeRepulsion: 8000, idealEdgeLength: 90 }).run();
+};
+document.getElementById('btnRefresh').onclick = load;
+document.getElementById('btnPNG').onclick = () => {
+  if (!cy) return UI.toast('拓扑尚未加载', 'err');
+  const uri = cy.png({ full: true, scale: 2, bg: '#0F172A' });
+  const a = document.createElement('a');
+  a.href = uri; a.download = 'starmap-topology.png'; a.click();
+  UI.toast('PNG 已导出', 'ok');
+};
+document.getElementById('btnPDF').onclick = () => {
+  if (!cy) return UI.toast('拓扑尚未加载', 'err');
+  try {
+    const uri = cy.png({ full: true, scale: 2, bg: '#0F172A' });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight();
+    const img = new Image();
+    img.onload = () => {
+      const r = Math.min(pw / img.width, ph / img.height);
+      pdf.addImage(uri, 'PNG', (pw - img.width * r) / 2, (ph - img.height * r) / 2, img.width * r, img.height * r);
+      pdf.save('starmap-topology.pdf');
+      UI.toast('PDF 已导出', 'ok');
+    };
+    img.src = uri;
+  } catch (e) { UI.toast('PDF 导出失败：' + e.message, 'err'); }
+};
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>网络域 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56 p-6">
+  <header class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-xl font-bold">网络域管理</h1>
+      <p class="text-xs text-slate-400 mt-1">定义 gov / office / internet / prod 等网络域，多域流量命中将触发「多网域融合」检测</p>
+    </div>
+    <button onclick="openModal()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">+ 新增网络域</button>
+  </header>
+  <div id="list" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+</div>
+
+<div id="modal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center" onclick="if(event.target===this)closeModal()">
+  <div class="bg-card rounded-xl border border-slate-700 w-96 p-6 space-y-4">
+    <h2 id="modalTitle" class="font-bold text-accent">新增网络域</h2>
+    <input type="hidden" id="dId">
+    <div>
+      <label class="text-xs text-slate-400 block mb-1">名称</label>
+      <input id="dName" placeholder="如 gov / office / internet / prod" class="w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm">
+    </div>
+    <div>
+      <label class="text-xs text-slate-400 block mb-1">CIDR 列表（每行一个）</label>
+      <textarea id="dCIDRs" rows="4" placeholder="10.0.0.0/8&#10;192.168.0.0/16" class="w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm font-mono"></textarea>
+    </div>
+    <div>
+      <label class="text-xs text-slate-400 block mb-1">标识颜色</label>
+      <div class="flex items-center gap-3">
+        <input type="color" id="dColor" value="#38BDF8" class="w-10 h-9 rounded bg-base border border-slate-600 cursor-pointer">
+        <span id="dColorVal" class="text-xs text-slate-400 font-mono">#38BDF8</span>
+      </div>
+    </div>
+    <div class="flex gap-2 justify-end">
+      <button onclick="closeModal()" class="px-4 py-1.5 text-sm rounded bg-slate-600/30 text-slate-300 border border-slate-600">取消</button>
+      <button onclick="save()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+document.getElementById('dColor').addEventListener('input', e => {
+  document.getElementById('dColorVal').textContent = e.target.value;
+});
+
+async function load() {
+  const el = document.getElementById('list');
+  el.innerHTML = UI.loadingHTML('正在加载网络域…');
+  try {
+    const data = await API.domains();
+    const items = Array.isArray(data) ? data : (data && data.Domains) || [];
+    if (!items.length) { el.innerHTML = '<div class="col-span-full bg-card rounded-xl border border-slate-700/60">' + UI.emptyHTML('暂无网络域', '点击右上角「新增网络域」创建') + '</div>'; return; }
+    el.innerHTML = items.map(d =>
+      '<div class="bg-card rounded-xl border border-slate-700/60 p-5" style="border-top:3px solid ' + UI.esc(d.Color || '#38BDF8') + '">' +
+      '<div class="flex items-center justify-between mb-3">' +
+      '  <div class="font-bold text-lg" style="color:' + UI.esc(d.Color || '#38BDF8') + '">' + UI.esc(d.Name) + '</div>' +
+      '  <div class="space-x-3">' +
+      '    <button onclick=\'openModal(' + JSON.stringify(d).replace(/'/g, "&#39;") + ')\' class="text-xs text-accent hover:underline">编辑</button>' +
+      '    <button onclick="del(\'' + UI.esc(d.ID) + '\')" class="text-xs text-riskHigh hover:underline">删除</button>' +
+      '  </div></div>' +
+      '<div class="text-xs text-slate-400 mb-1.5">CIDR（' + ((d.CIDRs || []).length) + '）</div>' +
+      '<div class="flex flex-wrap gap-1.5">' + ((d.CIDRs || []).length
+        ? d.CIDRs.map(c => '<span class="px-2 py-0.5 rounded bg-base/70 border border-slate-700 text-xs font-mono">' + UI.esc(c) + '</span>').join('')
+        : '<span class="text-xs text-slate-500">未配置</span>') + '</div>' +
+      '</div>').join('');
+  } catch (e) {
+    el.innerHTML = '<div class="col-span-full bg-card rounded-xl border border-slate-700/60">' + UI.errorHTML(e) + '</div>';
+  }
+}
+
+function openModal(d) {
+  document.getElementById('modalTitle').textContent = d ? '编辑网络域' : '新增网络域';
+  document.getElementById('dId').value = d ? d.ID : '';
+  document.getElementById('dName').value = d ? d.Name : '';
+  document.getElementById('dCIDRs').value = d ? (d.CIDRs || []).join('\n') : '';
+  const c = d && d.Color ? d.Color : '#38BDF8';
+  document.getElementById('dColor').value = c;
+  document.getElementById('dColorVal').textContent = c;
+  document.getElementById('modal').classList.remove('hidden');
+}
+function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+
+async function save() {
+  const id = document.getElementById('dId').value;
+  const cidrs = document.getElementById('dCIDRs').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const d = {
+    Name: document.getElementById('dName').value.trim(),
+    CIDRs: cidrs,
+    Color: document.getElementById('dColor').value,
+  };
+  if (!d.Name) { UI.toast('请填写名称', 'err'); return; }
+  try {
+    if (id) await API.updateDomain(id, d);
+    else await API.createDomain(d);
+    UI.toast('已保存', 'ok');
+    closeModal();
+    load();
+  } catch (e) { UI.toast('保存失败：' + e.message, 'err'); }
+}
+
+async function del(id) {
+  if (!confirm('确认删除该网络域？')) return;
+  try {
+    await API.deleteDomain(id);
+    UI.toast('已删除', 'ok');
+    load();
+  } catch (e) { UI.toast('删除失败：' + e.message, 'err'); }
+}
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

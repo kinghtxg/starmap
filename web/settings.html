@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>系统配置 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56 p-6 max-w-4xl">
+  <header class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-xl font-bold">系统配置</h1>
+      <p class="text-xs text-slate-400 mt-1">GET /api/config · PUT /api/config</p>
+    </div>
+    <div class="flex gap-2">
+      <button onclick="load()" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent">重新加载</button>
+      <button onclick="save()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">保存配置</button>
+    </div>
+  </header>
+  <div id="form" class="space-y-5"></div>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+let config = null;
+
+/* 已知字段元数据：候选 key（兼容大小写/命名差异） */
+const FIELDS = [
+  { keys: ['probe_enabled', 'ProbeEnabled'], label: '主动探测开关', type: 'bool', desc: 'ARP / ICMP / Traceroute 主动探测（默认关闭）', group: '探测' },
+  { keys: ['interfaces', 'Interfaces', 'capture_interfaces'], label: '抓包网卡', type: 'list', desc: '每行一个网卡名，如 eth0', group: '探测' },
+  { keys: ['probe_token', 'ProbeToken'], label: '探针令牌（probe_token）', type: 'text', desc: '远端探针上报 /api/ingest/probe 的鉴权令牌，可留空表示不校验', group: '探测' },
+  { keys: ['aging_seconds', 'AgingSeconds'], label: '链路老化时长（秒）', type: 'number', desc: '边超过该时长无流量则置灰，默认 86400', group: '拓扑引擎' },
+  { keys: ['aggregate_threshold', 'AggregateThreshold'], label: '网段聚合阈值', type: 'number', desc: '同 /24 节点数超过该值聚合为子网节点，默认 20', group: '拓扑引擎' },
+  { keys: ['noise_min_bytes', 'NoiseMinBytes'], label: '降噪字节阈值', type: 'number', desc: '会话字节低于该值不建边', group: '拓扑引擎' },
+  { keys: ['noise_min_packets', 'NoiseMinPackets'], label: '降噪包数阈值', type: 'number', desc: '短会话包数低于该值不建边，默认 4', group: '拓扑引擎' },
+  { keys: ['reverse_proxy_host_threshold', 'ReverseProxyHostThreshold'], label: '反代 Host 数阈值', type: 'number', desc: '单内网 IP 对外映射 Host 数超过该值标记，默认 10', group: '检测规则' },
+  { keys: ['http_listen', 'HTTPListen', 'listen'], label: 'HTTP 监听地址', type: 'text', desc: '如 0.0.0.0:8080', group: '服务' },
+];
+
+function findKey(cfg, keys) {
+  for (const k of keys) if (Object.prototype.hasOwnProperty.call(cfg, k)) return k;
+  return null;
+}
+function inputCls() { return 'w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm'; }
+
+async function load() {
+  const el = document.getElementById('form');
+  el.innerHTML = UI.loadingHTML('正在加载配置…');
+  try {
+    config = await API.getConfig();
+    render();
+  } catch (e) {
+    config = null;
+    el.innerHTML = UI.errorHTML(e);
+  }
+}
+
+function render() {
+  const el = document.getElementById('form');
+  if (!config) return;
+  const groups = {};
+  const knownUsed = new Set();
+  for (const f of FIELDS) {
+    (groups[f.group] = groups[f.group] || []).push(f);
+    const k = findKey(config, f.keys);
+    if (k) knownUsed.add(k);
+  }
+  let html = '';
+  for (const g of Object.keys(groups)) {
+    html += '<section class="bg-card rounded-xl border border-slate-700/60 p-6">' +
+      '<h2 class="font-bold text-accent mb-4">' + g + '</h2><div class="space-y-4">' +
+      groups[g].map(f => fieldHTML(f, findKey(config, f.keys))).join('') +
+      '</div></section>';
+  }
+  // 其余未识别字段：只读展示原始 JSON
+  const rest = {};
+  for (const k of Object.keys(config)) if (!knownUsed.has(k)) rest[k] = config[k];
+  if (Object.keys(rest).length) {
+    html += '<section class="bg-card rounded-xl border border-slate-700/60 p-6">' +
+      '<h2 class="font-bold text-accent mb-3">其他配置项（原始 JSON，可编辑）</h2>' +
+      '<textarea id="cfgExtra" rows="6" class="' + inputCls() + ' font-mono text-xs">' + UI.esc(JSON.stringify(rest, null, 2)) + '</textarea></section>';
+  }
+  el.innerHTML = html;
+}
+
+function fieldHTML(f, key) {
+  const raw = key != null ? config[key] : undefined;
+  const id = 'cfg_' + f.keys[0];
+  const head = '<label class="text-sm block mb-1">' + f.label + '</label>';
+  const desc = '<div class="text-xs text-slate-500 mt-1">' + f.desc + '</div>';
+  if (f.type === 'bool') {
+    const on = raw === true;
+    return '<div>' + head +
+      '<label class="inline-flex items-center gap-2 cursor-pointer">' +
+      '<input type="checkbox" id="' + id + '" data-key="' + (key || f.keys[0]) + '" ' + (on ? 'checked' : '') + ' class="w-4 h-4 accent-sky-400">' +
+      '<span class="text-xs text-slate-400">' + (on ? '已开启' : '已关闭') + '</span></label>' + desc + '</div>';
+  }
+  if (f.type === 'number') {
+    return '<div>' + head + '<input type="number" id="' + id + '" data-key="' + (key || f.keys[0]) + '" value="' + (raw != null ? UI.esc(raw) : '') + '" class="' + inputCls() + '">' + desc + '</div>';
+  }
+  if (f.type === 'list') {
+    const v = Array.isArray(raw) ? raw.join('\n') : (raw || '');
+    return '<div>' + head + '<textarea id="' + id + '" data-key="' + (key || f.keys[0]) + '" rows="3" class="' + inputCls() + ' font-mono text-xs">' + UI.esc(v) + '</textarea>' + desc + '</div>';
+  }
+  return '<div>' + head + '<input id="' + id + '" data-key="' + (key || f.keys[0]) + '" value="' + UI.esc(raw != null ? raw : '') + '" class="' + inputCls() + '">' + desc + '</div>';
+}
+
+async function save() {
+  if (!config) { UI.toast('配置尚未加载', 'err'); return; }
+  const out = Object.assign({}, config);
+  for (const f of FIELDS) {
+    const id = 'cfg_' + f.keys[0];
+    const el = document.getElementById(id);
+    if (!el) continue;
+    const key = el.dataset.key;
+    if (f.type === 'bool') out[key] = el.checked;
+    else if (f.type === 'number') out[key] = el.value === '' ? 0 : Number(el.value);
+    else if (f.type === 'list') out[key] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+    else out[key] = el.value;
+  }
+  const extraEl = document.getElementById('cfgExtra');
+  if (extraEl) {
+    try {
+      const extra = JSON.parse(extraEl.value || '{}');
+      Object.assign(out, extra);
+    } catch (e) { UI.toast('「其他配置项」JSON 格式错误', 'err'); return; }
+  }
+  try {
+    await API.putConfig(out);
+    UI.toast('配置已保存', 'ok');
+    load();
+  } catch (e) { UI.toast('保存失败：' + e.message, 'err'); }
+}
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

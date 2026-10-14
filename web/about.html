@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>关于 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+<style>
+/* 关于页专属：低透明拓扑动画 hero */
+#hero-topo { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .45; }
+@keyframes glow { 0%,100% { text-shadow: 0 0 18px rgba(56,189,248,.5); } 50% { text-shadow: 0 0 34px rgba(56,189,248,.9); } }
+.hero-title { animation: glow 4s ease-in-out infinite; }
+</style>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56">
+  <!-- Hero -->
+  <section class="relative h-[55vh] min-h-[380px] flex items-center justify-center overflow-hidden border-b border-slate-700/60">
+    <canvas id="hero-topo"></canvas>
+    <div class="relative z-10 text-center px-6">
+      <div class="hero-title text-5xl font-black text-accent tracking-[.3em] mb-4">StarMap 星图</div>
+      <div class="text-lg text-body/90 tracking-widest">网内拓扑自动测绘引擎 · V1.0</div>
+      <div class="text-xs text-slate-400 mt-4">被动测绘 · 拓扑生长 · 风险识别 · 审计留痕</div>
+      <div class="mt-8 flex gap-3 justify-center">
+        <a href="index.html" class="px-5 py-2 rounded-lg bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30 text-sm">进入拓扑总览</a>
+        <a href="ingest.html" class="px-5 py-2 rounded-lg bg-card border border-slate-600 hover:border-accent hover:text-accent text-sm">数据接入</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="p-8 max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-5">
+    <section class="bg-card rounded-xl border border-slate-700/60 p-6">
+      <h2 class="font-bold text-accent mb-3">能力</h2>
+      <ul class="text-sm space-y-2 text-slate-300 list-disc list-inside">
+        <li>PCAP 离线导入 / 多网卡实时抓包 / 探针上报</li>
+        <li>拓扑自动生长：节点合并、网段聚合、老化降噪、NAT 修复</li>
+        <li>FRP / Clash / 反代 / 未知出口 / 多网域融合检测</li>
+        <li>事件复核闭环：确认归档、误报加白、暂缓</li>
+        <li>白名单抑制与审计留痕</li>
+      </ul>
+    </section>
+    <section class="bg-card rounded-xl border border-slate-700/60 p-6">
+      <h2 class="font-bold text-accent mb-3">技术栈</h2>
+      <ul class="text-sm space-y-2 text-slate-300 list-disc list-inside">
+        <li>Go 1.22 + Gin</li>
+        <li>gopacket 报文解析（JA3 / JA4 / SNI / Host）</li>
+        <li>modernc.org/sqlite 纯 Go 持久化</li>
+        <li>Tailwind CSS + Cytoscape.js + jsPDF</li>
+      </ul>
+      <div class="mt-4 text-xs text-slate-500">本期不含：登录/RBAC、流量解密、漏洞扫描、IDS。</div>
+    </section>
+    <section class="bg-card rounded-xl border border-slate-700/60 p-6">
+      <h2 class="font-bold text-accent mb-3">项目信息</h2>
+      <div class="text-sm space-y-2.5 text-slate-300">
+        <div class="flex justify-between"><span class="text-slate-400">版本</span><span>V1.0</span></div>
+        <div class="flex justify-between"><span class="text-slate-400">归属</span><span>极客星空实验室</span></div>
+        <div class="flex justify-between"><span class="text-slate-400">许可证</span><span class="text-accent">Apache-2.0</span></div>
+        <div class="flex justify-between"><span class="text-slate-400">服务状态</span><span id="health">检测中…</span></div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+/* Hero 拓扑动画：比全局背景更亮的独立 canvas */
+(function () {
+  const canvas = document.getElementById('hero-topo');
+  const ctx = canvas.getContext('2d');
+  let W, H, nodes = [], pulses = [];
+  const N = 60, LINK = 160;
+  function resize() {
+    W = canvas.width = canvas.offsetWidth;
+    H = canvas.height = canvas.offsetHeight;
+  }
+  function init() {
+    nodes = [];
+    for (let i = 0; i < N; i++) nodes.push({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: (Math.random() - .5) * .4, vy: (Math.random() - .5) * .4,
+      r: Math.random() * 2 + 1,
+      c: ['#38BDF8', '#4ADE80', '#FB923C', '#F87171'][Math.random() * 20 | 0] || '#38BDF8',
+    });
+  }
+  function tick() {
+    ctx.clearRect(0, 0, W, H);
+    for (const n of nodes) {
+      n.x += n.vx; n.y += n.vy;
+      if (n.x < 0 || n.x > W) n.vx *= -1;
+      if (n.y < 0 || n.y > H) n.vy *= -1;
+    }
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+      const a = nodes[i], b = nodes[j];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (d < LINK) {
+        ctx.globalAlpha = (1 - d / LINK) * .35;
+        ctx.strokeStyle = '#38BDF8'; ctx.lineWidth = .7;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        if (Math.random() < .0015) pulses.push({ a, b, t: 0 });
+      }
+    }
+    ctx.globalAlpha = 1;
+    pulses = pulses.filter(p => p.t <= 1);
+    for (const p of pulses) {
+      p.t += .03;
+      const x = p.a.x + (p.b.x - p.a.x) * p.t, y = p.a.y + (p.b.y - p.a.y) * p.t;
+      ctx.fillStyle = '#7DD3FC';
+      ctx.beginPath(); ctx.arc(x, y, 2.2, 0, 7); ctx.fill();
+    }
+    for (const n of nodes) {
+      ctx.fillStyle = n.c;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7); ctx.fill();
+    }
+    requestAnimationFrame(tick);
+  }
+  resize(); init(); tick();
+  addEventListener('resize', () => { resize(); init(); });
+})();
+
+API.health()
+  .then(() => document.getElementById('health').innerHTML = '<span class="text-riskLow">● 在线</span>')
+  .catch(() => document.getElementById('health').innerHTML = '<span class="text-slate-500">○ 未连接</span>');
+</script>
+</body>
+</html>

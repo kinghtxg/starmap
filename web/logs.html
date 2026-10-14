@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审计日志 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56 p-6">
+  <header class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-xl font-bold">审计日志</h1>
+      <p class="text-xs text-slate-400 mt-1">GET /api/audit · 事件复核、白名单变更等全部操作留痕</p>
+    </div>
+    <div class="flex gap-2 items-center">
+      <input id="kw" placeholder="关键字过滤…" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm" oninput="render()">
+      <button onclick="load()" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent">刷新</button>
+    </div>
+  </header>
+  <div id="list" class="bg-card rounded-xl border border-slate-700/60 overflow-hidden"></div>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+let logs = [];
+
+async function load() {
+  const el = document.getElementById('list');
+  el.innerHTML = UI.loadingHTML('正在加载审计日志…');
+  try {
+    const data = await API.audit();
+    logs = Array.isArray(data) ? data : (data && data.Logs) || [];
+    render();
+  } catch (e) {
+    logs = [];
+    el.innerHTML = UI.errorHTML(e);
+  }
+}
+
+function render() {
+  const el = document.getElementById('list');
+  const kw = document.getElementById('kw').value.trim().toLowerCase();
+  const items = kw ? logs.filter(l => JSON.stringify(l).toLowerCase().includes(kw)) : logs;
+  if (!items.length) { el.innerHTML = UI.emptyHTML('暂无审计日志'); return; }
+  el.innerHTML =
+    '<table class="w-full text-sm">' +
+    '<thead><tr class="text-xs text-slate-400 border-b border-slate-700">' +
+    '<th class="text-left px-4 py-3">时间</th><th class="text-left px-4 py-3">操作人</th>' +
+    '<th class="text-left px-4 py-3">动作</th><th class="text-left px-4 py-3">对象</th><th class="text-left px-4 py-3">详情</th></tr></thead>' +
+    '<tbody>' + items.map(l =>
+      '<tr class="border-b border-slate-700/50 hover:bg-slate-700/20">' +
+      '<td class="px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap">' + UI.fmtTime(l.CreatedAt) + '</td>' +
+      '<td class="px-4 py-2.5 text-xs">' + UI.esc(l.Actor || '-') + '</td>' +
+      '<td class="px-4 py-2.5"><span class="text-xs px-2 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">' + UI.esc(l.Action) + '</span></td>' +
+      '<td class="px-4 py-2.5 text-xs font-mono">' + UI.esc(l.Target || '-') + '</td>' +
+      '<td class="px-4 py-2.5 text-xs text-slate-400">' + UI.esc(l.Detail || '-') + '</td>' +
+      '</tr>').join('') + '</tbody></table>';
+}
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

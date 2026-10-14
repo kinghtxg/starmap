@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>白名单 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56 p-6">
+  <header class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-xl font-bold">白名单管理</h1>
+      <p class="text-xs text-slate-400 mt-1">命中白名单的地址/主机/节点不再产生风险事件</p>
+    </div>
+    <button onclick="openModal()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">+ 新增条目</button>
+  </header>
+  <div id="list" class="bg-card rounded-xl border border-slate-700/60 overflow-hidden"></div>
+</div>
+
+<!-- 编辑弹窗 -->
+<div id="modal" class="fixed inset-0 bg-black/60 z-50 hidden flex items-center justify-center" onclick="if(event.target===this)closeModal()">
+  <div class="bg-card rounded-xl border border-slate-700 w-96 p-6 space-y-4">
+    <h2 id="modalTitle" class="font-bold text-accent">新增白名单</h2>
+    <input type="hidden" id="wId">
+    <div>
+      <label class="text-xs text-slate-400 block mb-1">类型</label>
+      <select id="wKind" class="w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm">
+        <option value="cidr">CIDR 网段</option>
+        <option value="ip">IP 地址</option>
+        <option value="host">主机/域名</option>
+        <option value="node">拓扑节点</option>
+      </select>
+    </div>
+    <div>
+      <label class="text-xs text-slate-400 block mb-1">值</label>
+      <input id="wValue" placeholder="如 10.0.0.0/8、192.168.1.1、example.com" class="w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm">
+    </div>
+    <div>
+      <label class="text-xs text-slate-400 block mb-1">备注</label>
+      <input id="wNote" placeholder="可选" class="w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm">
+    </div>
+    <div class="flex gap-2 justify-end">
+      <button onclick="closeModal()" class="px-4 py-1.5 text-sm rounded bg-slate-600/30 text-slate-300 border border-slate-600">取消</button>
+      <button onclick="save()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+const KIND_LABEL = { cidr: 'CIDR 网段', ip: 'IP 地址', host: '主机/域名', node: '拓扑节点' };
+
+async function load() {
+  const el = document.getElementById('list');
+  el.innerHTML = UI.loadingHTML('正在加载白名单…');
+  try {
+    const data = await API.whitelist();
+    const items = Array.isArray(data) ? data : (data && data.Entries) || [];
+    if (!items.length) { el.innerHTML = UI.emptyHTML('白名单为空', '点击右上角「新增条目」添加'); return; }
+    el.innerHTML =
+      '<table class="w-full text-sm">' +
+      '<thead><tr class="text-xs text-slate-400 border-b border-slate-700">' +
+      '<th class="text-left px-4 py-3">类型</th><th class="text-left px-4 py-3">值</th><th class="text-left px-4 py-3">备注</th><th class="text-left px-4 py-3">创建时间</th><th class="px-4 py-3"></th></tr></thead>' +
+      '<tbody>' + items.map(w =>
+        '<tr class="border-b border-slate-700/50 hover:bg-slate-700/20">' +
+        '<td class="px-4 py-2.5"><span class="text-xs px-2 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">' + (KIND_LABEL[w.Kind] || UI.esc(w.Kind)) + '</span></td>' +
+        '<td class="px-4 py-2.5 font-mono text-xs">' + UI.esc(w.Value) + '</td>' +
+        '<td class="px-4 py-2.5 text-slate-400 text-xs">' + UI.esc(w.Note || '-') + '</td>' +
+        '<td class="px-4 py-2.5 text-slate-400 text-xs">' + UI.fmtTime(w.CreatedAt) + '</td>' +
+        '<td class="px-4 py-2.5 text-right whitespace-nowrap">' +
+        '  <button onclick=\'openModal(' + JSON.stringify(w).replace(/'/g, "&#39;") + ')\' class="text-xs text-accent hover:underline mr-3">编辑</button>' +
+        '  <button onclick="del(\'' + UI.esc(w.ID) + '\')" class="text-xs text-riskHigh hover:underline">删除</button>' +
+        '</td></tr>').join('') + '</tbody></table>';
+  } catch (e) {
+    el.innerHTML = UI.errorHTML(e);
+  }
+}
+
+function openModal(w) {
+  document.getElementById('modalTitle').textContent = w ? '编辑白名单' : '新增白名单';
+  document.getElementById('wId').value = w ? w.ID : '';
+  document.getElementById('wKind').value = w ? w.Kind : 'cidr';
+  document.getElementById('wValue').value = w ? w.Value : '';
+  document.getElementById('wNote').value = w ? (w.Note || '') : '';
+  document.getElementById('modal').classList.remove('hidden');
+}
+function closeModal() { document.getElementById('modal').classList.add('hidden'); }
+
+async function save() {
+  const id = document.getElementById('wId').value;
+  const entry = {
+    Kind: document.getElementById('wKind').value,
+    Value: document.getElementById('wValue').value.trim(),
+    Note: document.getElementById('wNote').value.trim(),
+  };
+  if (!entry.Value) { UI.toast('请填写值', 'err'); return; }
+  try {
+    if (id) await API.updateWhitelist(id, entry);
+    else await API.createWhitelist(entry);
+    UI.toast('已保存', 'ok');
+    closeModal();
+    load();
+  } catch (e) { UI.toast('保存失败：' + e.message, 'err'); }
+}
+
+async function del(id) {
+  if (!confirm('确认删除该白名单条目？')) return;
+  try {
+    await API.deleteWhitelist(id);
+    UI.toast('已删除', 'ok');
+    load();
+  } catch (e) { UI.toast('删除失败：' + e.message, 'err'); }
+}
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

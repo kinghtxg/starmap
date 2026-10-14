@@ -1,0 +1,21 @@
+# StarMap 本地运行配置（Windows 开发机）
+# 说明：Windows 保留了 8000-8800 端口段，故改用 18080；仅监听回环，避免裸奔到局域网。
+listen_addr: "127.0.0.1:18080"
+db_path: "starmap.db"
+
+probe_enabled: false
+capture_enabled: false
+capture_interfaces: []
+capture_bpf: ""
+
+aging_seconds: 86400
+aggregate_threshold: 20
+noise_bytes: 400
+noise_packets: 4
+noise_duration_sec: 2
+reverse_proxy_hosts: 10
+long_conn_seconds: 3600
+heartbeat_max_bytes: 64
+
+probe_token: ""
+audit_retention_days: 90

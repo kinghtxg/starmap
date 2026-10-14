@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据接入 · StarMap 星图</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = { theme: { extend: { colors: {
+  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
+  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
+} } } };
+</script>
+</head>
+<body class="bg-base text-body min-h-screen">
+<div class="ml-56 p-6 space-y-5 max-w-5xl">
+  <header>
+    <h1 class="text-xl font-bold">数据接入</h1>
+    <p class="text-xs text-slate-400 mt-1">PCAP 离线导入 · 实时抓包 · 远端探针上报</p>
+  </header>
+
+  <!-- PCAP 上传 -->
+  <section class="bg-card rounded-xl border border-slate-700/60 p-6">
+    <h2 class="font-bold text-accent mb-1">PCAP 文件导入</h2>
+    <p class="text-xs text-slate-400 mb-4">支持 .pcap / .pcapng，上传后解析报文并驱动拓扑生长与风险检测</p>
+    <div id="dropzone" class="border-2 border-dashed border-slate-600 rounded-xl p-10 text-center cursor-pointer hover:border-accent/60 transition-colors">
+      <div class="text-3xl mb-2 opacity-50">⇪</div>
+      <div class="text-sm text-slate-300">点击选择或拖拽 PCAP 文件到此处</div>
+      <div class="text-xs text-slate-500 mt-1">POST /api/ingest/pcap（multipart/form-data）</div>
+      <input type="file" id="fileInput" accept=".pcap,.pcapng,.cap" class="hidden">
+    </div>
+    <div id="upStatus" class="mt-4"></div>
+  </section>
+
+  <!-- 实时抓包状态 -->
+  <section class="bg-card rounded-xl border border-slate-700/60 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="font-bold text-accent">实时抓包状态</h2>
+        <p class="text-xs text-slate-400 mt-1">多网卡 gopacket 实时抓包与主动探测</p>
+      </div>
+      <div class="flex gap-2 items-center">
+        <button onclick="captureCtl('start')" id="btnCapStart" class="px-3 py-1.5 text-xs rounded bg-riskLow/20 text-riskLow border border-riskLow/40 hover:bg-riskLow/30">开始抓包</button>
+        <button onclick="captureCtl('stop')" id="btnCapStop" class="px-3 py-1.5 text-xs rounded bg-riskHigh/20 text-riskHigh border border-riskHigh/40 hover:bg-riskHigh/30">停止抓包</button>
+        <button onclick="loadStatus()" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent">刷新</button>
+      </div>
+    </div>
+    <div id="capStatus"></div>
+    <div class="mt-5 pt-4 border-t border-slate-700/60">
+      <div class="text-xs text-slate-400 mb-2">主动探测（需后端开启探测开关）</div>
+      <div class="flex gap-2">
+        <select id="pbType" class="bg-base border border-slate-600 rounded px-3 py-1.5 text-sm">
+          <option value="arp">ARP 扫描</option>
+          <option value="icmp">ICMP 探测</option>
+          <option value="traceroute">Traceroute</option>
+        </select>
+        <input id="pbTarget" placeholder="目标，如 192.168.1.0/24" class="flex-1 bg-base border border-slate-600 rounded px-3 py-1.5 text-sm">
+        <button onclick="triggerProbe()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">触发</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 探针上报说明 -->
+  <section class="bg-card rounded-xl border border-slate-700/60 p-6">
+    <h2 class="font-bold text-accent mb-1">远端探针上报</h2>
+    <p class="text-xs text-slate-400 mb-4">轻量探针可将解析后的会话流上报至中心端：<code class="text-accent">POST /api/ingest/probe</code></p>
+    <pre class="bg-base/70 rounded-lg p-4 text-xs overflow-x-auto text-slate-300">{
+  "probe_id": "probe-office-01",
+  "flows": [
+    {
+      "src_ip": "192.168.1.10", "dst_ip": "203.0.113.5",
+      "src_port": 52344, "dst_port": 443, "proto": "tcp",
+      "mac": "aa:bb:cc:dd:ee:ff",
+      "bytes_up": 1204, "bytes_down": 98321, "packets": 86,
+      "sni": "example.com", "http_host": "",
+      "ja3": "769,47-53,0-11,...", "ja4": "t13d1516h2_...",
+      "start_ttl": 64,
+      "first_seen": "2025-01-01T08:00:00Z", "last_seen": "2025-01-01T09:30:00Z"
+    }
+  ]
+}</pre>
+  </section>
+</div>
+
+<script src="assets/layout.js"></script>
+<script src="assets/api.js"></script>
+<script>
+const dz = document.getElementById('dropzone');
+const fi = document.getElementById('fileInput');
+dz.onclick = () => fi.click();
+dz.ondragover = e => { e.preventDefault(); dz.classList.add('border-accent'); };
+dz.ondragleave = () => dz.classList.remove('border-accent');
+dz.ondrop = e => { e.preventDefault(); dz.classList.remove('border-accent'); if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+fi.onchange = () => { if (fi.files[0]) upload(fi.files[0]); };
+
+async function upload(file) {
+  const st = document.getElementById('upStatus');
+  st.innerHTML = UI.loadingHTML('正在上传并解析 ' + file.name + '（' + UI.fmtBytes(file.size) + '）…');
+  try {
+    const r = await API.uploadPcap(file);
+    st.innerHTML = '<div class="bg-riskLow/10 border border-riskLow/40 rounded-lg p-4 text-sm text-riskLow">' +
+      '✓ 导入成功：' + UI.esc(file.name) +
+      (r ? '<div class="text-xs text-slate-300 mt-1">' + UI.esc(JSON.stringify(r)) + '</div>' : '') + '</div>';
+    UI.toast('PCAP 导入完成', 'ok');
+  } catch (e) {
+    st.innerHTML = '<div class="bg-riskHigh/10 border border-riskHigh/40 rounded-lg p-4 text-sm text-riskHigh">✗ 导入失败：' + UI.esc(e.message) + '</div>';
+  }
+}
+
+async function loadStatus() {
+  const el = document.getElementById('capStatus');
+  el.innerHTML = UI.loadingHTML('获取状态…');
+  try {
+    // 优先使用独立抓包状态接口（§10.6），回退到 stats 内嵌信息
+    let cs = null;
+    try { cs = await API.captureStatus(); } catch (_) { cs = null; }
+    const [h, s] = await Promise.all([API.health().catch(() => null), API.stats().catch(() => null)]);
+    if (!h && !s && !cs) throw new Error('无法获取服务状态');
+    const capture = cs || ((s && (s.Capture || s.capture)) || {});
+    const running = capture.Running === true || capture.running === true || capture.Status === 'running' || capture.status === 'running';
+    const ifaces = capture.Interfaces || capture.Ifaces || capture.interfaces || [];
+    const pkts = capture.Packets != null ? capture.Packets : (capture.packets != null ? capture.packets : (s && s.PacketCount != null ? s.PacketCount : '-'));
+    const cards = [
+      ['服务健康', h ? '<span class="text-riskLow">● 在线</span>' : '<span class="text-riskHigh">● 异常</span>'],
+      ['抓包状态', running ? '<span class="text-riskLow">● 运行中</span>' : '<span class="text-slate-400">○ 已停止</span>'],
+      ['抓包网卡', ifaces.join('、') || '-'],
+      ['已处理报文', pkts],
+    ];
+    el.innerHTML = '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">' + cards.map(c =>
+      '<div class="bg-base/60 rounded-lg border border-slate-700 px-4 py-3">' +
+      '<div class="text-xs text-slate-400">' + c[0] + '</div>' +
+      '<div class="text-sm mt-1">' + c[1] + '</div></div>').join('') + '</div>';
+    // 按钮态
+    document.getElementById('btnCapStart').disabled = running;
+    document.getElementById('btnCapStop').disabled = !running;
+    document.getElementById('btnCapStart').classList.toggle('opacity-40', running);
+    document.getElementById('btnCapStop').classList.toggle('opacity-40', !running);
+  } catch (e) {
+    el.innerHTML = UI.errorHTML(e);
+  }
+}
+
+let capPollTimer = null;
+function startPolling() {
+  if (capPollTimer) return;
+  capPollTimer = setInterval(() => {
+    if (!document.hidden) loadStatus();
+  }, 5000);
+}
+
+async function captureCtl(op) {
+  const btn = document.getElementById(op === 'start' ? 'btnCapStart' : 'btnCapStop');
+  btn.disabled = true;
+  try {
+    if (op === 'start') await API.captureStart();
+    else await API.captureStop();
+    UI.toast(op === 'start' ? '抓包已启动' : '抓包已停止', 'ok');
+  } catch (e) {
+    UI.toast((op === 'start' ? '启动' : '停止') + '失败：' + e.message, 'err');
+  }
+  loadStatus();
+}
+
+async function triggerProbe() {
+  const type = document.getElementById('pbType').value;
+  const target = document.getElementById('pbTarget').value.trim();
+  if (!target) { UI.toast('请填写探测目标', 'err'); return; }
+  try {
+    await API.triggerProbe(type, target);
+    UI.toast('探测已触发：' + type + ' ' + target, 'ok');
+  } catch (e) { UI.toast('触发失败：' + e.message, 'err'); }
+}
+
+document.addEventListener('DOMContentLoaded', () => { loadStatus(); startPolling(); });
+</script>
+</body>
+</html>

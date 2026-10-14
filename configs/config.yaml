@@ -1,0 +1,17 @@
+# StarMap 星图 V1.0 默认配置
+probe_enabled: false          # 主动探测开关（默认关闭）
+capture_enabled: false        # 网卡实时抓包开关
+capture_interfaces: []        # 抓包网卡列表，如 ["eth0","eth1"]
+capture_bpf: ""               # BPF 过滤表达式
+aging_seconds: 86400          # 边老化时长（秒）
+aggregate_threshold: 20       # /24 网段聚合阈值
+noise_bytes: 400              # 会话降噪字节阈值（§10.3）
+noise_packets: 4              # 会话降噪包数阈值
+noise_duration_sec: 2         # 会话降噪时长阈值（秒）
+reverse_proxy_hosts: 10       # 反代判定 Host 域名数阈值
+long_conn_seconds: 3600       # 长连接判定时长（秒）
+heartbeat_max_bytes: 64       # 心跳包 payload 阈值（字节）
+listen_addr: ":8080"          # HTTP 监听地址
+db_path: "starmap.db"         # SQLite 数据库路径
+probe_token: ""               # 探针上报 token（可选，配置则校验，§10.7）
+audit_retention_days: 90      # 审计日志保留天数（§10.8）
