@@ -104,8 +104,8 @@ function openModal(d) {
       UI.esc(d ? (d.CIDRs || []).join('\n') : '') + '</textarea></div>' +
       '<div class="sm-field"><label>标识颜色</label>' +
       '<div class="sm-form-inline">' +
-      '<input type="color" id="dColor" value="' + UI.escAttr(color) + '" style="width:44px;height:32px;padding:2px;border:1px solid var(--sm-border-strong);border-radius:3px;background:#fff;cursor:pointer">' +
-      '<input class="sm-input sm-mono" id="dColorVal" value="' + UI.escAttr(color) + '" style="width:110px">' +
+      '<input type="color" id="dColor" value="' + UI.escAttr(color) + '" style="width:44px;height:32px;flex:0 0 44px;padding:2px;border:1px solid var(--sm-border-strong);border-radius:3px;background:#fff;cursor:pointer">' +
+      '<input class="sm-input sm-mono sm-w-auto" id="dColorVal" value="' + UI.escAttr(color) + '">' +
       '<span class="sm-hint">用于拓扑节点与网络域卡片着色</span>' +
       '</div></div></div>',
     okText: '保存',

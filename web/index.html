@@ -18,7 +18,7 @@
       </div>
       <div class="sm-toolbar">
         <button class="sm-btn is-warn sm-hide" id="btnBack" data-act="back">返回上级</button>
-        <select class="sm-select is-sm" id="fRisk" style="width:120px" aria-label="风险筛选">
+        <select class="sm-select is-sm sm-w-auto" id="fRisk" aria-label="风险筛选">
           <option value="">全部风险</option>
           <option value="high">仅高风险</option>
           <option value="mid">仅中风险</option>
@@ -39,7 +39,7 @@
       <div class="sm-row sm-anim" style="flex:1;min-height:420px;margin-top:12px" >
         <div id="topo" class="sm-card sm-topo-wrap" style="flex:1;min-width:0"></div>
 
-        <aside class="sm-card sm-hide" id="detailPanel" style="width:330px;flex:0 0 330px;display:flex;flex-direction:column;overflow:hidden">
+        <aside class="sm-card sm-hide" id="detailPanel" style="width:clamp(280px, 24vw, 360px);flex:0 0 clamp(280px, 24vw, 360px);display:flex;flex-direction:column;overflow:hidden">
           <div class="sm-card-hd">
             <div>
               <h2 style="font-size:14px">节点详情</h2>

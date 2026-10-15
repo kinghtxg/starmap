@@ -17,7 +17,7 @@
         <p class="sm-sub">命中白名单的地址 / 主机 / 节点不再产生风险事件</p>
       </div>
       <div class="sm-toolbar">
-        <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="搜索值 / 备注" style="width:190px" data-ico="search"></div>
+        <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="搜索值 / 备注" data-ico="search"></div>
         <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
         <button class="sm-btn is-primary" data-act="create" data-ico="plus">新增条目</button>
       </div>
@@ -90,11 +90,11 @@ function render() {
   var rows = view.slice(start, start + SIZE);
   box.innerHTML =
     '<table class="sm-table"><thead><tr>' +
-    '<th style="width:110px">类型</th>' +
+    '<th style="min-width:100px">类型</th>' +
     '<th>值</th>' +
     '<th>备注</th>' +
-    '<th style="width:160px">创建时间</th>' +
-    '<th style="width:110px" class="sm-td-ops">操作</th>' +
+    '<th style="min-width:150px">创建时间</th>' +
+    '<th style="min-width:96px" class="sm-td-ops">操作</th>' +
     '</tr></thead><tbody>' +
     rows.map(function (w) {
       return '<tr>' +

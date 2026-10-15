@@ -23,7 +23,7 @@
     </header>
 
     <div class="sm-content">
-      <div class="sm-stack" style="max-width:1080px">
+      <div class="sm-stack">
 
         <!-- PCAP 导入 -->
         <section class="sm-card sm-anim" style="--sm-d:0ms">
@@ -62,12 +62,12 @@
             <div class="sm-divider"></div>
             <div class="sm-label" style="margin-bottom:8px">主动探测（需在系统配置中开启「主动探测开关」）</div>
             <div class="sm-form-inline">
-              <select class="sm-select is-sm" id="pbType" style="width:130px">
+              <select class="sm-select is-sm sm-w-auto" id="pbType">
                 <option value="arp">ARP 扫描</option>
                 <option value="icmp">ICMP 探测</option>
                 <option value="traceroute">Traceroute</option>
               </select>
-              <input class="sm-input is-sm" id="pbTarget" placeholder="目标，如 192.168.1.0/24" style="flex:1;min-width:200px">
+              <input class="sm-input is-sm sm-flex-1" id="pbTarget" placeholder="目标，如 192.168.1.0/24" style="min-width:200px">
               <button class="sm-btn is-primary" data-act="probe" data-ico="target">触发探测</button>
             </div>
             <div id="probeResult" style="margin-top:10px"></div>

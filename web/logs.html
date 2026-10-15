@@ -17,7 +17,7 @@
         <p class="sm-sub">GET /api/audit · 事件复核、白名单变更、配置变更等全部操作留痕</p>
       </div>
       <div class="sm-toolbar">
-        <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="关键字过滤…" style="width:200px" data-ico="search"></div>
+        <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="关键字过滤…" data-ico="search"></div>
         <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
       </div>
     </header>
@@ -105,10 +105,10 @@ function render() {
   var rows = view.slice(start, start + SIZE);
   box.innerHTML =
     '<table class="sm-table"><thead><tr>' +
-    '<th style="width:160px">时间</th>' +
-    '<th style="width:110px">操作人</th>' +
-    '<th style="width:130px">动作</th>' +
-    '<th style="width:200px">对象</th>' +
+    '<th style="min-width:160px">时间</th>' +
+    '<th style="min-width:110px">操作人</th>' +
+    '<th style="min-width:120px">动作</th>' +
+    '<th style="min-width:160px">对象</th>' +
     '<th>详情</th>' +
     '</tr></thead><tbody>' +
     rows.map(function (l) {

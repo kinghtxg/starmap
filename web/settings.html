@@ -23,7 +23,7 @@
     </header>
 
     <div class="sm-content">
-      <div class="sm-stack sm-anim" style="max-width:900px" id="form"></div>
+      <div class="sm-stack sm-anim" id="form"></div>
     </div>
   </main>
 </div>
@@ -126,24 +126,24 @@ function fieldHTML(f) {
   }
   if (f.type === 'number') {
     return '<div>' + head +
-      '<input type="number" class="sm-input" id="' + id + '" value="' + UI.escAttr(raw != null ? raw : '') + '" style="max-width:240px">' +
+      '<input type="number" class="sm-input sm-w-auto" id="' + id + '" value="' + UI.escAttr(raw != null ? raw : '') + '">' +
       desc + '</div>';
   }
   if (f.type === 'list') {
     var v = Array.isArray(raw) ? raw.join('\n') : (raw || '');
     return '<div>' + head +
-      '<textarea class="sm-textarea sm-mono" id="' + id + '" rows="3" style="max-width:420px">' + UI.esc(v) + '</textarea>' +
+      '<textarea class="sm-textarea sm-mono" id="' + id + '" rows="3">' + UI.esc(v) + '</textarea>' +
       desc + '</div>';
   }
   if (f.type === 'secret') {
     var set = config.probe_token_set === true;
     return '<div>' + head +
-      '<input type="password" class="sm-input" id="' + id + '" autocomplete="new-password" ' +
-      'placeholder="' + (set ? '已设置，留空表示不修改' : '留空表示不校验') + '" style="max-width:320px">' +
+      '<input type="password" class="sm-input sm-w-auto" id="' + id + '" autocomplete="new-password" ' +
+      'placeholder="' + (set ? '已设置，留空表示不修改' : '留空表示不校验') + '">' +
       desc + '</div>';
   }
   return '<div>' + head +
-    '<input class="sm-input" id="' + id + '" value="' + UI.escAttr(raw != null ? raw : '') + '" style="max-width:420px">' +
+    '<input class="sm-input" id="' + id + '" value="' + UI.escAttr(raw != null ? raw : '') + '">' +
     desc + '</div>';
 }
 

@@ -338,9 +338,13 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
   cursor: pointer;
 }
 .sm-form-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.sm-search { position: relative; min-width: 180px; }
-.sm-search .sm-input { padding-left: 30px; }
+.sm-search { position: relative; min-width: 180px; flex: 1 1 200px; max-width: 100%; }
+.sm-search .sm-input { padding-left: 30px; width: 100%; }
 .sm-search > svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--sm-text-4); pointer-events: none; }
+
+/* 自适应工具类：窄屏收缩、宽屏拉伸，配合 sm-row / sm-toolbar 使用 */
+.sm-flex-1 { flex: 1 1 0; min-width: 0; }
+.sm-w-auto { width: auto; flex: 1 1 0; min-width: 0; }
 
 /* 开关 */
 .sm-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }

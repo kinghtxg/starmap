@@ -17,15 +17,15 @@
         <p class="sm-sub">确认风险 → 归档 · 判定误报 → 自动加白 · 暂缓处置</p>
       </div>
       <div class="sm-toolbar">
-        <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索标题 / 节点" style="width:170px" data-ico="search"></div>
-        <select class="sm-select is-sm" id="fStatus" style="width:118px" aria-label="状态">
+        <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索标题 / 节点" data-ico="search"></div>
+        <select class="sm-select is-sm sm-w-auto" id="fStatus" aria-label="状态">
           <option value="">全部状态</option>
           <option value="pending" selected>待处置</option>
           <option value="confirmed">已确认</option>
           <option value="false_positive">误报</option>
           <option value="deferred">已暂缓</option>
         </select>
-        <select class="sm-select is-sm" id="fType" style="width:126px" aria-label="类型">
+        <select class="sm-select is-sm sm-w-auto" id="fType" aria-label="类型">
           <option value="">全部类型</option>
           <option value="frp">FRP 隧道</option>
           <option value="clash">Clash/V2Ray</option>
@@ -145,18 +145,18 @@ function render() {
 
   box.innerHTML =
     '<table class="sm-table"><thead><tr>' +
-    '<th style="width:90px">风险</th>' +
+    '<th style="min-width:76px">风险</th>' +
     '<th>标题</th>' +
-    '<th style="width:110px">类型</th>' +
-    '<th style="width:150px">关联节点</th>' +
-    '<th style="width:92px">状态</th>' +
-    '<th style="width:150px">发现时间</th>' +
-    '<th style="width:88px" class="sm-td-ops">操作</th>' +
+    '<th style="min-width:96px">类型</th>' +
+    '<th style="min-width:130px">关联节点</th>' +
+    '<th style="min-width:80px">状态</th>' +
+    '<th style="min-width:150px">发现时间</th>' +
+    '<th style="min-width:76px" class="sm-td-ops">操作</th>' +
     '</tr></thead><tbody>' +
     rows.map(function (ev) {
       return '<tr>' +
         '<td>' + UI.riskTag(ev.Level) + '</td>' +
-        '<td><div class="sm-ellipsis" style="max-width:420px" title="' + UI.escAttr(ev.Title) + '">' + UI.esc(ev.Title) + '</div></td>' +
+        '<td><div class="sm-ellipsis" title="' + UI.escAttr(ev.Title) + '">' + UI.esc(ev.Title) + '</div></td>' +
         '<td class="sm-t-2" style="font-size:12px">' + UI.esc(typeLabel(ev.Type)) + '</td>' +
         '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(ev.NodeAPID || ev.NodeID) + '</span></td>' +
         '<td>' + statusBadge(ev.Status) + '</td>' +
@@ -195,7 +195,7 @@ function openDrawer(id) {
     '<div class="sm-label" style="margin-bottom:10px">操作留痕</div>' + timeline(ev);
 
   document.getElementById('drawerFt').innerHTML =
-    '<input class="sm-input is-sm" id="rvReviewer" placeholder="操作人" style="width:110px">' +
+    '<input class="sm-input is-sm sm-w-auto" id="rvReviewer" placeholder="操作人" style="min-width:100px">' +
     '<input class="sm-input is-sm" id="rvNote" placeholder="处置备注（必填）" style="flex:1">' +
     '<button class="sm-btn is-danger" data-act="review" data-v="confirm">确认归档</button>' +
     '<button class="sm-btn is-warn" data-act="review" data-v="false_positive">误报加白</button>' +
