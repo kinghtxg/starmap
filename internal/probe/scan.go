@@ -163,28 +163,74 @@ func (s *Scanner) pingHosts(ips []string, concurrency int) {
 	wg.Wait()
 }
 
-// icmpPing ICMP 探测：系统 ping 兜底（无原始套接字权限也可工作）。
+// pingSweep 并发 ping 网段，返回存活主机 IP 列表（每个目标 1 包，快速扫描）。
+func (s *Scanner) pingSweep(ips []string, concurrency int) []string {
+	if concurrency <= 0 {
+		concurrency = 32
+	}
+	args := pingArgs(1, 1)
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var alive []string
+	for _, ip := range ips {
+		ip := ip
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out, _ := s.run("ping", append(append([]string{}, args...), ip)...)
+			if isPingAlive(out) {
+				mu.Lock()
+				alive = append(alive, ip)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return alive
+}
+
+// icmpPing ICMP 探测：系统 ping 兜底。支持单 IP / 主机名 / CIDR 网段。
 func (s *Scanner) icmpPing(target string, res *Result) error {
 	target = strings.TrimSpace(target)
-	if ip := net.ParseIP(target); ip == nil {
-		// 允许主机名
-		if _, err := net.LookupHost(target); err != nil {
-			return fmt.Errorf("目标 %q 无法解析", target)
-		}
-	}
 	if _, err := s.lookPath("ping"); err != nil {
 		res.Degraded = true
 		return fmt.Errorf("环境无 ping 命令且无原始套接字权限，ICMP 探测不可用: %w", err)
 	}
-	args := append(pingArgs(3, 2), target)
-	out, err := s.run("ping", args...)
-	res.Raw = out
+
+	// 展开目标：单 IP / CIDR 网段
+	ips, err := expandTarget(target, 254)
 	if err != nil {
-		return fmt.Errorf("ping 失败（目标不可达或权限不足）: %v", err)
+		// 非 IP/CIDR：尝试主机名
+		if _, lerr := net.LookupHost(target); lerr != nil {
+			return fmt.Errorf("目标 %q 无法解析", target)
+		}
+		ips = []string{target}
 	}
-	// 有回包即存活（跨平台：ttl=/bytes from/reply from/来自）
-	if isPingAlive(out) {
-		res.Hosts = append(res.Hosts, HostHit{IP: target})
+
+	// 单目标：3 包探测，保留 Raw
+	if len(ips) == 1 {
+		args := append(pingArgs(3, 2), ips[0])
+		out, err := s.run("ping", args...)
+		res.Raw = out
+		if err != nil {
+			return fmt.Errorf("ping 失败（目标不可达或权限不足）: %v", err)
+		}
+		if isPingAlive(out) {
+			res.Hosts = append(res.Hosts, HostHit{IP: ips[0]})
+		}
+		return nil
+	}
+
+	// 网段：并发 ping 扫描（每个目标 1 包）
+	alive := s.pingSweep(ips, 32)
+	for _, ip := range alive {
+		res.Hosts = append(res.Hosts, HostHit{IP: ip})
+	}
+	if len(alive) == 0 {
+		res.Message = "网段内无存活主机（或 ICMP 被防火墙拦截）"
 	}
 	return nil
 }

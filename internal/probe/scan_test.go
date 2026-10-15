@@ -74,6 +74,28 @@ func TestTriggerICMPUnreachable(t *testing.T) {
 	}
 }
 
+func TestICMPPingCIDR(t *testing.T) {
+	// 修复：ICMP 探测支持 CIDR 网段（此前 /24 报"无法解析"）
+	s, _ := newTestScanner()
+	s.SetEnabled(true)
+	s.lookPath = func(string) (string, error) { return "/bin/ping", nil }
+	s.run = func(name string, args ...string) (string, error) {
+		// 最后一个参数是目标 IP
+		ip := args[len(args)-1]
+		if ip == "192.168.1.1" || ip == "192.168.1.2" {
+			return "64 bytes from " + ip + ": ttl=64", nil
+		}
+		return "Request timed out.", nil
+	}
+	res, err := s.Trigger("icmp", "192.168.1.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hosts) != 2 {
+		t.Fatalf("网段扫描应发现 2 台存活主机，实际 %d: %+v", len(res.Hosts), res.Hosts)
+	}
+}
+
 func TestTriggerNoPingGraceful(t *testing.T) {
 	s, _ := newTestScanner()
 	s.SetEnabled(true)
