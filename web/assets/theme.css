@@ -413,6 +413,13 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
 .sm-stat.is-high .sm-stat-ico { background: var(--sm-danger-bg); color: var(--sm-danger); }
 .sm-stat.is-warn .sm-stat-ico { background: var(--sm-warning-bg); color: var(--sm-warning); }
 .sm-stat.is-ok .sm-stat-ico { background: var(--sm-success-bg); color: var(--sm-success); }
+.sm-stat.is-off .sm-stat-ico { background: var(--sm-bg-disabled); color: var(--sm-text-3); }
+
+/* Tab 切换条（V1.2 资产库） */
+.sm-tabbar { display: inline-flex; padding: 3px; gap: 2px; background: var(--sm-bg-alt); border: 1px solid var(--sm-border); border-radius: var(--sm-r-md); }
+.sm-tab { border: 0; background: transparent; color: var(--sm-text-2); font-size: 13px; padding: 6px 16px; border-radius: var(--sm-r-sm); cursor: pointer; transition: all var(--sm-t) var(--sm-ease); }
+.sm-tab:hover { color: var(--sm-text-1); }
+.sm-tab.is-active { background: var(--sm-bg); color: var(--sm-brand-2); font-weight: 600; box-shadow: var(--sm-shadow-1); }
 .sm-stat-val { font-size: 22px; font-weight: 700; line-height: 1.15; font-family: var(--sm-mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
 .sm-stat-key { font-size: var(--sm-font-sm); color: var(--sm-text-3); margin-top: 2px; }
 .sm-stat-extra { font-size: var(--sm-font-xs); color: var(--sm-text-3); margin-top: 4px; }

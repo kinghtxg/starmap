@@ -41,7 +41,9 @@
     node: 'M12 3v6m0 0-4 4m4-4 4 4M5 21h14a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2z',
     link: 'M9 15l6-6M10 6l1-1a4 4 0 0 1 6 6l-1 1M14 18l-1 1a4 4 0 0 1-6-6l1-1',
     warn: 'M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
-    inbox: 'M3 12h5l1.5 3h5L16 12h5M3 12l2.5-7h13L21 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z'
+    inbox: 'M3 12h5l1.5 3h5L16 12h5M3 12l2.5-7h13L21 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z',
+    asset: 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm2 4h2v2H7V7zm4 0h2v2h-2V7zM7 12h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z',
+    port: 'M12 4a8 8 0 0 0-8 8v1M4 13v2m0 0v3a1 1 0 0 0 1 1h1m0 0h12m0 0h1a1 1 0 0 0 1-1v-3m-2 0v-2a8 8 0 0 0-8-8'
   };
 
   function ico(name, cls) {
@@ -426,6 +428,7 @@
   /* ---------- 统一导航 ---------- */
   var NAV = [
     { href: 'index.html', label: '拓扑总览', icon: 'topo', group: '测绘' },
+    { href: 'assets.html', label: '主机资产', icon: 'asset', group: '测绘' },
     { href: 'events.html', label: '风险事件', icon: 'alert', group: '测绘' },
     { href: 'whitelist.html', label: '白名单', icon: 'shield', group: '测绘' },
     { href: 'domains.html', label: '网络域', icon: 'domain', group: '测绘' },

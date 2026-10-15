@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -124,6 +126,19 @@ func main() {
 			}
 		}
 	}()
+	// 账外资产离线清理（V1.2）：未归档主机离线超阈值 → 自动从拓扑与资产库删除（10 分钟一次）
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				cleanupOfflineAssets(st, engine, cfg)
+			}
+		}
+	}()
 	// 周期性：会话 → 拓扑 → 检测
 	go func() {
 		t := time.NewTicker(2 * time.Second)
@@ -204,6 +219,37 @@ func main() {
 		log.Printf("[topology] 退出前拓扑落盘失败: %v", err)
 	}
 	log.Println("已退出")
+}
+
+// cleanupOfflineAssets 账外资产离线清理（V1.2）：
+// 未归档主机 last_seen 超过 unarchived_offline_hours（默认 72h）→ 从拓扑与资产库删除。
+// 归档主机仅动态标记离线（不删除），保留在资产台账。
+func cleanupOfflineAssets(st *store.Store, eng *topology.Engine, cfg model.SystemConfig) {
+	if cfg.UnarchivedOfflineHours <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-time.Duration(cfg.UnarchivedOfflineHours) * time.Hour)
+	assets, err := st.ListAssets(model.AssetUnarchived)
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, a := range assets {
+		if a.LastSeen.After(cutoff) {
+			continue
+		}
+		eng.RemoveNodeByKey(a.NodeKey)
+		_ = st.DeleteAsset(a.NodeKey)
+		_, _ = st.DeletePortsByKey(a.NodeKey)
+		_, _ = st.AddAuditLog(&model.AuditLog{
+			Actor: "system", Action: "asset_offline_cleanup", Target: a.NodeKey,
+			Detail: fmt.Sprintf("账外资产离线超 %d 小时，自动清理（IP: %s）", cfg.UnarchivedOfflineHours, strings.Join(a.IPs, ",")),
+		})
+		removed++
+	}
+	if removed > 0 {
+		log.Printf("[assets] 清理 %d 台离线账外资产", removed)
+	}
 }
 
 // mergeRuntimeConfig 运行时保存的配置覆盖文件配置。

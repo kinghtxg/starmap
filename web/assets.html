@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>主机资产 · StarMap 星图</title>
+<link rel="stylesheet" href="assets/theme.css">
+</head>
+<body>
+<div class="sm-app">
+  <aside class="sm-sider" id="smSider"></aside>
+
+  <main class="sm-main">
+    <header class="sm-topbar">
+      <div class="sm-topbar-l">
+        <h1 class="sm-h1">主机资产</h1>
+        <p class="sm-sub">网络资产管理 · 账外资产发现 · 端口记录（流量 + 主动扫描双来源）</p>
+      </div>
+      <div class="sm-toolbar">
+        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+      </div>
+    </header>
+
+    <div class="sm-content">
+      <div class="sm-grid sm-grid-4 sm-anim" id="statsBar"></div>
+
+      <div class="sm-tabbar sm-anim" style="margin-top:14px">
+        <button class="sm-tab is-active" data-tab="assets">主机资产</button>
+        <button class="sm-tab" data-tab="ports">端口记录</button>
+      </div>
+
+      <!-- 主机资产 -->
+      <section id="tab-assets" class="sm-card sm-anim" style="margin-top:12px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+        <div class="sm-card-hd">
+          <div class="sm-row is-center" style="gap:10px">
+            <h2>资产清单</h2>
+            <span class="sm-badge" id="cntBadge">0 台</span>
+          </div>
+          <div class="sm-toolbar">
+            <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索 IP / MAC / 归属" data-ico="search"></div>
+            <select class="sm-select is-sm sm-w-auto" id="fStatus" aria-label="状态筛选">
+              <option value="">全部</option>
+              <option value="unarchived">账外资产</option>
+              <option value="archived">已纳管</option>
+            </select>
+          </div>
+        </div>
+        <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+          <div class="sm-table-wrap">
+            <table class="sm-table" id="assetTable"></table>
+          </div>
+        </div>
+        <div class="sm-card-ft" id="assetPager"></div>
+      </section>
+
+      <!-- 端口记录 -->
+      <section id="tab-ports" class="sm-card sm-anim sm-hide" style="margin-top:12px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+        <div class="sm-card-hd">
+          <div class="sm-row is-center" style="gap:10px">
+            <h2>端口记录</h2>
+            <span class="sm-badge" id="portCnt">0 条</span>
+          </div>
+          <div class="sm-toolbar">
+            <div class="sm-search"><input class="sm-input is-sm" id="pIp" placeholder="按 IP 过滤" data-ico="search"></div>
+            <button class="sm-btn is-primary" data-act="scan" data-ico="target">主动扫描</button>
+          </div>
+        </div>
+        <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+          <div class="sm-table-wrap">
+            <table class="sm-table" id="portTable"></table>
+          </div>
+        </div>
+        <div class="sm-card-ft" id="portPager"></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
+<script>
+'use strict';
+
+var assets = [];
+var ports = [];
+var curTab = 'assets';
+
+/* ---------- Tab 切换 ---------- */
+function switchTab(t) {
+  curTab = t;
+  document.querySelectorAll('.sm-tab').forEach(function (b) { b.classList.toggle('is-active', b.getAttribute('data-tab') === t); });
+  document.getElementById('tab-assets').classList.toggle('sm-hide', t !== 'assets');
+  document.getElementById('tab-ports').classList.toggle('sm-hide', t !== 'ports');
+}
+
+/* ---------- 统计 ---------- */
+function renderStats() {
+  return API.assetStats().then(function (st) {
+    st = st || {};
+    var items = [
+      { k: '资产总数', v: st.total || 0, i: 'asset', ex: '已纳管 ' + (st.archived || 0) + ' 台' },
+      { k: '账外资产', v: st.unarchived || 0, i: 'warn', cls: st.unarchived ? 'is-warn' : 'is-ok', ex: '系统自动发现、未登记台账' },
+      { k: '在线主机', v: st.online || 0, i: 'node', cls: 'is-ok', ex: '最近活跃' },
+      { k: '离线主机', v: st.offline || 0, i: 'clock', cls: 'is-off', ex: '超时未发现' }
+    ];
+    var host = document.getElementById('statsBar');
+    host.innerHTML = items.map(function (it) {
+      return '<div class="sm-stat ' + (it.cls || '') + '">' +
+        '<div class="sm-stat-ico">' + UI.ico(it.i) + '</div>' +
+        '<div style="min-width:0">' +
+        '<div class="sm-stat-val" data-v="' + it.v + '">0</div>' +
+        '<div class="sm-stat-key">' + it.k + '</div>' +
+        (it.ex ? '<div class="sm-stat-extra">' + UI.esc(it.ex) + '</div>' : '') +
+        '</div></div>';
+    }).join('');
+    host.querySelectorAll('.sm-stat-val').forEach(function (el) { UI.countTo(el, Number(el.getAttribute('data-v')) || 0); });
+  }).catch(function () {});
+}
+
+/* ---------- 主机资产 ---------- */
+function statusBadge(a) {
+  if (a.status === 'archived') return '<span class="sm-badge is-brand">已纳管</span>';
+  return '<span class="sm-badge is-warning">账外</span>';
+}
+function onlineDot(on) {
+  return on
+    ? '<span class="sm-dot is-on"></span> 在线'
+    : '<span class="sm-dot is-off"></span> 离线';
+}
+
+function renderAssets() {
+  var kw = (document.getElementById('fKw').value || '').toLowerCase();
+  var st = document.getElementById('fStatus').value;
+  var list = assets.filter(function (a) {
+    if (st && a.status !== st) return false;
+    if (kw) {
+      var hay = (a.ips || []).join(' ') + ' ' + (a.mac || '') + ' ' + (a.owner || '') + ' ' + (a.department || '') + ' ' + (a.hostname || '');
+      if (hay.toLowerCase().indexOf(kw) < 0) return false;
+    }
+    return true;
+  });
+  document.getElementById('cntBadge').textContent = list.length + ' 台';
+  var box = document.getElementById('assetTable');
+  if (!list.length) {
+    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="9">' + UI.emptyHTML('暂无资产', '导入 PCAP 或启动抓包后，系统自动发现主机并登记为账外资产') + '</td></tr></tbody>';
+    document.getElementById('assetPager').innerHTML = '';
+    return;
+  }
+  var html = '<thead><tr>' +
+    '<th>IP 地址</th><th>MAC</th><th>主机名 / 系统</th><th>归属单位</th><th>归属人</th>' +
+    '<th style="min-width:80px">状态</th><th style="min-width:90px">在线</th><th style="min-width:150px">最后发现</th>' +
+    '<th style="min-width:140px" class="sm-td-ops">操作</th></tr></thead><tbody>';
+  html += list.map(function (a) {
+    var ips = (a.ips && a.ips.length) ? a.ips.map(function (i) { return '<div class="sm-mono" style="font-size:12px">' + UI.esc(i) + '</div>'; }).join('') : '-';
+    var os = a.os ? '<span class="sm-chip">' + UI.esc(a.os) + '</span>' : '';
+    var hn = a.hostname ? '<div style="font-size:12px">' + UI.esc(a.hostname) + '</div>' : '';
+    var ops = a.status === 'archived'
+      ? '<button class="sm-btn is-text is-sm" data-act="edit" data-key="' + UI.escAttr(a.node_key) + '">编辑</button>' +
+        '<button class="sm-btn is-text is-sm is-danger" data-act="del" data-key="' + UI.escAttr(a.node_key) + '">删除</button>'
+      : '<button class="sm-btn is-text is-sm is-primary" data-act="archive" data-key="' + UI.escAttr(a.node_key) + '" data-ip="' + UI.escAttr((a.ips && a.ips[0]) || '') + '">归档登记</button>' +
+        '<button class="sm-btn is-text is-sm is-danger" data-act="del" data-key="' + UI.escAttr(a.node_key) + '">删除</button>';
+    return '<tr>' +
+      '<td>' + ips + '</td>' +
+      '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(a.mac || '-') + '</span></td>' +
+      '<td>' + hn + os + '</td>' +
+      '<td>' + UI.esc(a.department || '-') + '</td>' +
+      '<td>' + UI.esc(a.owner || '-') + '</td>' +
+      '<td>' + statusBadge(a) + '</td>' +
+      '<td>' + onlineDot(a.online) + '</td>' +
+      '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtAgo(a.last_seen)) + '</td>' +
+      '<td class="sm-td-ops">' + ops + '</td></tr>';
+  }).join('');
+  html += '</tbody>';
+  box.innerHTML = html;
+}
+
+/* ---------- 归档 / 编辑弹窗 ---------- */
+function assetForm(a) {
+  var isEdit = a && a.status === 'archived';
+  return UI.modal({
+    title: isEdit ? '编辑资产信息' : '归档登记 · 纳入资产台账',
+    width: 520,
+    body:
+      '<div class="sm-stack">' +
+      '<div class="sm-alert is-info"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+      '<div class="sm-alert-body">' + (isEdit ? '维护资产台账信息' : '将账外资产登记入台账，补充归属信息。') + '<br>' +
+      '<span class="sm-mono" style="font-size:12px">' + UI.esc((a.ips || []).join(', ') || a.node_key) + '</span></div></div>' +
+      '<div class="sm-row is-center" style="gap:10px">' +
+      '<div class="sm-field sm-flex-1"><label>归属单位</label><input class="sm-input" id="fDept" value="' + UI.escAttr(a.department || '') + '"></div>' +
+      '<div class="sm-field sm-flex-1"><label>归属人</label><input class="sm-input" id="fOwner" value="' + UI.escAttr(a.owner || '') + '"></div></div>' +
+      '<div class="sm-row is-center" style="gap:10px">' +
+      '<div class="sm-field sm-flex-1"><label>主机名</label><input class="sm-input" id="fHost" value="' + UI.escAttr(a.hostname || '') + '"></div>' +
+      '<div class="sm-field sm-flex-1"><label>主机系统</label><input class="sm-input" id="fOS" placeholder="如 Windows Server 2022" value="' + UI.escAttr(a.os || '') + '"></div></div>' +
+      '<div class="sm-field"><label>物理位置</label><input class="sm-input" id="fLoc" placeholder="如 3F 机房 A 机柜" value="' + UI.escAttr(a.location || '') + '"></div>' +
+      '<div class="sm-field"><label>备注</label><textarea class="sm-textarea" id="fDesc" rows="2">' + UI.esc(a.description || '') + '</textarea></div>' +
+      '</div>',
+    okText: isEdit ? '保存' : '归档',
+    onOk: function (m) {
+      var payload = {
+        department: m.body.querySelector('#fDept').value.trim(),
+        owner: m.body.querySelector('#fOwner').value.trim(),
+        hostname: m.body.querySelector('#fHost').value.trim(),
+        os: m.body.querySelector('#fOS').value.trim(),
+        location: m.body.querySelector('#fLoc').value.trim(),
+        description: m.body.querySelector('#fDesc').value.trim()
+      };
+      var p = isEdit ? API.updateAsset(a.node_key, payload) : API.archiveAsset(Object.assign({ node_key: a.node_key }, payload));
+      return p.then(function () { UI.toast(isEdit ? '已保存' : '已归档登记', 'ok'); loadAll(); });
+    }
+  });
+}
+
+/* ---------- 端口记录 ---------- */
+var SRC_LABEL = { traffic: '流量', probe: '扫描', arp: 'ARP' };
+function renderPorts() {
+  var kw = (document.getElementById('pIp').value || '').toLowerCase();
+  var list = ports.filter(function (p) { return !kw || (p.ip || '').indexOf(kw) >= 0; });
+  document.getElementById('portCnt').textContent = list.length + ' 条';
+  var box = document.getElementById('portTable');
+  if (!list.length) {
+    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="6">' + UI.emptyHTML('暂无端口记录', '从流量自动提取，或点击「主动扫描」用 nmap 扫描全端口') + '</td></tr></tbody>';
+    document.getElementById('portPager').innerHTML = '';
+    return;
+  }
+  var html = '<thead><tr>' +
+    '<th>IP 地址</th><th style="min-width:80px">端口</th><th style="min-width:80px">协议</th>' +
+    '<th>服务</th><th style="min-width:90px">来源</th><th style="min-width:150px">最后发现</th></tr></thead><tbody>';
+  html += list.map(function (p) {
+    return '<tr>' +
+      '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(p.ip) + '</span></td>' +
+      '<td><span class="sm-mono" style="font-weight:600">' + p.port + '</span></td>' +
+      '<td>' + UI.esc(p.proto.toUpperCase()) + '</td>' +
+      '<td>' + (p.service ? '<span class="sm-chip">' + UI.esc(p.service) + '</span>' : '-') + '</td>' +
+      '<td><span class="sm-badge">' + UI.esc(SRC_LABEL[p.source] || p.source) + '</span></td>' +
+      '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtAgo(p.last_seen)) + '</td></tr>';
+  }).join('');
+  html += '</tbody>';
+  box.innerHTML = html;
+}
+
+/* ---------- 主动扫描 ---------- */
+function scanModal() {
+  UI.modal({
+    title: '主动端口扫描（nmap）',
+    width: 480,
+    body:
+      '<div class="sm-stack">' +
+      '<div class="sm-alert is-info"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+      '<div class="sm-alert-body">调用系统 nmap 扫描目标开放端口（默认全端口 1-65535，可在系统配置调整）。全端口扫描耗时较长，后台异步执行。</div></div>' +
+      '<div class="sm-field"><label>扫描目标（IP 或网段）</label>' +
+      '<input class="sm-input" id="sTarget" placeholder="如 192.168.31.0/24"></div>' +
+      '<div id="sStatus" style="font-size:12px"></div>' +
+      '</div>',
+    okText: '开始扫描',
+    hideCancel: true,
+    onOk: function (m) {
+      var target = m.body.querySelector('#sTarget').value.trim();
+      if (!target) { UI.toast('请填写扫描目标', 'err'); return false; }
+      return API.scanPorts(target).then(function (r) {
+        UI.toast('扫描任务已启动', 'ok');
+        pollScan(r.task_id, m.body.querySelector('#sStatus'), m);
+        return false; // 不关闭弹窗，轮询展示进度
+      });
+    }
+  });
+}
+function pollScan(id, host, m) {
+  host.innerHTML = UI.loadingHTML('正在扫描（全端口，可能需要数分钟）…');
+  var timer = setInterval(function () {
+    API.scanPortsStatus(id).then(function (t) {
+      if (t.status === 'running') {
+        host.innerHTML = UI.loadingHTML('扫描中… 目标 ' + UI.esc(t.target));
+      } else if (t.status === 'done') {
+        clearInterval(timer);
+        host.innerHTML = '<div class="sm-alert is-ok"><span class="sm-alert-ico">' + UI.ico('check') + '</span><div class="sm-alert-body">扫描完成，发现 ' + t.found + ' 个开放端口</div></div>';
+        UI.toast('扫描完成，发现 ' + t.found + ' 个端口', 'ok');
+        setTimeout(function () { m.close(); }, 1200);
+        loadAll();
+      } else {
+        clearInterval(timer);
+        host.innerHTML = '<div class="sm-alert is-danger"><span class="sm-alert-ico">' + UI.ico('warn') + '</span><div class="sm-alert-body">' + UI.esc(t.error || '扫描失败') + '</div></div>';
+      }
+    }).catch(function (e) { clearInterval(timer); host.innerHTML = UI.errorHTML(e); });
+  }, 3000);
+}
+
+/* ---------- 加载 ---------- */
+function loadAssets() {
+  return API.assets().then(function (d) { assets = d || []; renderAssets(); }).catch(function (e) { UI.toast(e.message, 'err'); });
+}
+function loadPorts() {
+  return API.ports().then(function (d) { ports = d || []; renderPorts(); }).catch(function (e) { UI.toast(e.message, 'err'); });
+}
+function loadAll() {
+  renderStats();
+  loadAssets();
+  loadPorts();
+}
+
+/* ---------- 事件绑定 ---------- */
+UI.on('refresh', loadAll);
+UI.on('archive', function (el) { assetForm({ node_key: el.getAttribute('data-key'), ips: [el.getAttribute('data-ip')], status: 'unarchived' }); });
+UI.on('edit', function (el) {
+  var a = assets.find(function (x) { return x.node_key === el.getAttribute('data-key'); });
+  if (a) assetForm(a);
+});
+UI.on('del', function (el) {
+  var key = el.getAttribute('data-key');
+  UI.confirm({ title: '删除资产', content: '确定删除该资产吗？将同时清除其端口记录。', okText: '删除' })
+    .then(function (ok) { if (ok) API.deleteAsset(key).then(function () { UI.toast('已删除', 'ok'); loadAll(); }); });
+});
+UI.on('scan', scanModal);
+
+document.getElementById('fKw').addEventListener('input', renderAssets);
+document.getElementById('fStatus').addEventListener('change', renderAssets);
+document.getElementById('pIp').addEventListener('input', renderPorts);
+document.querySelectorAll('.sm-tab').forEach(function (b) {
+  b.addEventListener('click', function () { switchTab(b.getAttribute('data-tab')); });
+});
+
+document.addEventListener('DOMContentLoaded', loadAll);
+</script>
+</body>
+</html>

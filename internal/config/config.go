@@ -31,6 +31,12 @@ func Default() model.SystemConfig {
 		ProbeToken:         "", // §10.7：默认不校验
 		AuditRetentionDays: 90, // §10.8：审计日志保留 90 天
 		Auth:               auth.Default(),
+		// 主机资产库（V1.2）
+		UnarchivedOfflineHours: 72,          // 未归档主机离线 72h 自动清理
+		ArchiveOfflineSeconds:  600,         // 归档主机 last_seen 超 10min 判离线
+		NmapPath:               "",          // 默认 "nmap"，空则运行时按 "nmap" 探测
+		ScanPorts:              "1-65535",   // 主动扫描默认全端口
+		ScanRate:               "T4",        // 扫描速率
 	}
 }
 
@@ -70,6 +76,21 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.CorsOrigins != nil {
 		cfg.CorsOrigins = fileCfg.CorsOrigins
+	}
+	if fileCfg.UnarchivedOfflineHours != 0 {
+		cfg.UnarchivedOfflineHours = fileCfg.UnarchivedOfflineHours
+	}
+	if fileCfg.ArchiveOfflineSeconds != 0 {
+		cfg.ArchiveOfflineSeconds = fileCfg.ArchiveOfflineSeconds
+	}
+	if fileCfg.NmapPath != "" {
+		cfg.NmapPath = fileCfg.NmapPath
+	}
+	if fileCfg.ScanPorts != "" {
+		cfg.ScanPorts = fileCfg.ScanPorts
+	}
+	if fileCfg.ScanRate != "" {
+		cfg.ScanRate = fileCfg.ScanRate
 	}
 	if fileCfg.AgingSeconds != 0 {
 		cfg.AgingSeconds = fileCfg.AgingSeconds

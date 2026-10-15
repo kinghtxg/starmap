@@ -188,6 +188,47 @@ func TestClashNoTrigger(t *testing.T) {
 	}
 }
 
+func TestClashHighDistinct(t *testing.T) {
+	// 陌生目的 /24 数 ≥ 20 → 升级 high
+	d, eng, _ := newTestDetector(t, fullCfg())
+	var ss []*model.Session
+	for i := 0; i < 24; i++ {
+		// 24 个不同的公网 /24
+		s := bigSession("192.168.1.10", fmt.Sprintf("198.%d.%d.9", i, i), "aa:bb:cc:20:00:03", uint16(6200+i), base)
+		s.SNI = fmt.Sprintf("x9q8w7e6r5t4z%d.com", i) // 随机主标签（≥10 字符高熵）
+		ss = append(ss, s)
+	}
+	setSessions(d, eng, ss...)
+	created, _ := d.Evaluate()
+	found := false
+	for _, ev := range created {
+		if ev.Type == model.EventTypeClash {
+			found = true
+			if ev.Level != model.RiskHigh {
+				t.Fatalf("陌生目的 ≥20 应升级 high，实际 %s", ev.Level)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("应产生 clash high 事件")
+	}
+}
+
+func TestLooksRandomSNI(t *testing.T) {
+	if !looksRandomSNI("x9q8w7e6r5t4z3y2x1w0v.com") {
+		t.Fatal("高熵随机主标签应判定为随机 SNI")
+	}
+	if looksRandomSNI("www.example.com") {
+		t.Fatal("正常域名不应判定为随机 SNI")
+	}
+	if looksRandomSNI("short.com") {
+		t.Fatal("短标签不应判定为随机 SNI")
+	}
+	if looksRandomSNI("") {
+		t.Fatal("空 SNI 不应判定")
+	}
+}
+
 // ---------- 反代 ----------
 
 func rpSessions(n int) []*model.Session {

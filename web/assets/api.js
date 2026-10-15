@@ -74,6 +74,21 @@
     getConfig: () => req('GET', '/api/config'),
     putConfig: (cfg) => req('PUT', '/api/config', cfg),
     audit: () => req('GET', '/api/audit'),
+    // 主机资产库 + 端口记录（V1.2）
+    assets: (status) => req('GET', '/api/assets' + (status ? '?status=' + encodeURIComponent(status) : '')),
+    assetStats: () => req('GET', '/api/assets/stats'),
+    archiveAsset: (payload) => req('POST', '/api/assets/archive', payload),
+    updateAsset: (key, payload) => req('PUT', '/api/assets/' + encodeURIComponent(key), payload),
+    deleteAsset: (key) => req('DELETE', '/api/assets/' + encodeURIComponent(key)),
+    ports: (params = {}) => {
+      const qs = new URLSearchParams();
+      if (params.ip) qs.set('ip', params.ip);
+      if (params.node_key) qs.set('node_key', params.node_key);
+      const s = qs.toString();
+      return req('GET', '/api/ports' + (s ? '?' + s : ''));
+    },
+    scanPorts: (target) => req('POST', '/api/ports/scan', { target }),
+    scanPortsStatus: (id) => req('GET', '/api/ports/scan/' + encodeURIComponent(id)),
   };
 
   global.API = API;

@@ -198,4 +198,67 @@ type SystemConfig struct {
 	CorsOrigins []string `json:"cors_origins" yaml:"cors_origins"`
 	// 可选账号系统 / APSSO SSO 门卫，默认 mode=none 即不启用（合规裁定 K1，见 docs/AUTH-APSSO.md）。
 	Auth auth.Config `json:"auth" yaml:"auth"`
+	// 未归档主机离线自动清理阈值（小时，默认 72）。0 表示不清理。
+	UnarchivedOfflineHours int `json:"unarchived_offline_hours" yaml:"unarchived_offline_hours"`
+	// 归档主机离线判定阈值（秒，默认 600）。last_seen 超该值即标记 offline。
+	ArchiveOfflineSeconds int64 `json:"archive_offline_seconds" yaml:"archive_offline_seconds"`
+	// nmap 可执行文件路径（主动端口扫描，默认 "nmap"）。留空或不可用则禁用。
+	NmapPath string `json:"-" yaml:"nmap_path"`
+	// 主动端口扫描的端口范围（nmap -p 参数），默认 "1-65535"（全端口）。后台可配。
+	ScanPorts string `json:"scan_ports" yaml:"scan_ports"`
+	// 扫描速率模板（nmap -T0~-T5），默认 "T4"。
+	ScanRate string `json:"scan_rate" yaml:"scan_rate"`
+}
+
+// ---------- 主机资产库（V1.2） ----------
+
+// 资产状态
+const (
+	AssetUnarchived = "unarchived" // 未归档（系统自动发现，尚未人工登记）
+	AssetArchived   = "archived"   // 已归档（已登记归属单位/人/系统等）
+)
+
+// Asset 主机资产：通过 NodeKey 关联拓扑节点。
+type Asset struct {
+	ID          int64     `json:"id"`
+	NodeKey     string    `json:"node_key"`
+	IPs         []string  `json:"ips"`
+	MAC         string    `json:"mac"`
+	Hostname    string    `json:"hostname"`
+	OS          string    `json:"os"` // 主机系统（如 Windows Server 2022 / Ubuntu 22.04）
+	Status      string    `json:"status"` // unarchived | archived
+	Owner       string    `json:"owner"`        // 归属人
+	Department  string    `json:"department"`   // 归属单位
+	Location    string    `json:"location"`     // 物理位置
+	Description string    `json:"description"`  // 备注
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	Online      bool      `json:"online"` // 是否在线（last_seen 在阈值内）
+	ArchivedAt  time.Time `json:"archived_at,omitempty"`
+	ArchivedBy  string    `json:"archived_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// ---------- 端口记录（V1.2） ----------
+
+// 端口记录来源
+const (
+	PortSourceTraffic = "traffic" // 从流量会话五元组提取
+	PortSourceProbe   = "probe"   // 主动探测（nmap）
+	PortSourceARP     = "arp"     // ARP 探测（无端口，占位保留）
+)
+
+// PortRecord 主机端口记录。
+type PortRecord struct {
+	ID        int64     `json:"id"`
+	NodeKey   string    `json:"node_key"`
+	IP        string    `json:"ip"`
+	Port      int       `json:"port"`
+	Proto     string    `json:"proto"`  // tcp | udp
+	Service   string    `json:"service"` // 服务名（nmap 识别）
+	State     string    `json:"state"`  // open | closed | filtered
+	Source    string    `json:"source"` // traffic | probe | arp
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
 }

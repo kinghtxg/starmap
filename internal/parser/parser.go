@@ -31,6 +31,15 @@ type PacketInfo struct {
 	Payload   []byte // 传输层载荷
 	Length    int    // 报文总长度
 	TCPFlags  uint8  // SYN/ACK/FIN/RST 等（layers.TCP 标志位组合）
+
+	// 预解析会话元数据（探针上报已带 SNI/JA3/JA4 等，无需再从 Payload 反解）。
+	// 修复：探针 flows 合成报文时此前丢弃这些字段，导致 frp/clash/reverse_proxy 规则失效。
+	SNI                 string
+	HTTPHost            string
+	JA3                 string
+	JA4                 string
+	IsLongConn          bool
+	HeartbeatIntervalMs int64
 }
 
 // ParsePacket 从 gopacket.Packet 提取 PacketInfo；非 IP/TCP/UDP 报文返回 nil。
@@ -331,13 +340,37 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 		ses.BytesDown += int64(p.Length)
 	}
 
+	// 预解析元数据直接采用（探针上报，优先级高于 Payload 反解）
+	if p.SNI != "" {
+		ses.SNI = p.SNI
+		st.helloDone = true
+	}
+	if p.HTTPHost != "" {
+		ses.HTTPHost = p.HTTPHost
+		st.hostDone = true
+	}
+	if p.JA3 != "" {
+		ses.JA3 = p.JA3
+		st.helloDone = true
+	}
+	if p.JA4 != "" {
+		ses.JA4 = p.JA4
+		st.helloDone = true
+	}
+	if p.IsLongConn {
+		ses.IsLongConn = true
+	}
+	if p.HeartbeatIntervalMs > 0 {
+		ses.HeartbeatIntervalMs = p.HeartbeatIntervalMs
+	}
+
 	// 关闭判定：FIN 或 RST
 	if p.TCPFlags&0x01 != 0 || p.TCPFlags&0x04 != 0 {
 		ses.Closed = true
 	}
 
-	// 心跳特征采样：仅记录小载荷包
-	if p.Length > 0 && p.Length <= a.HeartbeatMaxBytes {
+	// 心跳特征采样：仅记录小载荷包（预解析心跳已带值则不再采样）
+	if ses.HeartbeatIntervalMs == 0 && p.Length > 0 && p.Length <= a.HeartbeatMaxBytes {
 		if !st.lastTs.IsZero() {
 			st.packetGaps = append(st.packetGaps, p.Timestamp.Sub(st.lastTs).Milliseconds())
 		}
@@ -345,7 +378,7 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 		st.lastTs = p.Timestamp
 	}
 
-	// TLS ClientHello：仅在 TCP 且未解析过时尝试
+	// TLS ClientHello：仅在 TCP 且未解析过时尝试（预解析元数据优先）
 	if p.Proto == "tcp" && !st.helloDone && len(p.Payload) > 5 && p.Payload[0] == 0x16 {
 		if ch := ParseClientHello(p.Payload); ch != nil {
 			st.helloDone = true

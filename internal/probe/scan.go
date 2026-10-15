@@ -1,6 +1,9 @@
 // Package probe 主动探测：ARP / ICMP / Traceroute（SPEC §4 默认关闭，配置开关）。
-// 容器内无原始套接字权限时优雅降级：优先系统命令（ping/traceroute/arp 表），
-// 全部不可用时返回带说明的错误，绝不 panic。
+// 跨平台实现：
+//   - Linux：ping/traceroute 命令 + /proc/net/arp；
+//   - Windows：ping/tracert 命令 + `arp -a`。
+//
+// 无命令/无权限时优雅降级，绝不 panic。
 package probe
 
 import (
@@ -10,13 +13,18 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"starmap/internal/topology"
 )
+
+// goos 当前操作系统（包级变量，测试可覆盖以验证平台分支）。
+var goos = runtime.GOOS
 
 // ErrDisabled 探测开关未开启
 var ErrDisabled = errors.New("主动探测未启用（请在配置中开启 probe_enabled）")
@@ -59,9 +67,7 @@ func New(eng *topology.Engine) *Scanner {
 		NowFunc:  time.Now,
 		lookPath: exec.LookPath,
 		run: func(name string, args ...string) (string, error) {
-			ctx, cancel := exec.Command(name, args...), func() {}
-			_ = cancel
-			out, err := ctx.CombinedOutput()
+			out, err := exec.Command(name, args...).CombinedOutput()
 			return string(out), err
 		},
 	}
@@ -105,24 +111,22 @@ func (s *Scanner) Trigger(kind, target string) (*Result, error) {
 	return res, err
 }
 
-// arpScan ARP 探测：优先 arping；无权限/无命令时降级为"ping 触发 + 读 ARP 表"。
-// target 可为单 IP 或 /24 CIDR（CIDR 时限制最多扫 254 台）。
+// arpScan ARP 探测：先并发 ping 触发 ARP 解析，再读系统 ARP 表。
+// target 可为单 IP 或 /24 等 CIDR（最多 254 个主机地址）。
 func (s *Scanner) arpScan(target string, res *Result) error {
 	ips, err := expandTarget(target, 254)
 	if err != nil {
 		return err
 	}
-	// 触发 ARP 解析：先 ping 一遍（尽力而为）
+	// 触发 ARP 解析：并发 ping 一遍（尽力而为）
 	if _, err := s.lookPath("ping"); err == nil {
-		for _, ip := range ips {
-			_, _ = s.run("ping", "-c", "1", "-W", "1", ip)
-		}
+		s.pingHosts(ips, 32)
 	} else {
 		res.Degraded = true
 		res.Message = "系统无 ping 命令，仅读取现有 ARP 表"
 	}
-	// 读取系统 ARP 表（/proc/net/arp 无需特权）
-	table := readARPTable()
+	// 读取系统 ARP 表（跨平台）
+	table := s.readARPTable()
 	want := map[string]bool{}
 	for _, ip := range ips {
 		want[ip] = true
@@ -138,10 +142,31 @@ func (s *Scanner) arpScan(target string, res *Result) error {
 	return nil
 }
 
+// pingHosts 并发 ping 目标（限制并发数，避免 /24 扫描串行过慢）。
+func (s *Scanner) pingHosts(ips []string, concurrency int) {
+	if concurrency <= 0 {
+		concurrency = 32
+	}
+	args := pingArgs(1, 1)
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for _, ip := range ips {
+		ip := ip
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			_, _ = s.run("ping", append(append([]string{}, args...), ip)...)
+		}()
+	}
+	wg.Wait()
+}
+
 // icmpPing ICMP 探测：系统 ping 兜底（无原始套接字权限也可工作）。
 func (s *Scanner) icmpPing(target string, res *Result) error {
-	ip := net.ParseIP(strings.TrimSpace(target))
-	if ip == nil {
+	target = strings.TrimSpace(target)
+	if ip := net.ParseIP(target); ip == nil {
 		// 允许主机名
 		if _, err := net.LookupHost(target); err != nil {
 			return fmt.Errorf("目标 %q 无法解析", target)
@@ -151,21 +176,32 @@ func (s *Scanner) icmpPing(target string, res *Result) error {
 		res.Degraded = true
 		return fmt.Errorf("环境无 ping 命令且无原始套接字权限，ICMP 探测不可用: %w", err)
 	}
-	out, err := s.run("ping", "-c", "3", "-W", "2", target)
+	args := append(pingArgs(3, 2), target)
+	out, err := s.run("ping", args...)
 	res.Raw = out
 	if err != nil {
 		return fmt.Errorf("ping 失败（目标不可达或权限不足）: %v", err)
 	}
-	// 有回包即存活
-	if strings.Contains(out, "bytes from") || strings.Contains(out, "ttl=") || strings.Contains(out, "TTL=") {
+	// 有回包即存活（跨平台：ttl=/bytes from/reply from/来自）
+	if isPingAlive(out) {
 		res.Hosts = append(res.Hosts, HostHit{IP: target})
 	}
 	return nil
 }
 
-// traceroute 路由跟踪：优先系统 traceroute（UDP 兜底 -U），无命令时降级为
-// "ping -R（记录路由）"或直接报错说明。
+// traceroute 路由跟踪：Linux 用 traceroute，Windows 用 tracert；均失败时降级。
 func (s *Scanner) traceroute(target string, res *Result) error {
+	if goos == "windows" {
+		if _, err := s.lookPath("tracert"); err == nil {
+			out, err := s.run("tracert", "-d", "-h", "15", "-w", "1000", target)
+			res.Raw = out
+			res.Hosts = parseTracertWindows(out)
+			return err
+		}
+		res.Degraded = true
+		return errors.New("环境无 tracert 命令，路由跟踪不可用")
+	}
+
 	if _, err := s.lookPath("traceroute"); err == nil {
 		out, err := s.run("traceroute", "-n", "-U", "-w", "1", "-m", "15", target) // UDP 模式兜底
 		res.Raw = out
@@ -196,42 +232,35 @@ func (s *Scanner) traceroute(target string, res *Result) error {
 	return errors.New("环境无 traceroute/ping 命令，路由跟踪不可用")
 }
 
-// expandTarget 展开目标：单 IP 或 CIDR（限制数量）。
-func expandTarget(target string, limit int) ([]string, error) {
-	target = strings.TrimSpace(target)
-	if ip := net.ParseIP(target); ip != nil {
-		return []string{target}, nil
+// pingArgs 构造 ping 参数（count 个包，timeoutSec 秒超时，跨平台）。
+func pingArgs(count, timeoutSec int) []string {
+	if goos == "windows" {
+		return []string{"-n", strconv.Itoa(count), "-w", strconv.Itoa(timeoutSec * 1000)}
 	}
-	_, ipnet, err := net.ParseCIDR(target)
-	if err != nil {
-		return nil, fmt.Errorf("非法目标 %q：需为 IP 或 CIDR", target)
-	}
-	var ips []string
-	ip := ipnet.IP.Mask(ipnet.Mask)
-	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
-		ips = append(ips, ip.String())
-		if len(ips) > limit+1 {
-			return nil, fmt.Errorf("目标网段过大（超过 %d 地址），拒绝扫描", limit)
-		}
-	}
-	// 去掉网络地址与广播地址
-	if len(ips) > 2 {
-		ips = ips[1 : len(ips)-1]
-	}
-	return ips, nil
+	return []string{"-c", strconv.Itoa(count), "-W", strconv.Itoa(timeoutSec)}
 }
 
-func incIP(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
+// isPingAlive 判断 ping 输出是否表明目标存活（跨平台关键字）。
+func isPingAlive(out string) bool {
+	lower := strings.ToLower(out)
+	for _, kw := range []string{"ttl=", "bytes from", "reply from", "来自"} {
+		if strings.Contains(lower, kw) {
+			return true
 		}
 	}
+	return false
 }
 
-// readARPTable 读取 /proc/net/arp（无需特权）。
-func readARPTable() map[string]string {
+// readARPTable 读取系统 ARP 表（跨平台）。
+func (s *Scanner) readARPTable() map[string]string {
+	if goos == "windows" {
+		return s.readARPTableWindows()
+	}
+	return readARPTableLinux()
+}
+
+// readARPTableLinux 读 /proc/net/arp（无需特权）。
+func readARPTableLinux() map[string]string {
 	out := map[string]string{}
 	f, err := os.Open("/proc/net/arp")
 	if err != nil {
@@ -253,7 +282,122 @@ func readARPTable() map[string]string {
 	return out
 }
 
-// parseTraceroute 解析 traceroute -n 输出中的跳数与 IP。
+// readARPTableWindows 执行 `arp -a` 并解析（IP 行首、MAC 用 `-` 分隔）。
+func (s *Scanner) readARPTableWindows() map[string]string {
+	out := map[string]string{}
+	raw, err := s.run("arp", "-a")
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		ip := net.ParseIP(fields[0])
+		if ip == nil {
+			continue
+		}
+		for _, f := range fields[1:] {
+			if !isMACWindows(f) {
+				continue
+			}
+			mac := normalizeMAC(f)
+			// 过滤广播/全零 MAC（非真实主机）
+			if mac == "ff:ff:ff:ff:ff:ff" || mac == "00:00:00:00:00:00" {
+				break
+			}
+			out[ip.String()] = mac
+			break
+		}
+	}
+	return out
+}
+
+// isMACWindows 判断形如 00-11-22-33-44-55 的 Windows MAC 表示。
+func isMACWindows(s string) bool {
+	if len(s) != 17 || !strings.Contains(s, "-") {
+		return false
+	}
+	for i, c := range s {
+		if i%3 == 2 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeMAC 把 Windows 的 `-` 分隔 MAC 归一化为 `:` 分隔（与 Linux 表一致）。
+func normalizeMAC(s string) string { return strings.ReplaceAll(s, "-", ":") }
+
+// expandTarget 展开目标：单 IP 或 IPv4 CIDR。
+// limit 为「可用主机地址数」上限（去网络号与广播号后）。修复 P1-3：
+// /24（254 主机）应允许，超大网段（如 /8）拒绝。
+func expandTarget(target string, limit int) ([]string, error) {
+	target = strings.TrimSpace(target)
+	if ip := net.ParseIP(target); ip != nil {
+		return []string{target}, nil
+	}
+	_, ipnet, err := net.ParseCIDR(target)
+	if err != nil {
+		return nil, fmt.Errorf("非法目标 %q：需为 IP 或 CIDR", target)
+	}
+	if ipnet.IP.To4() == nil {
+		return nil, fmt.Errorf("仅支持 IPv4 网段目标（IPv6 请指定单 IP）")
+	}
+
+	ones, bits := ipnet.Mask.Size()
+	hostBits := bits - ones
+
+	// 可用主机数：/31、/32 为点对点，无网络号/广播号概念
+	hostCount := int64(1) << uint(hostBits)
+	first := 0
+	if hostBits >= 2 {
+		hostCount -= 2
+		first = 1
+	}
+	if hostCount > int64(limit) {
+		return nil, fmt.Errorf("目标网段过大（%d 个可用主机地址，超过上限 %d），拒绝扫描", hostCount, limit)
+	}
+
+	// 展开可用主机地址（跳过网络号，止于广播号之前）
+	ip := append(net.IP(nil), ipnet.IP.Mask(ipnet.Mask)...)
+	addN(ip, uint32(first))
+	ips := make([]string, 0, hostCount)
+	for i := int64(0); i < hostCount; i++ {
+		ips = append(ips, ip.String())
+		addN(ip, 1)
+	}
+	return ips, nil
+}
+
+// addN 对 IPv4 地址做大端无符号递增。
+func addN(ip net.IP, n uint32) {
+	v4 := ip.To4()
+	if len(v4) != 4 {
+		return
+	}
+	v := uint32(v4[0])<<24 | uint32(v4[1])<<16 | uint32(v4[2])<<8 | uint32(v4[3])
+	v += n
+	v4[0] = byte(v >> 24)
+	v4[1] = byte(v >> 16)
+	v4[2] = byte(v >> 8)
+	v4[3] = byte(v)
+}
+
+func incIP(ip net.IP) { addN(ip, 1) }
+
+// parseTraceroute 解析 Linux traceroute -n 输出中的跳数与 IP。
 func parseTraceroute(out string) []HostHit {
 	var hits []HostHit
 	for _, line := range strings.Split(out, "\n") {
@@ -273,6 +417,30 @@ func parseTraceroute(out string) []HostHit {
 				hits = append(hits, HostHit{IP: f, Hop: hop})
 				break
 			}
+		}
+	}
+	return hits
+}
+
+// parseTracertWindows 解析 Windows tracert -d 输出（行首跳数、行尾 IP）。
+func parseTracertWindows(out string) []HostHit {
+	var hits []HostHit
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		hop, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		last := fields[len(fields)-1]
+		if net.ParseIP(last) != nil {
+			hits = append(hits, HostHit{IP: last, Hop: hop})
 		}
 	}
 	return hits

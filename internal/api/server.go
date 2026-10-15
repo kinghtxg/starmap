@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -60,13 +61,29 @@ type Server struct {
 	packetsTotal   int64 // 全部来源累计报文
 	savedSessions  map[string]bool
 	ingestInFlight int32
+
+	// 端口扫描任务（V1.2）
+	scanMu    sync.Mutex
+	scanTasks map[string]*scanTask
+	scanSeq   int64
+}
+
+// scanTask 主动端口扫描任务状态。
+type scanTask struct {
+	ID      string    `json:"id"`
+	Target  string    `json:"target"`
+	Status  string    `json:"status"` // running | done | error
+	Found   int       `json:"found"`
+	Error   string    `json:"error,omitempty"`
+	Started time.Time `json:"started"`
+	Done    time.Time `json:"done,omitempty"`
 }
 
 // NewRouter 构建 Gin 引擎与全部路由。
 func NewRouter(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	s := &Server{d: d, savedSessions: map[string]bool{}}
+	s := &Server{d: d, savedSessions: map[string]bool{}, scanTasks: map[string]*scanTask{}}
 	if s.d.Version == "" {
 		s.d.Version = "V1.0"
 	}
@@ -101,6 +118,15 @@ func NewRouter(d Deps) *gin.Engine {
 		api.POST("/capture/start", s.captureStart)
 		api.POST("/capture/stop", s.captureStop)
 		api.GET("/capture/status", s.captureStatus)
+		// 主机资产库 + 端口记录（V1.2）
+		api.GET("/assets", s.listAssets)
+		api.GET("/assets/stats", s.assetStats)
+		api.POST("/assets/archive", s.archiveAsset)
+		api.PUT("/assets/:key", s.updateAsset)
+		api.DELETE("/assets/:key", s.deleteAsset)
+		api.GET("/ports", s.listPorts)
+		api.POST("/ports/scan", s.scanPorts)
+		api.GET("/ports/scan/:id", s.scanPortsStatus)
 	}
 
 	// 静态资源（embed.FS 单二进制分发）
@@ -152,6 +178,15 @@ func allowedOrigin(origin string, allow []string) bool {
 // authPlaceholder 已废弃：认证由 internal/auth.Middleware 承担（默认 mode=none）。
 func authPlaceholder() gin.HandlerFunc {
 	return func(c *gin.Context) { c.Next() }
+}
+
+// actor P0-4：审计日志 Actor 由硬编码 "api" 改为可追溯来源。
+// 已启用账号系统时取登录身份，否则取客户端 IP。
+func (s *Server) actor(c *gin.Context) string {
+	if sub := auth.Subject(c); sub != "" {
+		return sub
+	}
+	return c.ClientIP()
 }
 
 // probeTokenMiddleware §10.7：配置 probe_token 则校验（header X-Probe-Token 或 JSON token 字段）。
@@ -555,7 +590,7 @@ func (s *Server) createWhitelist(c *gin.Context) {
 		return
 	}
 	w.ID = id
-	s.d.Reviewer.Audit("api", "whitelist_create", w.Kind+":"+w.Value, body.Note)
+	s.d.Reviewer.Audit(s.actor(c), "whitelist_create", w.Kind+":"+w.Value, body.Note)
 	// 已有 pending 事件命中 → 自动 false_positive（§5）
 	suppressed, _ := s.d.Reviewer.SuppressByWhitelist(*w, "api")
 	c.JSON(http.StatusCreated, gin.H{"Entry": toWhitelistJSON(w), "Suppressed": suppressed})
@@ -581,7 +616,7 @@ func (s *Server) updateWhitelist(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.d.Reviewer.Audit("api", "whitelist_update", w.Kind+":"+w.Value, body.Note)
+	s.d.Reviewer.Audit(s.actor(c), "whitelist_update", w.Kind+":"+w.Value, body.Note)
 	suppressed, _ := s.d.Reviewer.SuppressByWhitelist(*w, "api")
 	c.JSON(http.StatusOK, gin.H{"Entry": toWhitelistJSON(w), "Suppressed": suppressed})
 }
@@ -596,7 +631,7 @@ func (s *Server) deleteWhitelist(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.d.Reviewer.Audit("api", "whitelist_delete", strconv.FormatInt(id, 10), "")
+	s.d.Reviewer.Audit(s.actor(c), "whitelist_delete", strconv.FormatInt(id, 10), "")
 	c.Status(http.StatusNoContent)
 }
 
@@ -655,7 +690,7 @@ func (s *Server) createDomain(c *gin.Context) {
 	}
 	d.ID = id
 	s.refreshDomains()
-	s.d.Reviewer.Audit("api", "domain_create", d.Name, strings.Join(d.CIDRs, ","))
+	s.d.Reviewer.Audit(s.actor(c), "domain_create", d.Name, strings.Join(d.CIDRs, ","))
 	c.JSON(http.StatusCreated, toDomainJSON(d))
 }
 
@@ -676,7 +711,7 @@ func (s *Server) updateDomain(c *gin.Context) {
 		return
 	}
 	s.refreshDomains() // 修改 CIDR 后节点 Domain 归属随之更新
-	s.d.Reviewer.Audit("api", "domain_update", d.Name, strings.Join(d.CIDRs, ","))
+	s.d.Reviewer.Audit(s.actor(c), "domain_update", d.Name, strings.Join(d.CIDRs, ","))
 	c.JSON(http.StatusOK, toDomainJSON(d))
 }
 
@@ -691,7 +726,7 @@ func (s *Server) deleteDomain(c *gin.Context) {
 		return
 	}
 	s.refreshDomains()
-	s.d.Reviewer.Audit("api", "domain_delete", strconv.FormatInt(id, 10), "")
+	s.d.Reviewer.Audit(s.actor(c), "domain_delete", strconv.FormatInt(id, 10), "")
 	c.Status(http.StatusNoContent)
 }
 
@@ -780,7 +815,7 @@ func (s *Server) ingestProbe(c *gin.Context) {
 
 	sessions := s.syncTopology()
 	events := s.evaluateAsync()
-	s.d.Reviewer.Audit("api", "ingest_probe", report.ProbeID,
+	s.d.Reviewer.Audit(s.actor(c), "ingest_probe", report.ProbeID,
 		"accepted="+strconv.Itoa(accepted))
 	c.JSON(http.StatusOK, gin.H{
 		"accepted":   accepted,
@@ -840,6 +875,13 @@ func (f *probeFlow) toPackets(baseTs time.Time) (*parser.PacketInfo, *parser.Pac
 			DstPort:   dstPort,
 			Proto:     proto,
 			Length:    int(length),
+			// 预解析会话元数据直接贯通（修复探针 TLS 指纹丢失）
+			SNI:                 f.SNI,
+			HTTPHost:            f.HTTPHost,
+			JA3:                 f.JA3,
+			JA4:                 f.JA4,
+			IsLongConn:          f.IsLongConn,
+			HeartbeatIntervalMs: f.HeartbeatIntervalMs,
 		}
 	}
 	upLen := f.BytesUp
@@ -900,7 +942,7 @@ func (s *Server) ingestPCAP(c *gin.Context) {
 	sessions := s.syncTopology()
 	events := s.evaluateAsync()
 
-	s.d.Reviewer.Audit("api", "ingest_pcap", fh.Filename,
+	s.d.Reviewer.Audit(s.actor(c), "ingest_pcap", fh.Filename,
 		"packets="+strconv.FormatInt(packets, 10)+" sessions="+strconv.Itoa(sessions))
 	c.JSON(http.StatusOK, gin.H{
 		"filename":    fh.Filename,
@@ -931,6 +973,10 @@ func (s *Server) syncTopology() int {
 			_, _ = s.d.Store.SaveSession(ses)
 		}
 	}
+	// 流量角度：提取内网主机端口（V1.2）
+	s.extractPortsFromSessions(sessions)
+	// 节点 → 资产同步（账外资产自动登记，V1.2）
+	s.syncAssets()
 	return len(sessions)
 }
 
@@ -995,7 +1041,7 @@ func (s *Server) captureStart(c *gin.Context) {
 		}
 	}()
 	_ = ctx
-	s.d.Reviewer.Audit("api", "capture_start", strings.Join(ifaces, ","), "")
+	s.d.Reviewer.Audit(s.actor(c), "capture_start", strings.Join(ifaces, ","), "")
 	c.JSON(http.StatusOK, gin.H{"Running": true, "Interfaces": ifaces})
 }
 
@@ -1008,7 +1054,7 @@ func (s *Server) captureStop(c *gin.Context) {
 	s.capRunning = false
 	s.capCancel = nil
 	s.mu.Unlock()
-	s.d.Reviewer.Audit("api", "capture_stop", "", "")
+	s.d.Reviewer.Audit(s.actor(c), "capture_stop", "", "")
 	c.JSON(http.StatusOK, gin.H{"Running": false, "was_running": running})
 }
 
@@ -1043,7 +1089,7 @@ func (s *Server) triggerProbe(c *gin.Context) {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.d.Reviewer.Audit("api", "probe_trigger", body.Type, body.Target)
+	s.d.Reviewer.Audit(s.actor(c), "probe_trigger", body.Type, body.Target)
 	// 探测执行但部分失败（如降级路径）仍返回结果 + 说明
 	c.JSON(http.StatusOK, res)
 }
@@ -1079,6 +1125,10 @@ func configToMap(cfg *model.SystemConfig) gin.H {
 		"db_path":                      cfg.DBPath,
 		"probe_token_set":              cfg.ProbeToken != "", // 不回显明文
 		"audit_retention_days":         cfg.AuditRetentionDays,
+		"unarchived_offline_hours":     cfg.UnarchivedOfflineHours,
+		"archive_offline_seconds":      cfg.ArchiveOfflineSeconds,
+		"scan_ports":                   cfg.ScanPorts,
+		"scan_rate":                    cfg.ScanRate,
 	}
 }
 
@@ -1194,6 +1244,18 @@ func (s *Server) putConfig(c *gin.Context) {
 	if v, ok := numFrom(m, "audit_retention_days"); ok && v > 0 {
 		cfg.AuditRetentionDays = int(v)
 	}
+	if v, ok := numFrom(m, "unarchived_offline_hours"); ok && v >= 0 {
+		cfg.UnarchivedOfflineHours = int(v)
+	}
+	if v, ok := numFrom(m, "archive_offline_seconds"); ok && v > 0 {
+		cfg.ArchiveOfflineSeconds = int64(v)
+	}
+	if v, ok := strFrom(m, "scan_ports"); ok && v != "" {
+		cfg.ScanPorts = v
+	}
+	if v, ok := strFrom(m, "scan_rate"); ok && v != "" {
+		cfg.ScanRate = v
+	}
 
 	// 联动拓扑引擎与检测器
 	s.d.Engine.UpdateConfig(*cfg)
@@ -1204,7 +1266,7 @@ func (s *Server) putConfig(c *gin.Context) {
 			return
 		}
 	}
-	s.d.Reviewer.Audit("api", "config_update", "system_config", "")
+	s.d.Reviewer.Audit(s.actor(c), "config_update", "system_config", "")
 	c.JSON(http.StatusOK, configToMap(cfg))
 }
 
@@ -1275,4 +1337,312 @@ func (s *Server) staticHandler(c *gin.Context) {
 		ctype = "image/svg+xml"
 	}
 	c.Data(http.StatusOK, ctype, data)
+}
+
+// ---------- 主机资产库（V1.2） ----------
+
+// syncAssets 把拓扑引擎节点同步为资产（未登记的自动成为"账外资产"）。
+// 仅同步内网主机节点，跳过 ext: 外部聚合节点。
+func (s *Server) syncAssets() {
+	if s.d.Engine == nil || s.d.Store == nil {
+		return
+	}
+	snap := s.d.Engine.Snapshot()
+	now := time.Now()
+	for i := range snap.Nodes {
+		n := &snap.Nodes[i]
+		if n.NodeKey == "" || strings.HasPrefix(n.NodeKey, "ext:") {
+			continue
+		}
+		existing, err := s.d.Store.AssetByKey(n.NodeKey)
+		if err != nil {
+			continue
+		}
+		if existing == nil {
+			// 新发现主机 → 登记为账外资产（未归档）
+			a := &model.Asset{
+				NodeKey:   n.NodeKey,
+				IPs:       n.IPs,
+				MAC:       n.MAC,
+				Status:    model.AssetUnarchived,
+				FirstSeen: n.FirstSeen,
+				LastSeen:  n.LastSeen,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			_, _ = s.d.Store.UpsertAsset(a)
+		} else {
+			// 已存在 → 刷新 IP/MAC/last_seen
+			existing.IPs = n.IPs
+			existing.MAC = n.MAC
+			existing.LastSeen = n.LastSeen
+			_, _ = s.d.Store.UpsertAsset(existing)
+		}
+	}
+}
+
+// assetJSON 资产列表 DTO（含在线状态）。
+func (s *Server) assetJSON(a model.Asset) gin.H {
+	online := false
+	offlineSec := s.d.Cfg.ArchiveOfflineSeconds
+	if offlineSec <= 0 {
+		offlineSec = 600
+	}
+	if time.Since(a.LastSeen) < time.Duration(offlineSec)*time.Second {
+		online = true
+	}
+	return gin.H{
+		"id":          a.ID,
+		"node_key":    a.NodeKey,
+		"ips":         a.IPs,
+		"mac":         a.MAC,
+		"hostname":    a.Hostname,
+		"os":          a.OS,
+		"status":      a.Status,
+		"owner":       a.Owner,
+		"department":  a.Department,
+		"location":    a.Location,
+		"description": a.Description,
+		"first_seen":  a.FirstSeen.UTC().Format(time.RFC3339),
+		"last_seen":   a.LastSeen.UTC().Format(time.RFC3339),
+		"online":      online,
+		"archived_at": orEmpty(a.ArchivedAt),
+		"archived_by": a.ArchivedBy,
+	}
+}
+
+func orEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func (s *Server) listAssets(c *gin.Context) {
+	s.syncAssets() // 列表前先同步一次，保证新节点即时可见
+	status := c.Query("status")
+	assets, err := s.d.Store.ListAssets(status)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]gin.H, 0, len(assets))
+	for _, a := range assets {
+		out = append(out, s.assetJSON(a))
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) assetStats(c *gin.Context) {
+	s.syncAssets()
+	assets, err := s.d.Store.ListAssets("")
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var total, archived, unarchived, online, offline int
+	for _, a := range assets {
+		total++
+		if a.Status == model.AssetArchived {
+			archived++
+		} else {
+			unarchived++
+		}
+		if s.assetJSON(a)["online"].(bool) {
+			online++
+		} else {
+			offline++
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"total":       total,
+		"archived":    archived,
+		"unarchived":  unarchived, // 账外资产
+		"online":      online,
+		"offline":     offline,
+	})
+}
+
+func (s *Server) archiveAsset(c *gin.Context) {
+	var body struct {
+		NodeKey     string `json:"node_key"`
+		Owner       string `json:"owner"`
+		Department  string `json:"department"`
+		Location    string `json:"location"`
+		Hostname    string `json:"hostname"`
+		OS          string `json:"os"`
+		Description string `json:"description"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		fail(c, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if body.NodeKey == "" {
+		fail(c, http.StatusBadRequest, "缺少 node_key")
+		return
+	}
+	if err := s.d.Store.ArchiveAsset(body.NodeKey, body.Owner, body.Department, body.Location, body.Hostname, body.OS, body.Description, s.actor(c)); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.d.Reviewer.Audit(s.actor(c), "asset_archive", body.NodeKey,
+		"owner="+body.Owner+" dept="+body.Department)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) updateAsset(c *gin.Context) {
+	key := c.Param("key")
+	var body struct {
+		Owner       string `json:"owner"`
+		Department  string `json:"department"`
+		Location    string `json:"location"`
+		Hostname    string `json:"hostname"`
+		OS          string `json:"os"`
+		Description string `json:"description"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		fail(c, http.StatusBadRequest, "请求体格式错误: "+err.Error())
+		return
+	}
+	if err := s.d.Store.UpdateAsset(key, body.Owner, body.Department, body.Location, body.Hostname, body.OS, body.Description); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.d.Reviewer.Audit(s.actor(c), "asset_update", key, "")
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) deleteAsset(c *gin.Context) {
+	key := c.Param("key")
+	if err := s.d.Store.DeleteAsset(key); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_, _ = s.d.Store.DeletePortsByKey(key)
+	s.d.Reviewer.Audit(s.actor(c), "asset_delete", key, "")
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// ---------- 端口记录（V1.2） ----------
+
+func (s *Server) listPorts(c *gin.Context) {
+	ip := c.Query("ip")
+	key := c.Query("node_key")
+	ports, err := s.d.Store.ListPorts(ip, key)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type portJSON struct {
+		ID        int64  `json:"id"`
+		NodeKey   string `json:"node_key"`
+		IP        string `json:"ip"`
+		Port      int    `json:"port"`
+		Proto     string `json:"proto"`
+		Service   string `json:"service"`
+		State     string `json:"state"`
+		Source    string `json:"source"`
+		LastSeen  string `json:"last_seen"`
+	}
+	out := make([]portJSON, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, portJSON{
+			ID: p.ID, NodeKey: p.NodeKey, IP: p.IP, Port: p.Port, Proto: p.Proto,
+			Service: p.Service, State: p.State, Source: p.Source,
+			LastSeen: p.LastSeen.UTC().Format(time.RFC3339),
+		})
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) scanPorts(c *gin.Context) {
+	var body struct {
+		Target string `json:"target"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Target == "" {
+		fail(c, http.StatusBadRequest, "缺少 target（IP 或 CIDR）")
+		return
+	}
+	if !probe.NmapAvailable(s.d.Cfg.NmapPath) {
+		fail(c, http.StatusServiceUnavailable, "未检测到 nmap 命令，无法主动扫描（请在系统配置中设置 nmap_path）")
+		return
+	}
+	s.scanMu.Lock()
+	s.scanSeq++
+	id := fmt.Sprintf("scan-%d", s.scanSeq)
+	task := &scanTask{ID: id, Target: body.Target, Status: "running", Started: time.Now()}
+	s.scanTasks[id] = task
+	s.scanMu.Unlock()
+
+	// 后台执行（全端口扫描耗时长，不阻塞请求）
+	go func() {
+		records, err := probe.RunNmapScan(s.d.Cfg.NmapPath, body.Target, s.d.Cfg.ScanPorts, s.d.Cfg.ScanRate)
+		s.scanMu.Lock()
+		defer s.scanMu.Unlock()
+		task.Done = time.Now()
+		if err != nil {
+			task.Status = "error"
+			task.Error = err.Error()
+			return
+		}
+		// 关联 node_key 并落库
+		for i := range records {
+			r := &records[i]
+			if n := s.d.Engine.NodeByIP(r.IP); n != nil {
+				r.NodeKey = n.NodeKey
+			}
+			if r.FirstSeen.IsZero() {
+				r.FirstSeen = time.Now()
+			}
+			_ = s.d.Store.UpsertPort(r)
+		}
+		task.Status = "done"
+		task.Found = len(records)
+		s.d.Reviewer.Audit("system", "port_scan", body.Target, "found="+strconv.Itoa(len(records)))
+	}()
+
+	s.d.Reviewer.Audit(s.actor(c), "port_scan_start", body.Target, "")
+	c.JSON(http.StatusAccepted, gin.H{"task_id": id, "status": "running"})
+}
+
+func (s *Server) scanPortsStatus(c *gin.Context) {
+	id := c.Param("id")
+	s.scanMu.Lock()
+	task := s.scanTasks[id]
+	s.scanMu.Unlock()
+	if task == nil {
+		fail(c, http.StatusNotFound, "扫描任务不存在")
+		return
+	}
+	c.JSON(http.StatusOK, task)
+}
+
+// extractPortsFromSessions 从流量会话提取内网主机端口（流量角度，source=traffic）。
+func (s *Server) extractPortsFromSessions(sessions []model.Session) {
+	if s.d.Store == nil || s.d.Engine == nil {
+		return
+	}
+	var ports []model.PortRecord
+	for i := range sessions {
+		ses := &sessions[i]
+		// 内网主机作为被访问方（服务端）：DstPort 为服务端口
+		if topology.IsPrivate(ses.FiveTuple.DstIP) {
+			key := ""
+			if n := s.d.Engine.NodeByIP(ses.FiveTuple.DstIP); n != nil {
+				key = n.NodeKey
+			}
+			ports = append(ports, model.PortRecord{
+				NodeKey:   key,
+				IP:        ses.FiveTuple.DstIP,
+				Port:      int(ses.FiveTuple.DstPort),
+				Proto:     ses.FiveTuple.Proto,
+				Source:    model.PortSourceTraffic,
+				FirstSeen: ses.FirstSeen,
+				LastSeen:  ses.LastSeen,
+			})
+		}
+	}
+	if len(ports) > 0 {
+		_ = s.d.Store.UpsertPorts(ports)
+	}
 }

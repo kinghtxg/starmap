@@ -103,6 +103,40 @@ CREATE TABLE IF NOT EXISTS config (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_key TEXT NOT NULL UNIQUE,
+  ips TEXT NOT NULL DEFAULT '[]',
+  mac TEXT NOT NULL DEFAULT '',
+  hostname TEXT NOT NULL DEFAULT '',
+  os TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'unarchived',
+  owner TEXT NOT NULL DEFAULT '',
+  department TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  first_seen DATETIME NOT NULL,
+  last_seen DATETIME NOT NULL,
+  archived_at DATETIME,
+  archived_by TEXT NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_key TEXT NOT NULL DEFAULT '',
+  ip TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  proto TEXT NOT NULL DEFAULT 'tcp',
+  service TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'open',
+  source TEXT NOT NULL DEFAULT 'traffic',
+  first_seen DATETIME NOT NULL,
+  last_seen DATETIME NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_key ON ports(node_key, ip, port, proto);
+CREATE INDEX IF NOT EXISTS idx_ports_ip ON ports(ip);
+CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
 `
 
 // Open 打开（不存在则创建）SQLite 数据库并建表。
@@ -888,4 +922,218 @@ func (s *Store) DeleteAuditLogsBefore(cutoff time.Time) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ---------- 主机资产库（V1.2） ----------
+
+const assetColumns = `SELECT id,node_key,ips,mac,hostname,os,status,owner,department,location,description,first_seen,last_seen,archived_at,archived_by,created_at,updated_at FROM assets`
+
+func scanAsset(row rowScanner) (*model.Asset, error) {
+	var a model.Asset
+	var ips string
+	var archivedAt sql.NullTime
+	err := row.Scan(&a.ID, &a.NodeKey, &ips, &a.MAC, &a.Hostname, &a.OS, &a.Status, &a.Owner,
+		&a.Department, &a.Location, &a.Description, &a.FirstSeen, &a.LastSeen, &archivedAt, &a.ArchivedBy,
+		&a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	fromJSON(ips, &a.IPs)
+	if archivedAt.Valid {
+		a.ArchivedAt = archivedAt.Time
+	}
+	return &a, nil
+}
+
+// UpsertAsset 幂等写入/更新资产（按 node_key）。在线状态由调用方计算。
+func (s *Store) UpsertAsset(a *model.Asset) (int64, error) {
+	ips := toJSON(a.IPs)
+	var archivedAt any
+	if a.ArchivedAt.IsZero() {
+		archivedAt = nil
+	} else {
+		archivedAt = a.ArchivedAt
+	}
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO assets(node_key,ips,mac,hostname,os,status,owner,department,location,description,first_seen,last_seen,archived_at,archived_by,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(node_key) DO UPDATE SET ips=excluded.ips, mac=excluded.mac, last_seen=excluded.last_seen, updated_at=excluded.updated_at`,
+		a.NodeKey, ips, a.MAC, a.Hostname, a.OS, a.Status, a.Owner, a.Department, a.Location, a.Description,
+		a.FirstSeen, a.LastSeen, archivedAt, a.ArchivedBy, now, now)
+	if err != nil {
+		return 0, err
+	}
+	// 返回已存在/新建的 id
+	var id int64
+	if err := s.db.QueryRow(`SELECT id FROM assets WHERE node_key=?`, a.NodeKey).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// ArchiveAsset 归档：写入归属信息 + 归档时间。
+func (s *Store) ArchiveAsset(nodeKey, owner, department, location, hostname, osName, description, by string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`UPDATE assets SET status='archived', owner=?, department=?, location=?, hostname=?, os=?, description=?, archived_at=?, archived_by=?, updated_at=? WHERE node_key=?`,
+		owner, department, location, hostname, osName, description, now, by, now, nodeKey)
+	return err
+}
+
+// UpdateAsset 维护归档信息（不改 status）。
+func (s *Store) UpdateAsset(nodeKey, owner, department, location, hostname, osName, description string) error {
+	now := time.Now()
+	_, err := s.db.Exec(`UPDATE assets SET owner=?, department=?, location=?, hostname=?, os=?, description=?, updated_at=? WHERE node_key=?`,
+		owner, department, location, hostname, osName, description, now, nodeKey)
+	return err
+}
+
+// AssetByKey 按 node_key 查资产，不存在返回 (nil, nil)。
+func (s *Store) AssetByKey(key string) (*model.Asset, error) {
+	a, err := scanAsset(s.db.QueryRow(assetColumns+` WHERE node_key=?`, key))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return a, err
+}
+
+// ListAssets 查询资产（按状态过滤，空串=全部）。
+func (s *Store) ListAssets(status string) ([]model.Asset, error) {
+	var rows *sql.Rows
+	var err error
+	if status == "" {
+		rows, err = s.db.Query(assetColumns + ` ORDER BY status, last_seen DESC`)
+	} else {
+		rows, err = s.db.Query(assetColumns+` WHERE status=? ORDER BY last_seen DESC`, status)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Asset
+	for rows.Next() {
+		a, err := scanAsset(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAsset 删除资产（按 node_key）。
+func (s *Store) DeleteAsset(nodeKey string) error {
+	_, err := s.db.Exec(`DELETE FROM assets WHERE node_key=?`, nodeKey)
+	return err
+}
+
+// DeleteAssetsByKeys 批量删除资产。
+func (s *Store) DeleteAssetsByKeys(keys []string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	var total int64
+	for _, k := range keys {
+		if res, err := s.db.Exec(`DELETE FROM assets WHERE node_key=?`, k); err == nil {
+			total += mustRowsAffected(res)
+		}
+	}
+	return total, nil
+}
+
+// ---------- 端口记录（V1.2） ----------
+
+const portColumns = `SELECT id,node_key,ip,port,proto,service,state,source,first_seen,last_seen FROM ports`
+
+func scanPort(row rowScanner) (*model.PortRecord, error) {
+	var p model.PortRecord
+	err := row.Scan(&p.ID, &p.NodeKey, &p.IP, &p.Port, &p.Proto, &p.Service, &p.State, &p.Source, &p.FirstSeen, &p.LastSeen)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// UpsertPort 幂等写入端口记录（node_key+ip+port+proto 唯一）。
+func (s *Store) UpsertPort(p *model.PortRecord) error {
+	_, err := s.db.Exec(`INSERT INTO ports(node_key,ip,port,proto,service,state,source,first_seen,last_seen)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(node_key,ip,port,proto) DO UPDATE SET service=excluded.service, state=excluded.state, source=excluded.source, last_seen=excluded.last_seen`,
+		p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen)
+	return err
+}
+
+// UpsertPorts 批量幂等写入端口记录。
+func (s *Store) UpsertPorts(ps []model.PortRecord) error {
+	if len(ps) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO ports(node_key,ip,port,proto,service,state,source,first_seen,last_seen)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(node_key,ip,port,proto) DO UPDATE SET service=excluded.service, state=excluded.state, source=excluded.source, last_seen=excluded.last_seen`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i := range ps {
+		p := &ps[i]
+		if _, err := stmt.Exec(p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ListPorts 查询端口记录（可按 ip / node_key 过滤）。
+func (s *Store) ListPorts(ip, nodeKey string) ([]model.PortRecord, error) {
+	q := portColumns
+	var args []any
+	var conds []string
+	if ip != "" {
+		conds = append(conds, "ip=?")
+		args = append(args, ip)
+	}
+	if nodeKey != "" {
+		conds = append(conds, "node_key=?")
+		args = append(args, nodeKey)
+	}
+	if len(conds) > 0 {
+		q += " WHERE " + strings.Join(conds, " AND ")
+	}
+	q += " ORDER BY ip, port"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.PortRecord
+	for rows.Next() {
+		p, err := scanPort(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// DeletePortsByKey 删除某主机的全部端口记录。
+func (s *Store) DeletePortsByKey(nodeKey string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM ports WHERE node_key=?`, nodeKey)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func mustRowsAffected(res sql.Result) int64 {
+	if res == nil {
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return n
 }

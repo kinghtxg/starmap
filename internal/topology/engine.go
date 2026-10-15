@@ -718,6 +718,67 @@ func (e *Engine) ObserveHost(ip, mac string, ts time.Time) int64 {
 	return id
 }
 
+// RemoveNodeByKey 按稳定 NodeKey 删除节点及其关联边（V1.2 账外资产离线清理）。
+// 返回是否删除成功。
+func (e *Engine) RemoveNodeByKey(key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	id, ok := e.nodeKey[key]
+	if !ok {
+		return false
+	}
+	return e.removeNodeLocked(id)
+}
+
+// removeNodeLocked 删除节点（调用方需持锁）。清理节点、索引、关联边、聚合成员。
+func (e *Engine) removeNodeLocked(id int64) bool {
+	n, ok := e.nodes[id]
+	if !ok {
+		return false
+	}
+	// 清理 IP/MAC/NodeKey 索引
+	for _, ip := range n.IPs {
+		if e.ipNode[ip] == id {
+			delete(e.ipNode, ip)
+		}
+	}
+	if n.MAC != "" && e.macNode[n.MAC] == id {
+		delete(e.macNode, n.MAC)
+	}
+	if n.NodeKey != "" {
+		delete(e.nodeKey, n.NodeKey)
+	}
+	// 外部聚合节点清理 extAggr
+	for cidr, nid := range e.extAggr {
+		if nid == id {
+			delete(e.extAggr, cidr)
+		}
+	}
+	// 清理关联边
+	for k, edge := range e.edges {
+		if edge.SrcID == id || edge.DstID == id {
+			delete(e.edges, k)
+			delete(e.dirtyEdges, k)
+		}
+	}
+	// 清理聚合成员
+	for cidr, members := range e.subnetMembers {
+		if members[id] {
+			delete(members, id)
+			if len(members) == 0 {
+				delete(e.subnetMembers, cidr)
+			}
+		}
+	}
+	delete(e.gatewayMAC, id)
+	delete(e.nodes, id)
+	delete(e.dirtyNodes, id)
+	if e.persist != nil {
+		_ = e.persist.DeleteNode(id)
+	}
+	return true
+}
+
 // Age 执行一次老化扫描：超过 agingSeconds 无流量的边/节点置灰。
 func (e *Engine) Age(now time.Time) {
 	e.mu.Lock()
