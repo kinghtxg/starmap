@@ -2,3 +2,4 @@ starmap.db
 starmap.db-wal
 starmap.db-shm
 *.exe
+release/
