@@ -44,16 +44,19 @@ s, d = req("GET", "/api/topology")
 check("topology 快照", s == 200 and "Nodes" in d and "Edges" in d, str(s))
 
 print("========== 探测 ==========")
-s, d = req("POST", "/api/probe/trigger", {"type": "icmp", "target": "192.168.31.1"})
+# 探测目标：示例网段（请按实际环境修改，或用 127.0.0.1 本机测试）
+PROBE_IP = "192.168.1.1"
+PROBE_CIDR = "192.168.1.0/24"
+s, d = req("POST", "/api/probe/trigger", {"type": "icmp", "target": PROBE_IP})
 check("ICMP 单 IP", s == 200 and len(d.get("Hosts", [])) >= 1, f"hosts={d.get('Hosts') if isinstance(d,dict) else d}")
 
-s, d = req("POST", "/api/probe/trigger", {"type": "icmp", "target": "192.168.31.0/24"})
+s, d = req("POST", "/api/probe/trigger", {"type": "icmp", "target": PROBE_CIDR})
 check("ICMP /24 网段（曾报无法解析）", s == 200, f"code={s} resp={str(d)[:120]}")
 
-s, d = req("POST", "/api/probe/trigger", {"type": "arp", "target": "192.168.31.0/24"})
+s, d = req("POST", "/api/probe/trigger", {"type": "arp", "target": PROBE_CIDR})
 check("ARP /24 网段", s == 200, f"code={s}")
 
-s, d = req("POST", "/api/probe/trigger", {"type": "traceroute", "target": "192.168.31.1"})
+s, d = req("POST", "/api/probe/trigger", {"type": "traceroute", "target": PROBE_IP})
 check("traceroute", s == 200, f"code={s}")
 
 print("========== 资产库 ==========")
