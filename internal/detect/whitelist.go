@@ -19,12 +19,29 @@ func MatchAnyWhitelist(entries []model.WhitelistEntry, ev *model.RiskEvent, node
 	return false
 }
 
+// matchNodeDimension 白名单 node 维度匹配（P0-2）。
+//
+// 取值优先按节点稳定身份 NodeKey 匹配（review.go 误报自动加白写入的就是 NodeKey）：
+// NodeKey 为 mac:<mac>（有 MAC）或 ip:<主 IP>（无 MAC），跨进程重启不变，
+// 不会像内存自增 node_id 那样重启后指向另一个节点而"静默加白"。
+//
+// 向后兼容：V1.0 写入的旧条目形如 node:<数字 node_id>，此处仍然识别。
+// 由于节点已持久化并在启动时按原 ID 恢复（topology.Engine.AttachStore），
+// 同一节点重启后 ID 不变，旧条目依旧命中，不会静默失配。
+// 迁移方式：运维可在白名单页把 node:<数字> 改写为 node:<mac:xx:xx...>（即节点详情里的 node_key），
+// 或删除旧条目后重新走"误报复核"自动生成 NodeKey 条目。
+func matchNodeDimension(value string, ev *model.RiskEvent, node *model.Node) bool {
+	if node != nil && node.NodeKey != "" && value == node.NodeKey {
+		return true
+	}
+	return value == strconv.FormatInt(ev.NodeID, 10)
+}
+
 // MatchWhitelist 单条匹配。
 func MatchWhitelist(w model.WhitelistEntry, ev *model.RiskEvent, node *model.Node) bool {
 	switch strings.ToLower(w.Kind) {
 	case "node":
-		// 按节点 ID（字符串形式）匹配
-		if w.Value == strconv.FormatInt(ev.NodeID, 10) {
+		if matchNodeDimension(w.Value, ev, node) {
 			return true
 		}
 	case "ip":

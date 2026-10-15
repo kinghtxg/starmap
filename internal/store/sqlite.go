@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go SQLite 驱动
@@ -22,6 +23,7 @@ type Store struct {
 const schema = `
 CREATE TABLE IF NOT EXISTS nodes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_key TEXT NOT NULL DEFAULT '',
   ips TEXT NOT NULL DEFAULT '[]',
   mac TEXT NOT NULL DEFAULT '',
   first_seen DATETIME NOT NULL,
@@ -35,6 +37,8 @@ CREATE TABLE IF NOT EXISTS edges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   src_id INTEGER NOT NULL,
   dst_id INTEGER NOT NULL,
+  src_key TEXT NOT NULL DEFAULT '',
+  dst_key TEXT NOT NULL DEFAULT '',
   protocol TEXT NOT NULL DEFAULT '',
   bytes INTEGER NOT NULL DEFAULT 0,
   packets INTEGER NOT NULL DEFAULT 0,
@@ -117,7 +121,214 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("建表失败: %w", err)
 	}
+	// P0-2：V1.0 库无 node_key/src_key/dst_key 列，需在线扩容并回填后才能建立幂等索引
+	if err := migrateTopologyKeys(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("拓扑持久化迁移失败: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// ---------- 拓扑持久化迁移（P0-2） ----------
+
+// 节点/边的稳定键索引：nodes.node_key 唯一；edge 以 (src_key,dst_key,protocol) 为幂等键。
+// 空 node_key 的历史脏行用偏斜部分索引豁免（ALTER 前建的表可能留下空串，且不止一行）。
+const topologyKeyIndex = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_node_key ON nodes(node_key) WHERE node_key <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_endpoints ON edges(src_key,dst_key,protocol);
+`
+
+func migrateTopologyKeys(db *sql.DB) error {
+	if err := ensureColumn(db, "nodes", "node_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "edges", "src_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "edges", "dst_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := backfillNodeKeys(db); err != nil {
+		return err
+	}
+	if err := backfillEdgeKeys(db); err != nil {
+		return err
+	}
+	_, err := db.Exec(topologyKeyIndex)
+	return err
+}
+
+func ensureColumn(db *sql.DB, table, col, decl string) error {
+	var exists int
+	// table/col 均为本包常量，不存在外部输入拼接风险
+	err := db.QueryRow(fmt.Sprintf(
+		`SELECT COUNT(1) FROM pragma_table_info('%s') WHERE name='%s'`, table, col)).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists > 0 {
+		return nil
+	}
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, col, decl))
+	return err
+}
+
+// backfillNodeKeys 给历史节点补齐 node_key（优先 MAC，无 MAC 用主 IP）。
+// 无法推导身份的节点（无 MAC 且无 IP）用 legacy:<id> 兜底；重复身份用 #<id> 后缀去重，
+// 保证 node_key 唯一，后续幂等 upsert 才不会相互覆盖。
+func backfillNodeKeys(db *sql.DB) error {
+	used := map[string]bool{}
+	if rows, err := db.Query(`SELECT node_key FROM nodes WHERE node_key <> ''`); err == nil {
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				rows.Close()
+				return err
+			}
+			used[k] = true
+		}
+		rows.Close()
+	} else {
+		return err
+	}
+	rows, err := db.Query(`SELECT id,ips,mac FROM nodes WHERE node_key='' ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	var pending []struct {
+		id  int64
+		key string
+	}
+	for rows.Next() {
+		var id int64
+		var ips, mac string
+		if err := rows.Scan(&id, &ips, &mac); err != nil {
+			rows.Close()
+			return err
+		}
+		var list []string
+		fromJSON(ips, &list)
+		key := deriveNodeKey(mac, list)
+		if key == "" {
+			key = fmt.Sprintf("legacy:%d", id)
+		}
+		if used[key] {
+			key = fmt.Sprintf("%s#%d", key, id)
+		}
+		used[key] = true
+		pending = append(pending, struct {
+			id  int64
+			key string
+		}{id, key})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, p := range pending {
+		if _, err := tx.Exec(`UPDATE nodes SET node_key=? WHERE id=?`, p.key, p.id); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// backfillEdgeKeys 用节点 node_key 回填边的两端，并清掉历史重复边
+// （同 (src_key,dst_key,protocol) 保留最小 id），否则幂等索引建不起来。
+func backfillEdgeKeys(db *sql.DB) error {
+	keyByID := map[int64]string{}
+	rows, err := db.Query(`SELECT id,node_key FROM nodes`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var k string
+		if err := rows.Scan(&id, &k); err != nil {
+			rows.Close()
+			return err
+		}
+		keyByID[id] = k
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	type edgeRow struct {
+		id     int64
+		srcID  int64
+		dstID  int64
+		srcKey string
+		dstKey string
+	}
+	rows, err = db.Query(`SELECT id,src_id,dst_id,src_key,dst_key FROM edges`)
+	if err != nil {
+		return err
+	}
+	var pending []edgeRow
+	for rows.Next() {
+		var r edgeRow
+		if err := rows.Scan(&r.id, &r.srcID, &r.dstID, &r.srcKey, &r.dstKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if r.srcKey == "" || r.dstKey == "" {
+			// 端点节点已不在库内（历史脏数据）：用 id 兜底保证唯一，不与正常边混叠
+			if v, ok := keyByID[r.srcID]; ok && r.srcKey == "" {
+				r.srcKey = v
+			} else if r.srcKey == "" {
+				r.srcKey = fmt.Sprintf("missing:%d", r.srcID)
+			}
+			if v, ok := keyByID[r.dstID]; ok && r.dstKey == "" {
+				r.dstKey = v
+			} else if r.dstKey == "" {
+				r.dstKey = fmt.Sprintf("missing:%d", r.dstID)
+			}
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, r := range pending {
+		if _, err := tx.Exec(`UPDATE edges SET src_key=?,dst_key=? WHERE id=?`, r.srcKey, r.dstKey, r.id); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM edges WHERE id NOT IN (SELECT MIN(id) FROM edges GROUP BY src_key,dst_key,protocol)`); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// deriveNodeKey 按 MAC 优先、主 IP 兜底推导稳定节点身份（与 topology.NodeKeyOf 同规则）。
+// store 与 topology 分属不同层，此处独立实现以避免 store → topology 的反向依赖。
+func deriveNodeKey(mac string, ips []string) string {
+	if m := strings.TrimSpace(mac); m != "" {
+		return "mac:" + strings.ToLower(m)
+	}
+	if len(ips) > 0 {
+		if ip := strings.TrimSpace(ips[0]); ip != "" {
+			return "ip:" + ip
+		}
+	}
+	return ""
 }
 
 // Close 关闭数据库。
@@ -148,11 +359,14 @@ func i2b(i int) bool { return i != 0 }
 
 // ---------- Node CRUD ----------
 
-// CreateNode 创建节点，返回带 ID 的节点。
+// CreateNode 创建节点，返回带 ID 的节点。（NodeKey 为空时按 MAC/IP 推导后一并写入）
 func (s *Store) CreateNode(n *model.Node) (int64, error) {
+	if n.NodeKey == "" {
+		n.NodeKey = deriveNodeKey(n.MAC, n.IPs)
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO nodes(ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?)`,
-		toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
+		`INSERT INTO nodes(node_key,ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?,?)`,
+		n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
 	if err != nil {
 		return 0, err
 	}
@@ -161,16 +375,73 @@ func (s *Store) CreateNode(n *model.Node) (int64, error) {
 
 // UpdateNode 更新节点全部字段。
 func (s *Store) UpdateNode(n *model.Node) error {
+	if n.NodeKey == "" {
+		n.NodeKey = deriveNodeKey(n.MAC, n.IPs)
+	}
 	_, err := s.db.Exec(
-		`UPDATE nodes SET ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
-		toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
+		`UPDATE nodes SET node_key=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
+		n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
 	return err
 }
 
+// UpsertNodes 批量幂等落盘节点（拓扑节流 flush 调用）。
+// 先按主键 id 更新覆盖自身历史，未命中再显式带上 id 插入——保证重启恢复后
+// 内存中 node.ID 与库内 id、历史事件里的 node_id 三者始终对齐。
+func (s *Store) UpsertNodes(ns []model.Node) error {
+	if len(ns) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for i := range ns {
+		n := &ns[i]
+		if n.NodeKey == "" {
+			n.NodeKey = deriveNodeKey(n.MAC, n.IPs)
+		}
+		res, err := tx.Exec(
+			`UPDATE nodes SET node_key=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
+			n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if aff, err := res.RowsAffected(); err == nil && aff > 0 {
+			continue
+		}
+		_, err = tx.Exec(
+			`INSERT INTO nodes(id,node_key,ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			n.ID, n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
+		if err != nil {
+			// id 被同名 key 的旧行占用（理论上不会：恢复时已加载全部行）
+			// 退化为按 node_key 更新那一行，保持库内不重复。
+			if _, err2 := tx.Exec(
+				`UPDATE nodes SET ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE node_key=?`,
+				toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.NodeKey); err2 != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// NodeByKey 按稳定 node_key 查询节点（不存在返回 nil）。
+func (s *Store) NodeByKey(key string) (*model.Node, error) {
+	n, err := scanNode(s.db.QueryRow(nodeColumns+` WHERE node_key=?`, key))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return n, err
+}
+
+// nodeColumns 节点查询列清单（含 P0-2 新增的稳定 key 列）。
+const nodeColumns = `SELECT id,node_key,ips,mac,first_seen,last_seen,domain,labels,risk_level,active FROM nodes`
+
 // GetNode 按 ID 查询节点。
 func (s *Store) GetNode(id int64) (*model.Node, error) {
-	row := s.db.QueryRow(`SELECT id,ips,mac,first_seen,last_seen,domain,labels,risk_level,active FROM nodes WHERE id=?`, id)
-	n, err := scanNode(row)
+	n, err := scanNode(s.db.QueryRow(nodeColumns+` WHERE id=?`, id))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -183,7 +454,7 @@ func scanNode(row rowScanner) (*model.Node, error) {
 	var n model.Node
 	var ips, labels string
 	var active int
-	err := row.Scan(&n.ID, &ips, &n.MAC, &n.FirstSeen, &n.LastSeen, &n.Domain, &labels, &n.RiskLevel, &active)
+	err := row.Scan(&n.ID, &n.NodeKey, &ips, &n.MAC, &n.FirstSeen, &n.LastSeen, &n.Domain, &labels, &n.RiskLevel, &active)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +466,7 @@ func scanNode(row rowScanner) (*model.Node, error) {
 
 // ListNodes 查询全部节点。
 func (s *Store) ListNodes() ([]model.Node, error) {
-	rows, err := s.db.Query(`SELECT id,ips,mac,first_seen,last_seen,domain,labels,risk_level,active FROM nodes`)
+	rows, err := s.db.Query(nodeColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +499,48 @@ func (s *Store) CreateEdge(e *model.Edge) (int64, error) {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// EdgeUpsert 边幂等落盘数据：SrcKey/DstKey 为两端节点的稳定 key，
+// (src_key,dst_key,protocol) 即边的幂等主键（P0-2）。
+type EdgeUpsert struct {
+	Edge   model.Edge
+	SrcKey string
+	DstKey string
+}
+
+// UpsertEdges 批量幂等落盘链路（拓扑节流 flush 调用）。
+// 同一条链路每次 flush 都走一次 UPDATE，不会像 CreateEdge 那样累积重复行。
+func (s *Store) UpsertEdges(es []EdgeUpsert) error {
+	if len(es) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for i := range es {
+		u := &es[i]
+		e := u.Edge
+		res, err := tx.Exec(
+			`UPDATE edges SET bytes=?,packets=?,first_seen=?,last_seen=?,active=? WHERE src_key=? AND dst_key=? AND protocol=?`,
+			e.Bytes, e.Packets, e.FirstSeen, e.LastSeen, b2i(e.Active), u.SrcKey, u.DstKey, e.Protocol)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if aff, err := res.RowsAffected(); err == nil && aff > 0 {
+			continue
+		}
+		_, err = tx.Exec(
+			`INSERT INTO edges(id,src_id,dst_id,src_key,dst_key,protocol,bytes,packets,first_seen,last_seen,active) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			e.ID, e.SrcID, e.DstID, u.SrcKey, u.DstKey, e.Protocol, e.Bytes, e.Packets, e.FirstSeen, e.LastSeen, b2i(e.Active))
+		if err != nil {
+			// 幂等键已被别的行占用：退化为忽略本行，下次 flush 会重新覆盖
+			continue
+		}
+	}
+	return tx.Commit()
 }
 
 // UpdateEdge 更新链路。

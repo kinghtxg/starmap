@@ -65,17 +65,27 @@ func (r *Reviewer) Review(eventID int64, action, note, reviewer string) (*model.
 		}
 		// 自动加白：node 维度 + 节点全部 IP 维度
 		wlNote := fmt.Sprintf("复核误报自动加白（事件 #%d）", eventID)
-		entries := []model.WhitelistEntry{
-			{Kind: "node", Value: strconv.FormatInt(ev.NodeID, 10), Note: wlNote},
-		}
+		entries := []model.WhitelistEntry{}
 		if r.Engine != nil {
 			if n := r.Engine.GetNode(ev.NodeID); n != nil {
+				// P0-2：node 维度改用稳定 NodeKey（mac:<mac>|ip:<主 IP>）。
+				// NodeKey 跨进程重启不变，避免 node:<自增 ID> 重启后指向无关节点造成静默抑制。
+				if n.NodeKey != "" {
+					entries = append(entries, model.WhitelistEntry{Kind: "node", Value: n.NodeKey, Note: wlNote})
+				}
+				// 兼容条目：保留 node:<node_id>。节点现已持久化并按原 ID 恢复，
+				// 该 ID 重启后仍指向同一节点，旧 UI/脚本依赖的格式继续有效（匹配端见 detect.matchNodeDimension）。
+				entries = append(entries, model.WhitelistEntry{Kind: "node", Value: strconv.FormatInt(ev.NodeID, 10), Note: wlNote})
 				for _, ip := range n.IPs {
 					entries = append(entries, model.WhitelistEntry{Kind: "ip", Value: ip, Note: wlNote})
 				}
 				// 误报后节点风险回退
 				r.Engine.SetNodeRisk(ev.NodeID, model.RiskNone)
 			}
+		}
+		if len(entries) == 0 {
+			// 节点已被清理或未挂载引擎：退化为旧行为，至少保证 node 维度有条目
+			entries = append(entries, model.WhitelistEntry{Kind: "node", Value: strconv.FormatInt(ev.NodeID, 10), Note: wlNote})
 		}
 		for _, w := range entries {
 			if _, err := r.Store.CreateWhitelistEntry(&w); err != nil {

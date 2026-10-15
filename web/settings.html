@@ -4,141 +4,181 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>系统配置 · StarMap 星图</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwind.config = { theme: { extend: { colors: {
-  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
-  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
-} } } };
-</script>
+<link rel="stylesheet" href="assets/theme.css">
 </head>
-<body class="bg-base text-body min-h-screen">
-<div class="ml-56 p-6 max-w-4xl">
-  <header class="flex items-center justify-between mb-5">
-    <div>
-      <h1 class="text-xl font-bold">系统配置</h1>
-      <p class="text-xs text-slate-400 mt-1">GET /api/config · PUT /api/config</p>
+<body>
+<div class="sm-app">
+  <aside class="sm-sider" id="smSider"></aside>
+
+  <main class="sm-main">
+    <header class="sm-topbar">
+      <div class="sm-topbar-l">
+        <h1 class="sm-h1">系统配置</h1>
+        <p class="sm-sub">GET /api/config · PUT /api/config · 保存后立即联动拓扑引擎与检测引擎</p>
+      </div>
+      <div class="sm-toolbar">
+        <button class="sm-btn" data-act="reload" data-ico="refresh">重新加载</button>
+        <button class="sm-btn is-primary" data-act="save" data-ico="check">保存配置</button>
+      </div>
+    </header>
+
+    <div class="sm-content">
+      <div class="sm-stack sm-anim" style="max-width:900px" id="form"></div>
     </div>
-    <div class="flex gap-2">
-      <button onclick="load()" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent">重新加载</button>
-      <button onclick="save()" class="px-4 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">保存配置</button>
-    </div>
-  </header>
-  <div id="form" class="space-y-5"></div>
+  </main>
 </div>
 
-<script src="assets/layout.js"></script>
 <script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
 <script>
-let config = null;
+'use strict';
 
-/* 已知字段元数据：候选 key（兼容大小写/命名差异） */
-const FIELDS = [
-  { keys: ['probe_enabled', 'ProbeEnabled'], label: '主动探测开关', type: 'bool', desc: 'ARP / ICMP / Traceroute 主动探测（默认关闭）', group: '探测' },
-  { keys: ['interfaces', 'Interfaces', 'capture_interfaces'], label: '抓包网卡', type: 'list', desc: '每行一个网卡名，如 eth0', group: '探测' },
-  { keys: ['probe_token', 'ProbeToken'], label: '探针令牌（probe_token）', type: 'text', desc: '远端探针上报 /api/ingest/probe 的鉴权令牌，可留空表示不校验', group: '探测' },
-  { keys: ['aging_seconds', 'AgingSeconds'], label: '链路老化时长（秒）', type: 'number', desc: '边超过该时长无流量则置灰，默认 86400', group: '拓扑引擎' },
-  { keys: ['aggregate_threshold', 'AggregateThreshold'], label: '网段聚合阈值', type: 'number', desc: '同 /24 节点数超过该值聚合为子网节点，默认 20', group: '拓扑引擎' },
-  { keys: ['noise_min_bytes', 'NoiseMinBytes'], label: '降噪字节阈值', type: 'number', desc: '会话字节低于该值不建边', group: '拓扑引擎' },
-  { keys: ['noise_min_packets', 'NoiseMinPackets'], label: '降噪包数阈值', type: 'number', desc: '短会话包数低于该值不建边，默认 4', group: '拓扑引擎' },
-  { keys: ['reverse_proxy_host_threshold', 'ReverseProxyHostThreshold'], label: '反代 Host 数阈值', type: 'number', desc: '单内网 IP 对外映射 Host 数超过该值标记，默认 10', group: '检测规则' },
-  { keys: ['http_listen', 'HTTPListen', 'listen'], label: 'HTTP 监听地址', type: 'text', desc: '如 0.0.0.0:8080', group: '服务' },
+/* 已知字段元数据：key=规范键（PUT 生效），alias=GET 回显的兼容别名 */
+var FIELDS = [
+  { key: 'probe_enabled', alias: '', label: '主动探测开关', type: 'bool', desc: '开启后可执行 ARP / ICMP / Traceroute 主动探测（默认关闭，合规建议保持关闭）', group: '探测与采集' },
+  { key: 'capture_enabled', alias: '', label: '实时抓包开关', type: 'bool', desc: '允许通过接口启动多网卡实时抓包', group: '探测与采集' },
+  { key: 'capture_interfaces', alias: 'interfaces', label: '抓包网卡', type: 'list', desc: '每行一个网卡名，如 eth0；留空则无法启动抓包', group: '探测与采集' },
+  { key: 'capture_bpf', alias: '', label: 'BPF 过滤表达式', type: 'text', desc: '如 tcp port 443，留空表示不过滤', group: '探测与采集' },
+  { key: 'probe_token', alias: '', label: '探针上报令牌', type: 'secret', desc: '远端探针 /api/ingest/probe 的鉴权令牌，留空表示不校验（不会回显明文）', group: '探测与采集' },
+
+  { key: 'aging_seconds', alias: '', label: '链路老化时长（秒）', type: 'number', desc: '链路超过该时长无流量则置灰，默认 86400', group: '拓扑引擎' },
+  { key: 'aggregate_threshold', alias: '', label: '网段聚合阈值', type: 'number', desc: '同 /24 节点数超过该值则聚合为可下钻的网段节点，默认 20', group: '拓扑引擎' },
+  { key: 'noise_bytes', alias: 'noise_min_bytes', label: '降噪字节阈值', type: 'number', desc: '会话字节数低于该值不建边，默认 400', group: '拓扑引擎' },
+  { key: 'noise_packets', alias: 'noise_min_packets', label: '降噪包数阈值', type: 'number', desc: '短会话包数低于该值不建边，默认 4', group: '拓扑引擎' },
+  { key: 'noise_duration_sec', alias: '', label: '降噪时长阈值（秒）', type: 'number', desc: '会话持续时长低于该值不建边，默认 2', group: '拓扑引擎' },
+
+  { key: 'reverse_proxy_hosts', alias: 'reverse_proxy_host_threshold', label: '反代 Host 数阈值', type: 'number', desc: '单内网 IP 对外映射的 Host 数超过该值则标记反向代理，默认 10', group: '检测规则' },
+  { key: 'long_conn_seconds', alias: '', label: '长连接判定时长（秒）', type: 'number', desc: '超过该时长视为长连接，用于隧道心跳检测，默认 3600', group: '检测规则' },
+  { key: 'heartbeat_max_bytes', alias: '', label: '心跳包最大字节', type: 'number', desc: '低于该字节的长连接交互视为心跳，默认 64', group: '检测规则' },
+
+  { key: 'listen_addr', alias: 'http_listen', label: 'HTTP 监听地址', type: 'text', desc: '如 127.0.0.1:18080；修改后需重启服务生效', group: '服务与安全' },
+  { key: 'audit_retention_days', alias: '', label: '审计日志保留天数', type: 'number', desc: '默认 90 天', group: '服务与安全' }
 ];
 
-function findKey(cfg, keys) {
-  for (const k of keys) if (Object.prototype.hasOwnProperty.call(cfg, k)) return k;
-  return null;
-}
-function inputCls() { return 'w-full bg-base border border-slate-600 rounded px-3 py-2 text-sm'; }
+var READONLY = { db_path: '数据库路径', probe_token_set: '探针令牌已设置' };
+var config = null;
 
-async function load() {
-  const el = document.getElementById('form');
-  el.innerHTML = UI.loadingHTML('正在加载配置…');
-  try {
-    config = await API.getConfig();
+function valueOf(f) {
+  if (Object.prototype.hasOwnProperty.call(config, f.key)) return config[f.key];
+  if (f.alias && Object.prototype.hasOwnProperty.call(config, f.alias)) return config[f.alias];
+  return undefined;
+}
+
+function load() {
+  var el = document.getElementById('form');
+  el.innerHTML = '<div class="sm-card"><div class="sm-card-bd">' + UI.loadingHTML('正在加载配置…') + '</div></div>';
+  return API.getConfig().then(function (cfg) {
+    config = cfg || {};
     render();
-  } catch (e) {
+  }).catch(function (e) {
     config = null;
-    el.innerHTML = UI.errorHTML(e);
-  }
+    el.innerHTML = '<div class="sm-card"><div class="sm-card-bd">' + UI.errorHTML(e) + '</div></div>';
+  });
 }
 
 function render() {
-  const el = document.getElementById('form');
+  var el = document.getElementById('form');
   if (!config) return;
-  const groups = {};
-  const knownUsed = new Set();
-  for (const f of FIELDS) {
-    (groups[f.group] = groups[f.group] || []).push(f);
-    const k = findKey(config, f.keys);
-    if (k) knownUsed.add(k);
-  }
-  let html = '';
-  for (const g of Object.keys(groups)) {
-    html += '<section class="bg-card rounded-xl border border-slate-700/60 p-6">' +
-      '<h2 class="font-bold text-accent mb-4">' + g + '</h2><div class="space-y-4">' +
-      groups[g].map(f => fieldHTML(f, findKey(config, f.keys))).join('') +
-      '</div></section>';
-  }
-  // 其余未识别字段：只读展示原始 JSON
-  const rest = {};
-  for (const k of Object.keys(config)) if (!knownUsed.has(k)) rest[k] = config[k];
-  if (Object.keys(rest).length) {
-    html += '<section class="bg-card rounded-xl border border-slate-700/60 p-6">' +
-      '<h2 class="font-bold text-accent mb-3">其他配置项（原始 JSON，可编辑）</h2>' +
-      '<textarea id="cfgExtra" rows="6" class="' + inputCls() + ' font-mono text-xs">' + UI.esc(JSON.stringify(rest, null, 2)) + '</textarea></section>';
+  var groups = [];
+  var map = {};
+  FIELDS.forEach(function (f) {
+    if (!map[f.group]) { map[f.group] = []; groups.push(f.group); }
+    map[f.group].push(f);
+  });
+
+  var html = groups.map(function (g, gi) {
+    return '<section class="sm-card" style="animation:sm-fade-up 240ms var(--sm-ease) both;animation-delay:' + (gi * 60) + 'ms">' +
+      '<div class="sm-card-hd"><h2>' + UI.esc(g) + '</h2>' +
+      '<span class="sm-badge">' + map[g].length + ' 项</span></div>' +
+      '<div class="sm-card-bd"><div class="sm-stack">' +
+      map[g].map(function (f) { return fieldHTML(f); }).join('<div class="sm-divider" style="margin:4px 0"></div>') +
+      '</div></div></section>';
+  }).join('');
+
+  var used = {};
+  FIELDS.forEach(function (f) { used[f.key] = true; if (f.alias) used[f.alias] = true; });
+  Object.keys(READONLY).forEach(function (k) { used[k] = true; });
+  var rest = {};
+  Object.keys(config).forEach(function (k) { if (!used[k]) rest[k] = config[k]; });
+  if (Object.keys(rest).length || Object.keys(READONLY).length) {
+    var ro = {};
+    Object.keys(READONLY).forEach(function (k) { if (k in config) ro[READONLY[k]] = config[k]; });
+    Object.keys(rest).forEach(function (k) { ro[k] = rest[k]; });
+    html += '<section class="sm-card" style="animation:sm-fade-up 240ms var(--sm-ease) both;animation-delay:' + (groups.length * 60) + 'ms">' +
+      '<div class="sm-card-hd"><h2>只读信息</h2><span class="sm-t-3" style="font-size:12px">由服务内部维护 / PUT 不消费</span></div>' +
+      '<div class="sm-card-bd"><pre class="sm-code" style="max-height:220px">' +
+      UI.esc(JSON.stringify(ro, null, 2)) + '</pre></div></section>';
   }
   el.innerHTML = html;
 }
 
-function fieldHTML(f, key) {
-  const raw = key != null ? config[key] : undefined;
-  const id = 'cfg_' + f.keys[0];
-  const head = '<label class="text-sm block mb-1">' + f.label + '</label>';
-  const desc = '<div class="text-xs text-slate-500 mt-1">' + f.desc + '</div>';
+function fieldHTML(f) {
+  var raw = valueOf(f);
+  var id = 'cfg_' + f.key;
+  var head = '<label style="font-size:13px;font-weight:500;display:block;margin-bottom:6px">' + UI.esc(f.label) + '</label>';
+  var desc = '<div class="sm-hint" style="font-size:11px;color:var(--sm-text-3);margin-top:6px">' + UI.esc(f.desc) + '</div>';
   if (f.type === 'bool') {
-    const on = raw === true;
+    var on = raw === true;
     return '<div>' + head +
-      '<label class="inline-flex items-center gap-2 cursor-pointer">' +
-      '<input type="checkbox" id="' + id + '" data-key="' + (key || f.keys[0]) + '" ' + (on ? 'checked' : '') + ' class="w-4 h-4 accent-sky-400">' +
-      '<span class="text-xs text-slate-400">' + (on ? '已开启' : '已关闭') + '</span></label>' + desc + '</div>';
+      '<label class="sm-switch"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + '>' +
+      '<span class="sm-switch-track"></span><span class="sm-switch-txt">' + (on ? '已开启' : '已关闭') + '</span></label>' +
+      desc + '</div>';
   }
   if (f.type === 'number') {
-    return '<div>' + head + '<input type="number" id="' + id + '" data-key="' + (key || f.keys[0]) + '" value="' + (raw != null ? UI.esc(raw) : '') + '" class="' + inputCls() + '">' + desc + '</div>';
+    return '<div>' + head +
+      '<input type="number" class="sm-input" id="' + id + '" value="' + UI.escAttr(raw != null ? raw : '') + '" style="max-width:240px">' +
+      desc + '</div>';
   }
   if (f.type === 'list') {
-    const v = Array.isArray(raw) ? raw.join('\n') : (raw || '');
-    return '<div>' + head + '<textarea id="' + id + '" data-key="' + (key || f.keys[0]) + '" rows="3" class="' + inputCls() + ' font-mono text-xs">' + UI.esc(v) + '</textarea>' + desc + '</div>';
+    var v = Array.isArray(raw) ? raw.join('\n') : (raw || '');
+    return '<div>' + head +
+      '<textarea class="sm-textarea sm-mono" id="' + id + '" rows="3" style="max-width:420px">' + UI.esc(v) + '</textarea>' +
+      desc + '</div>';
   }
-  return '<div>' + head + '<input id="' + id + '" data-key="' + (key || f.keys[0]) + '" value="' + UI.esc(raw != null ? raw : '') + '" class="' + inputCls() + '">' + desc + '</div>';
+  if (f.type === 'secret') {
+    var set = config.probe_token_set === true;
+    return '<div>' + head +
+      '<input type="password" class="sm-input" id="' + id + '" autocomplete="new-password" ' +
+      'placeholder="' + (set ? '已设置，留空表示不修改' : '留空表示不校验') + '" style="max-width:320px">' +
+      desc + '</div>';
+  }
+  return '<div>' + head +
+    '<input class="sm-input" id="' + id + '" value="' + UI.escAttr(raw != null ? raw : '') + '" style="max-width:420px">' +
+    desc + '</div>';
 }
 
-async function save() {
+function save() {
   if (!config) { UI.toast('配置尚未加载', 'err'); return; }
-  const out = Object.assign({}, config);
-  for (const f of FIELDS) {
-    const id = 'cfg_' + f.keys[0];
-    const el = document.getElementById(id);
-    if (!el) continue;
-    const key = el.dataset.key;
-    if (f.type === 'bool') out[key] = el.checked;
-    else if (f.type === 'number') out[key] = el.value === '' ? 0 : Number(el.value);
-    else if (f.type === 'list') out[key] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
-    else out[key] = el.value;
-  }
-  const extraEl = document.getElementById('cfgExtra');
-  if (extraEl) {
-    try {
-      const extra = JSON.parse(extraEl.value || '{}');
-      Object.assign(out, extra);
-    } catch (e) { UI.toast('「其他配置项」JSON 格式错误', 'err'); return; }
-  }
-  try {
-    await API.putConfig(out);
-    UI.toast('配置已保存', 'ok');
-    load();
-  } catch (e) { UI.toast('保存失败：' + e.message, 'err'); }
+  var out = {};
+  FIELDS.forEach(function (f) {
+    var el = document.getElementById('cfg_' + f.key);
+    if (!el) return;
+    var v;
+    if (f.type === 'bool') v = el.checked;
+    else if (f.type === 'number') v = el.value === '' ? null : Number(el.value);
+    else if (f.type === 'list') v = el.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+    else v = el.value;
+    if (f.type === 'secret' && v === '') return; // 留空不修改
+    if (v === null || v === '') return;          // 空值不下发，避免把阈值置 0
+    out[f.key] = v;
+    if (f.alias) out[f.alias] = v;
+  });
+  if (!Object.keys(out).length) { UI.toast('没有需要保存的变更', 'info'); return; }
+  API.putConfig(out)
+    .then(function () { UI.toast('配置已保存并生效', 'ok'); load(); })
+    .catch(function (e) { UI.toast('保存失败：' + e.message, 'err'); });
 }
+
+UI.on('reload', load);
+UI.on('save', save);
+
+/* 开关文案联动 */
+document.addEventListener('change', function (e) {
+  var t = e.target;
+  if (!t || t.type !== 'checkbox' || !t.id || t.id.indexOf('cfg_') !== 0) return;
+  var txt = t.parentNode.querySelector('.sm-switch-txt');
+  if (txt) txt.textContent = t.checked ? '已开启' : '已关闭';
+});
 
 document.addEventListener('DOMContentLoaded', load);
 </script>

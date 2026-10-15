@@ -11,7 +11,8 @@ noise_duration_sec: 2         # 会话降噪时长阈值（秒）
 reverse_proxy_hosts: 10       # 反代判定 Host 域名数阈值
 long_conn_seconds: 3600       # 长连接判定时长（秒）
 heartbeat_max_bytes: 64       # 心跳包 payload 阈值（字节）
-listen_addr: ":8080"          # HTTP 监听地址
+listen_addr: "127.0.0.1:8080"    # HTTP 监听地址（默认仅回环；对外请走反代 + 鉴权）
 db_path: "starmap.db"         # SQLite 数据库路径
 probe_token: ""               # 探针上报 token（可选，配置则校验，§10.7）
 audit_retention_days: 90      # 审计日志保留天数（§10.8）
+cors_origins: []              # CORS 白名单；为空则仅同源（不发 Allow-Origin 头）

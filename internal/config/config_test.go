@@ -11,11 +11,14 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AgingSeconds != 86400 || cfg.AggregateThreshold != 20 || cfg.ListenAddr != ":8080" {
+	if cfg.AgingSeconds != 86400 || cfg.AggregateThreshold != 20 || cfg.ListenAddr != "127.0.0.1:8080" {
 		t.Fatalf("默认值异常: %+v", cfg)
 	}
 	if cfg.ProbeEnabled || cfg.CaptureEnabled {
 		t.Fatal("探测/抓包默认应关闭")
+	}
+	if cfg.Auth.Mode != "none" {
+		t.Fatalf("认证默认应关闭(none): %q", cfg.Auth.Mode)
 	}
 }
 

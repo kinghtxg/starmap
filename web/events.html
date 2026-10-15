@@ -4,154 +4,250 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>风险事件 · StarMap 星图</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwind.config = { theme: { extend: { colors: {
-  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
-  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
-} } } };
-</script>
+<link rel="stylesheet" href="assets/theme.css">
 </head>
-<body class="bg-base text-body min-h-screen">
-<div class="ml-56 p-6">
-  <header class="mb-5">
-    <h1 class="text-xl font-bold">风险事件工作台</h1>
-    <p class="text-xs text-slate-400 mt-1">确认风险 → 归档 · 判定误报 → 自动加白 · 暂缓处置</p>
-  </header>
+<body>
+<div class="sm-app">
+  <aside class="sm-sider" id="smSider"></aside>
 
-  <div class="flex flex-wrap gap-3 mb-4 items-center">
-    <select id="fStatus" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm">
-      <option value="">全部状态</option>
-      <option value="pending" selected>待处置</option>
-      <option value="confirmed">已确认</option>
-      <option value="false_positive">误报</option>
-      <option value="deferred">已暂缓</option>
-    </select>
-    <select id="fType" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm">
-      <option value="">全部类型</option>
-      <option value="frp">FRP 隧道</option>
-      <option value="clash">Clash/V2Ray</option>
-      <option value="reverse_proxy">反向代理</option>
-      <option value="unknown_egress">未知出口</option>
-      <option value="multi_net">多网域融合</option>
-    </select>
-    <button onclick="load()" class="px-3 py-1.5 text-xs rounded bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30">查询</button>
-  </div>
+  <main class="sm-main">
+    <header class="sm-topbar">
+      <div class="sm-topbar-l">
+        <h1 class="sm-h1">风险事件</h1>
+        <p class="sm-sub">确认风险 → 归档 · 判定误报 → 自动加白 · 暂缓处置</p>
+      </div>
+      <div class="sm-toolbar">
+        <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索标题 / 节点" style="width:170px" data-ico="search"></div>
+        <select class="sm-select is-sm" id="fStatus" style="width:118px" aria-label="状态">
+          <option value="">全部状态</option>
+          <option value="pending" selected>待处置</option>
+          <option value="confirmed">已确认</option>
+          <option value="false_positive">误报</option>
+          <option value="deferred">已暂缓</option>
+        </select>
+        <select class="sm-select is-sm" id="fType" style="width:126px" aria-label="类型">
+          <option value="">全部类型</option>
+          <option value="frp">FRP 隧道</option>
+          <option value="clash">Clash/V2Ray</option>
+          <option value="reverse_proxy">反向代理</option>
+          <option value="unknown_egress">未知出口</option>
+          <option value="multi_net">多网域融合</option>
+        </select>
+        <button class="sm-btn is-primary" data-act="query" data-ico="search">查询</button>
+        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+      </div>
+    </header>
 
-  <div id="list" class="space-y-3"></div>
+    <div class="sm-content">
+      <div class="sm-card sm-anim" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+        <div class="sm-card-hd">
+          <div class="sm-row is-center" style="gap:10px">
+            <h2>事件列表</h2>
+            <span class="sm-badge" id="cntBadge">0 条</span>
+          </div>
+          <div class="sm-t-3" id="sumLine">—</div>
+        </div>
+        <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+          <div class="sm-table-wrap" id="list"></div>
+        </div>
+        <div id="pager"></div>
+      </div>
+    </div>
+  </main>
 </div>
 
-<!-- 详情抽屉 -->
-<div id="drawerMask" class="fixed inset-0 bg-black/50 z-40 hidden" onclick="closeDrawer()"></div>
-<div id="drawer" class="fixed top-0 right-0 bottom-0 w-[30rem] max-w-full bg-card border-l border-slate-700 z-50 transform translate-x-full transition-transform duration-300 flex flex-col">
-  <div class="flex items-center justify-between px-5 py-4 border-b border-slate-700">
-    <h2 class="font-bold text-accent">事件详情</h2>
-    <button onclick="closeDrawer()" class="text-slate-400 hover:text-body text-xl leading-none">&times;</button>
+<!-- 详情抽屉：操作按钮统一置于底部 -->
+<div class="sm-drawer-mask" id="drawer-mask" data-act="close-drawer"></div>
+<aside class="sm-drawer" id="drawer">
+  <div class="sm-drawer-hd">
+    <h3 id="drawerTitle">事件详情</h3>
+    <button class="sm-btn is-text is-icon is-sm" data-act="close-drawer" data-ico="close" title="关闭"></button>
   </div>
-  <div id="drawerBody" class="flex-1 overflow-y-auto p-5 space-y-5 text-sm"></div>
-</div>
+  <div class="sm-drawer-bd" id="drawerBody"></div>
+  <div class="sm-drawer-ft" id="drawerFt"></div>
+</aside>
 
-<script src="assets/layout.js"></script>
 <script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
 <script>
-const TYPE_LABEL = { frp: 'FRP 隧道', clash: 'Clash/V2Ray', reverse_proxy: '反向代理', unknown_egress: '未知出口', multi_net: '多网域融合' };
-const STATUS_LABEL = { pending: '待处置', confirmed: '已确认', false_positive: '误报', deferred: '已暂缓' };
-const STATUS_COLOR = { pending: '#FB923C', confirmed: '#F87171', false_positive: '#4ADE80', deferred: '#94A3B8' };
-let current = null;
+'use strict';
+
+var TYPE_LABEL = { frp: 'FRP 隧道', clash: 'Clash/V2Ray', reverse_proxy: '反向代理', unknown_egress: '未知出口', multi_net: '多网域融合' };
+var STATUS_LABEL = { pending: '待处置', confirmed: '已确认', false_positive: '误报', deferred: '已暂缓' };
+var STATUS_CLS = { pending: 'is-warning', confirmed: 'is-danger', false_positive: 'is-success', deferred: '' };
+
+var all = [];      // 全量事件
+var view = [];     // 过滤后
+var page = 1;
+var SIZE = 20;
+var current = null;
 
 function typeLabel(t) { return TYPE_LABEL[t] || t || '-'; }
-
-async function load() {
-  const el = document.getElementById('list');
-  el.innerHTML = UI.loadingHTML('正在加载事件…');
-  try {
-    const data = await API.events({ status: document.getElementById('fStatus').value, type: document.getElementById('fType').value });
-    const events = Array.isArray(data) ? data : (data && data.Events) || [];
-    if (!events.length) { el.innerHTML = UI.emptyHTML('暂无符合条件的风险事件', '可调整筛选条件或等待检测引擎产出'); return; }
-    el.innerHTML = events.map(ev => {
-      const c = UI.riskColor(ev.Level);
-      return '<div class="bg-card rounded-xl border border-slate-700/60 p-4 flex items-center gap-4 cursor-pointer hover:border-accent/50 transition-colors" onclick="openDrawer(\'' + UI.esc(ev.ID) + '\')">' +
-        '<span class="w-2.5 h-2.5 rounded-full shrink-0" style="background:' + c + '"></span>' +
-        '<div class="flex-1 min-w-0">' +
-        '  <div class="font-medium truncate">' + UI.esc(ev.Title) + '</div>' +
-        '  <div class="text-xs text-slate-400 mt-1">' + typeLabel(ev.Type) + ' · 节点 ' + UI.esc(ev.NodeID) + ' · ' + UI.fmtTime(ev.CreatedAt) + '</div>' +
-        '</div>' +
-        '<span class="text-xs px-2 py-1 rounded border shrink-0" style="color:' + STATUS_COLOR[ev.Status] + ';border-color:' + STATUS_COLOR[ev.Status] + '55">' + (STATUS_LABEL[ev.Status] || ev.Status) + '</span>' +
-        '</div>';
-    }).join('');
-    window._events = events;
-  } catch (e) {
-    el.innerHTML = UI.errorHTML(e);
-  }
+function statusBadge(s) {
+  return '<span class="sm-badge ' + (STATUS_CLS[s] || '') + '">' + UI.esc(STATUS_LABEL[s] || s || '-') + '</span>';
 }
 
+/* ---------- 加载 ---------- */
+function load() {
+  var box = document.getElementById('list');
+  box.innerHTML = UI.skeletonRows(6);
+  var status = document.getElementById('fStatus').value;
+  var type = document.getElementById('fType').value;
+  return API.events({ status: status, type: type })
+    .then(function (data) {
+      all = Array.isArray(data) ? data : (data && data.Events) || [];
+      applyFilter();
+    })
+    .catch(function (e) {
+      all = [];
+      view = [];
+      box.innerHTML = UI.errorHTML(e);
+      document.getElementById('pager').innerHTML = '';
+      document.getElementById('sumLine').textContent = '—';
+    });
+}
+
+function applyFilter() {
+  var kw = document.getElementById('fKw').value.trim().toLowerCase();
+  view = kw
+    ? all.filter(function (e) {
+      return String(e.Title || '').toLowerCase().indexOf(kw) >= 0 ||
+        String(e.NodeID).indexOf(kw) >= 0 ||
+        String(e.NodeAPID || '').toLowerCase().indexOf(kw) >= 0 ||
+        String(e.Detail || '').toLowerCase().indexOf(kw) >= 0;
+    })
+    : all.slice();
+  page = 1;
+  render();
+}
+
+function render() {
+  var box = document.getElementById('list');
+  var st = { high: 0, mid: 0, pending: 0 };
+  all.forEach(function (e) {
+    if (e.Level === 'high') st.high++;
+    if (e.Level === 'mid') st.mid++;
+    if (e.Status === 'pending') st.pending++;
+  });
+  document.getElementById('sumLine').textContent =
+    '高危 ' + st.high + ' · 中危 ' + st.mid + ' · 待处置 ' + st.pending;
+  document.getElementById('cntBadge').textContent = view.length + ' 条';
+
+  if (!view.length) {
+    box.innerHTML = UI.emptyHTML('暂无符合条件的风险事件', '可调整筛选条件，或等待检测引擎产出新的告警');
+    document.getElementById('pager').innerHTML = '';
+    return;
+  }
+
+  var total = view.length;
+  var start = (page - 1) * SIZE;
+  var rows = view.slice(start, start + SIZE);
+
+  box.innerHTML =
+    '<table class="sm-table"><thead><tr>' +
+    '<th style="width:90px">风险</th>' +
+    '<th>标题</th>' +
+    '<th style="width:110px">类型</th>' +
+    '<th style="width:150px">关联节点</th>' +
+    '<th style="width:92px">状态</th>' +
+    '<th style="width:150px">发现时间</th>' +
+    '<th style="width:88px" class="sm-td-ops">操作</th>' +
+    '</tr></thead><tbody>' +
+    rows.map(function (ev) {
+      return '<tr>' +
+        '<td>' + UI.riskTag(ev.Level) + '</td>' +
+        '<td><div class="sm-ellipsis" style="max-width:420px" title="' + UI.escAttr(ev.Title) + '">' + UI.esc(ev.Title) + '</div></td>' +
+        '<td class="sm-t-2" style="font-size:12px">' + UI.esc(typeLabel(ev.Type)) + '</td>' +
+        '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(ev.NodeAPID || ev.NodeID) + '</span></td>' +
+        '<td>' + statusBadge(ev.Status) + '</td>' +
+        '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtTime(ev.CreatedAt)) + '</td>' +
+        '<td class="sm-td-ops"><button class="sm-btn is-text is-sm" data-act="open" data-id="' + UI.escAttr(ev.ID) + '">复核</button></td>' +
+        '</tr>';
+    }).join('') +
+    '</tbody></table>';
+  document.getElementById('pager').innerHTML = UI.pagerHTML(total, page, SIZE, 'page');
+}
+
+/* ---------- 抽屉 ---------- */
 function openDrawer(id) {
-  const ev = (window._events || []).find(x => String(x.ID) === String(id));
+  var ev = all.filter(function (x) { return String(x.ID) === String(id); })[0];
   if (!ev) return;
   current = ev;
-  const body = document.getElementById('drawerBody');
-  const evidence = ev.Evidence && Object.keys(ev.Evidence).length
-    ? '<pre class="bg-base/70 rounded-lg p-3 text-xs overflow-x-auto text-slate-300">' + UI.esc(JSON.stringify(ev.Evidence, null, 2)) + '</pre>'
-    : '<div class="text-xs text-slate-500">暂无证据数据</div>';
-  body.innerHTML =
-    '<div class="space-y-3">' +
-    field('标题', UI.esc(ev.Title)) +
-    field('类型', typeLabel(ev.Type)) +
-    field('级别', UI.riskBadge(ev.Level)) +
-    field('状态', '<span style="color:' + STATUS_COLOR[ev.Status] + '">' + (STATUS_LABEL[ev.Status] || ev.Status) + '</span>') +
-    field('关联节点', UI.esc(ev.NodeID)) +
-    field('详情', UI.esc(ev.Detail || '-')) +
-    field('创建时间', UI.fmtTime(ev.CreatedAt)) +
-    field('更新时间', UI.fmtTime(ev.UpdatedAt)) +
+  document.getElementById('drawerTitle').textContent = ev.Title || '事件详情';
+
+  var evidence = ev.Evidence && Object.keys(ev.Evidence).length
+    ? '<pre class="sm-code" style="max-height:220px">' + UI.esc(JSON.stringify(ev.Evidence, null, 2)) + '</pre>'
+    : '<div class="sm-t-3" style="font-size:12px">暂无证据数据</div>';
+
+  document.getElementById('drawerBody').innerHTML =
+    '<div class="sm-stack-sm">' +
+    kv('类型', '<span class="sm-badge is-brand">' + UI.esc(typeLabel(ev.Type)) + '</span>') +
+    kv('风险等级', UI.riskTag(ev.Level)) +
+    kv('处置状态', statusBadge(ev.Status)) +
+    kv('关联节点', '<span class="sm-mono">' + UI.esc(ev.NodeAPID || ev.NodeID) + '</span>') +
+    kv('详情', UI.esc(ev.Detail || '-')) +
+    kv('创建时间', UI.fmtTime(ev.CreatedAt)) +
+    kv('更新时间', UI.fmtTime(ev.UpdatedAt)) +
     '</div>' +
-    '<div><div class="text-xs text-slate-400 mb-1.5">证据</div>' + evidence + '</div>' +
-    '<div><div class="text-xs text-slate-400 mb-1.5">操作留痕</div>' + timelineHTML(ev) + '</div>' +
-    '<div class="bg-base/50 rounded-lg p-4 space-y-3">' +
-    '  <div class="text-xs text-slate-400">处置操作（误报将自动加白）</div>' +
-    '  <input id="rvReviewer" placeholder="操作人（Reviewer）" class="w-full bg-card border border-slate-600 rounded px-3 py-1.5 text-sm" value="">' +
-    '  <textarea id="rvNote" rows="2" placeholder="处置备注（必填）" class="w-full bg-card border border-slate-600 rounded px-3 py-1.5 text-sm"></textarea>' +
-    '  <div class="flex gap-2">' +
-    '    <button onclick="review(\'confirm\')" class="flex-1 py-1.5 text-xs rounded bg-riskHigh/20 text-riskHigh border border-riskHigh/40 hover:bg-riskHigh/30">确认风险·归档</button>' +
-    '    <button onclick="review(\'false_positive\')" class="flex-1 py-1.5 text-xs rounded bg-riskLow/20 text-riskLow border border-riskLow/40 hover:bg-riskLow/30">判定误报·加白</button>' +
-    '    <button onclick="review(\'defer\')" class="flex-1 py-1.5 text-xs rounded bg-slate-500/20 text-slate-300 border border-slate-500/40 hover:bg-slate-500/30">暂缓</button>' +
-    '  </div>' +
-    '</div>';
-  document.getElementById('drawerMask').classList.remove('hidden');
-  const d = document.getElementById('drawer');
-  d.classList.remove('translate-x-full');
+    '<div class="sm-divider"></div>' +
+    '<div class="sm-label" style="margin-bottom:8px">证据</div>' + evidence +
+    '<div class="sm-divider"></div>' +
+    '<div class="sm-label" style="margin-bottom:10px">操作留痕</div>' + timeline(ev);
+
+  document.getElementById('drawerFt').innerHTML =
+    '<input class="sm-input is-sm" id="rvReviewer" placeholder="操作人" style="width:110px">' +
+    '<input class="sm-input is-sm" id="rvNote" placeholder="处置备注（必填）" style="flex:1">' +
+    '<button class="sm-btn is-danger" data-act="review" data-v="confirm">确认归档</button>' +
+    '<button class="sm-btn is-warn" data-act="review" data-v="false_positive">误报加白</button>' +
+    '<button class="sm-btn" data-act="review" data-v="defer">暂缓</button>';
+
+  UI.openDrawer('drawer');
 }
-function field(k, v) {
-  return '<div><div class="text-xs text-slate-400 mb-0.5">' + k + '</div><div class="break-all">' + v + '</div></div>';
+function kv(k, v) {
+  return '<div class="sm-kv"><div class="sm-kv-k">' + k + '</div><div class="sm-kv-v">' + v + '</div></div>';
 }
-function timelineHTML(ev) {
-  const items = [];
-  items.push({ t: ev.CreatedAt, text: '事件创建（检测引擎）' });
+function timeline(ev) {
+  var items = [{ t: ev.CreatedAt, c: '事件创建（检测引擎）' }];
   if (ev.UpdatedAt && ev.UpdatedAt !== ev.CreatedAt) {
-    items.push({ t: ev.UpdatedAt, text: '复核操作：' + (STATUS_LABEL[ev.Status] || ev.Status) +
-      (ev.Reviewer ? ' · 操作人 ' + ev.Reviewer : '') + (ev.ReviewNote ? ' · 备注：' + ev.ReviewNote : '') });
+    items.push({
+      t: ev.UpdatedAt,
+      c: '复核操作：' + (STATUS_LABEL[ev.Status] || ev.Status) +
+        (ev.Reviewer ? ' · 操作人 ' + ev.Reviewer : '') +
+        (ev.ReviewNote ? ' · 备注：' + ev.ReviewNote : '')
+    });
   }
-  return '<div class="border-l-2 border-slate-600 ml-1.5 pl-4 space-y-3">' +
-    items.map(i => '<div class="relative"><span class="absolute -left-[1.42rem] top-1 w-2.5 h-2.5 rounded-full bg-accent"></span>' +
-      '<div class="text-xs text-slate-400">' + UI.fmtTime(i.t) + '</div>' +
-      '<div class="text-xs mt-0.5">' + UI.esc(i.text) + '</div></div>').join('') + '</div>';
+  return '<div class="sm-timeline">' + items.map(function (i) {
+    return '<div class="sm-timeline-item"><div class="sm-timeline-t">' + UI.esc(UI.fmtTime(i.t)) + '</div>' +
+      '<div class="sm-timeline-c">' + UI.esc(i.c) + '</div></div>';
+  }).join('') + '</div>';
 }
-function closeDrawer() {
-  document.getElementById('drawerMask').classList.add('hidden');
-  document.getElementById('drawer').classList.add('translate-x-full');
-  current = null;
-}
-async function review(action) {
+
+function review(action) {
   if (!current) return;
-  const note = document.getElementById('rvNote').value.trim();
-  const reviewer = document.getElementById('rvReviewer').value.trim();
+  var note = (document.getElementById('rvNote').value || '').trim();
+  var reviewer = (document.getElementById('rvReviewer').value || '').trim();
   if (!note) { UI.toast('请填写处置备注', 'err'); return; }
-  try {
-    await API.reviewEvent(current.ID, action, note, reviewer);
-    UI.toast({ confirm: '已确认风险并归档', false_positive: '已判定误报并自动加白', defer: '已暂缓处置' }[action] || '操作成功', 'ok');
-    closeDrawer();
-    load();
-  } catch (e) { UI.toast('操作失败：' + e.message, 'err'); }
+  API.reviewEvent(current.ID, action, note, reviewer)
+    .then(function () {
+      UI.toast({ confirm: '已确认风险并归档', false_positive: '已判定误报并自动加白', defer: '已暂缓处置' }[action] || '操作成功', 'ok');
+      UI.closeDrawer('drawer');
+      load();
+    })
+    .catch(function (e) { UI.toast('操作失败：' + e.message, 'err'); });
 }
+
+/* ---------- 事件绑定 ---------- */
+UI.on('query', applyFilter);
+UI.on('refresh', load);
+UI.on('open', function (el) { openDrawer(el.getAttribute('data-id')); });
+UI.on('close-drawer', function () { UI.closeDrawer('drawer'); });
+UI.on('review', function (el) { review(el.getAttribute('data-v')); });
+UI.on('page', function (el) {
+  page = Number(el.getAttribute('data-page')) || 1;
+  render();
+});
+document.getElementById('fKw').addEventListener('input', applyFilter);
+document.getElementById('drawer-mask').addEventListener('click', function () { UI.closeDrawer('drawer'); });
 
 document.addEventListener('DOMContentLoaded', load);
 </script>

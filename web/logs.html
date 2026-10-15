@@ -4,66 +4,129 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>审计日志 · StarMap 星图</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwind.config = { theme: { extend: { colors: {
-  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
-  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
-} } } };
-</script>
+<link rel="stylesheet" href="assets/theme.css">
 </head>
-<body class="bg-base text-body min-h-screen">
-<div class="ml-56 p-6">
-  <header class="flex items-center justify-between mb-5">
-    <div>
-      <h1 class="text-xl font-bold">审计日志</h1>
-      <p class="text-xs text-slate-400 mt-1">GET /api/audit · 事件复核、白名单变更等全部操作留痕</p>
+<body>
+<div class="sm-app">
+  <aside class="sm-sider" id="smSider"></aside>
+
+  <main class="sm-main">
+    <header class="sm-topbar">
+      <div class="sm-topbar-l">
+        <h1 class="sm-h1">审计日志</h1>
+        <p class="sm-sub">GET /api/audit · 事件复核、白名单变更、配置变更等全部操作留痕</p>
+      </div>
+      <div class="sm-toolbar">
+        <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="关键字过滤…" style="width:200px" data-ico="search"></div>
+        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+      </div>
+    </header>
+
+    <div class="sm-content">
+      <div class="sm-card sm-anim" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+        <div class="sm-card-hd">
+          <div class="sm-row is-center" style="gap:10px">
+            <h2>操作留痕</h2>
+            <span class="sm-badge" id="cntBadge">0 条</span>
+          </div>
+          <div class="sm-t-3" id="sumLine">—</div>
+        </div>
+        <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+          <div class="sm-table-wrap" id="list"></div>
+        </div>
+        <div id="pager"></div>
+      </div>
     </div>
-    <div class="flex gap-2 items-center">
-      <input id="kw" placeholder="关键字过滤…" class="bg-card border border-slate-600 rounded px-3 py-1.5 text-sm" oninput="render()">
-      <button onclick="load()" class="px-3 py-1.5 text-xs rounded bg-card border border-slate-600 hover:border-accent hover:text-accent">刷新</button>
-    </div>
-  </header>
-  <div id="list" class="bg-card rounded-xl border border-slate-700/60 overflow-hidden"></div>
+  </main>
 </div>
 
-<script src="assets/layout.js"></script>
 <script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
 <script>
-let logs = [];
+'use strict';
 
-async function load() {
-  const el = document.getElementById('list');
-  el.innerHTML = UI.loadingHTML('正在加载审计日志…');
-  try {
-    const data = await API.audit();
-    logs = Array.isArray(data) ? data : (data && data.Logs) || [];
-    render();
-  } catch (e) {
-    logs = [];
-    el.innerHTML = UI.errorHTML(e);
-  }
+var ACTION_LABEL = {
+  ingest_pcap: 'PCAP 导入', ingest_probe: '探针上报', capture_start: '启动抓包', capture_stop: '停止抓包',
+  probe_trigger: '主动探测', config_update: '配置变更', whitelist_create: '白名单新增',
+  whitelist_update: '白名单修改', whitelist_delete: '白名单删除', domain_create: '网络域新增',
+  domain_update: '网络域修改', domain_delete: '网络域删除', event_review: '事件复核',
+  event_confirm: '确认风险', event_false_positive: '判定误报', event_defer: '暂缓处置'
+};
+var ACTION_CLS = {
+  ingest_pcap: 'is-brand', ingest_probe: 'is-brand', probe_trigger: 'is-brand',
+  config_update: 'is-warning', event_confirm: 'is-danger', event_false_positive: 'is-success',
+  whitelist_create: 'is-success', whitelist_update: 'is-success', whitelist_delete: 'is-danger',
+  domain_create: 'is-success', domain_update: 'is-success', domain_delete: 'is-danger',
+  capture_start: 'is-info', capture_stop: 'is-info'
+};
+
+var all = [], view = [], page = 1;
+var SIZE = 25;
+
+function load() {
+  var box = document.getElementById('list');
+  box.innerHTML = UI.skeletonRows(6);
+  return API.audit().then(function (data) {
+    all = Array.isArray(data) ? data : (data && data.Logs) || [];
+    applyFilter();
+  }).catch(function (e) {
+    all = []; view = [];
+    box.innerHTML = UI.errorHTML(e);
+    document.getElementById('pager').innerHTML = '';
+  });
+}
+
+function applyFilter() {
+  var kw = document.getElementById('kw').value.trim().toLowerCase();
+  view = kw
+    ? all.filter(function (l) {
+      return JSON.stringify(l).toLowerCase().indexOf(kw) >= 0;
+    })
+    : all.slice();
+  page = 1;
+  render();
 }
 
 function render() {
-  const el = document.getElementById('list');
-  const kw = document.getElementById('kw').value.trim().toLowerCase();
-  const items = kw ? logs.filter(l => JSON.stringify(l).toLowerCase().includes(kw)) : logs;
-  if (!items.length) { el.innerHTML = UI.emptyHTML('暂无审计日志'); return; }
-  el.innerHTML =
-    '<table class="w-full text-sm">' +
-    '<thead><tr class="text-xs text-slate-400 border-b border-slate-700">' +
-    '<th class="text-left px-4 py-3">时间</th><th class="text-left px-4 py-3">操作人</th>' +
-    '<th class="text-left px-4 py-3">动作</th><th class="text-left px-4 py-3">对象</th><th class="text-left px-4 py-3">详情</th></tr></thead>' +
-    '<tbody>' + items.map(l =>
-      '<tr class="border-b border-slate-700/50 hover:bg-slate-700/20">' +
-      '<td class="px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap">' + UI.fmtTime(l.CreatedAt) + '</td>' +
-      '<td class="px-4 py-2.5 text-xs">' + UI.esc(l.Actor || '-') + '</td>' +
-      '<td class="px-4 py-2.5"><span class="text-xs px-2 py-0.5 rounded bg-accent/15 text-accent border border-accent/30">' + UI.esc(l.Action) + '</span></td>' +
-      '<td class="px-4 py-2.5 text-xs font-mono">' + UI.esc(l.Target || '-') + '</td>' +
-      '<td class="px-4 py-2.5 text-xs text-slate-400">' + UI.esc(l.Detail || '-') + '</td>' +
-      '</tr>').join('') + '</tbody></table>';
+  var box = document.getElementById('list');
+  document.getElementById('cntBadge').textContent = view.length + ' 条';
+  var recent = all.filter(function (l) {
+    var t = new Date(l.CreatedAt).getTime();
+    return t && (Date.now() - t) < 86400000;
+  }).length;
+  document.getElementById('sumLine').textContent = '近 24 小时 ' + recent + ' 条 · 服务最多返回最近 500 条';
+
+  if (!view.length) {
+    box.innerHTML = UI.emptyHTML('暂无审计日志', '系统中的复核、白名单、网络域与配置变更操作会在此留痕');
+    document.getElementById('pager').innerHTML = '';
+    return;
+  }
+  var start = (page - 1) * SIZE;
+  var rows = view.slice(start, start + SIZE);
+  box.innerHTML =
+    '<table class="sm-table"><thead><tr>' +
+    '<th style="width:160px">时间</th>' +
+    '<th style="width:110px">操作人</th>' +
+    '<th style="width:130px">动作</th>' +
+    '<th style="width:200px">对象</th>' +
+    '<th>详情</th>' +
+    '</tr></thead><tbody>' +
+    rows.map(function (l) {
+      return '<tr>' +
+        '<td class="sm-t-3" style="font-size:12px;white-space:nowrap">' + UI.esc(UI.fmtTime(l.CreatedAt)) + '</td>' +
+        '<td style="font-size:12px">' + UI.esc(l.Actor || '-') + '</td>' +
+        '<td><span class="sm-badge ' + (ACTION_CLS[l.Action] || '') + '">' +
+        UI.esc(ACTION_LABEL[l.Action] || l.Action || '-') + '</span></td>' +
+        '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(l.Target || '-') + '</span></td>' +
+        '<td class="sm-t-2" style="font-size:12px">' + UI.esc(l.Detail || '-') + '</td>' +
+        '</tr>';
+    }).join('') + '</tbody></table>';
+  document.getElementById('pager').innerHTML = UI.pagerHTML(view.length, page, SIZE, 'page');
 }
+
+UI.on('refresh', load);
+UI.on('page', function (el) { page = Number(el.getAttribute('data-page')) || 1; render(); });
+document.getElementById('kw').addEventListener('input', applyFilter);
 
 document.addEventListener('DOMContentLoaded', load);
 </script>

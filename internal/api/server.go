@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"starmap/internal/auth"
 	"starmap/internal/detect"
 	"starmap/internal/ingest"
 	"starmap/internal/model"
@@ -65,14 +66,14 @@ type Server struct {
 func NewRouter(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Recovery(), corsMiddleware())
-	// 认证 middleware 接口位（本期不做登录/SSO/RBAC，SPEC §1/§12）
-	r.Use(authPlaceholder())
-
 	s := &Server{d: d, savedSessions: map[string]bool{}}
 	if s.d.Version == "" {
 		s.d.Version = "V1.0"
 	}
+	r.Use(gin.Recovery(), s.corsMiddleware())
+	// 可选账号系统 / APSSO SSO 门卫（默认 mode=none，不启用时零行为差异，见 docs/AUTH-APSSO.md）
+	r.Use(auth.Middleware(d.Cfg.Auth))
+	auth.RegisterRoutes(r, d.Cfg.Auth)
 
 	api := r.Group("/api")
 	{
@@ -112,9 +113,18 @@ func (s *Server) Handler() http.Handler { return nil }
 
 // ---------- middleware ----------
 
-func corsMiddleware() gin.HandlerFunc {
+func (s *Server) corsMiddleware() gin.HandlerFunc {
+	// P0-4/P1-7：CORS 收紧为白名单。默认空 = 仅同源，不发 Access-Control-Allow-Origin，
+	// 杜绝任意恶意网页跨域读写内网 StarMap。
+	origins := s.d.Cfg.CorsOrigins
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		if origin := c.Request.Header.Get("Origin"); origin != "" {
+			if allowedOrigin(origin, origins) {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+				c.Header("Access-Control-Allow-Credentials", "true")
+			}
+		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Probe-Token")
 		if c.Request.Method == http.MethodOptions {
@@ -125,7 +135,21 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// authPlaceholder 认证接口位：本期不启用，预留注入点。
+// allowedOrigin 判断 Origin 是否命中白名单；白名单为空则仅同源（含同 host 的 Origin）。
+func allowedOrigin(origin string, allow []string) bool {
+	if len(allow) == 0 {
+		return false
+	}
+	for _, a := range allow {
+		a = strings.TrimSpace(a)
+		if a == "*" || a == origin {
+			return true
+		}
+	}
+	return false
+}
+
+// authPlaceholder 已废弃：认证由 internal/auth.Middleware 承担（默认 mode=none）。
 func authPlaceholder() gin.HandlerFunc {
 	return func(c *gin.Context) { c.Next() }
 }
@@ -1163,7 +1187,8 @@ func (s *Server) putConfig(c *gin.Context) {
 	if v, ok := numFrom(m, "heartbeat_max_bytes"); ok && v > 0 {
 		cfg.HeartbeatMaxBytes = int(v)
 	}
-	if v, ok := strFrom(m, "probe_token"); ok {
+	if v, ok := strFrom(m, "probe_token"); ok && v != "" {
+		// P0-3：空串忽略，避免前端留空时静默清空已设置的令牌。
 		cfg.ProbeToken = v
 	}
 	if v, ok := numFrom(m, "audit_retention_days"); ok && v > 0 {

@@ -4,129 +4,170 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>关于 · StarMap 星图</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-tailwind.config = { theme: { extend: { colors: {
-  base: '#0F172A', card: '#1E293B', accent: '#38BDF8', body: '#E2E8F0',
-  riskHigh: '#F87171', riskMid: '#FB923C', riskLow: '#4ADE80'
-} } } };
-</script>
-<style>
-/* 关于页专属：低透明拓扑动画 hero */
-#hero-topo { position: absolute; inset: 0; width: 100%; height: 100%; opacity: .45; }
-@keyframes glow { 0%,100% { text-shadow: 0 0 18px rgba(56,189,248,.5); } 50% { text-shadow: 0 0 34px rgba(56,189,248,.9); } }
-.hero-title { animation: glow 4s ease-in-out infinite; }
-</style>
+<link rel="stylesheet" href="assets/theme.css">
 </head>
-<body class="bg-base text-body min-h-screen">
-<div class="ml-56">
-  <!-- Hero -->
-  <section class="relative h-[55vh] min-h-[380px] flex items-center justify-center overflow-hidden border-b border-slate-700/60">
-    <canvas id="hero-topo"></canvas>
-    <div class="relative z-10 text-center px-6">
-      <div class="hero-title text-5xl font-black text-accent tracking-[.3em] mb-4">StarMap 星图</div>
-      <div class="text-lg text-body/90 tracking-widest">网内拓扑自动测绘引擎 · V1.0</div>
-      <div class="text-xs text-slate-400 mt-4">被动测绘 · 拓扑生长 · 风险识别 · 审计留痕</div>
-      <div class="mt-8 flex gap-3 justify-center">
-        <a href="index.html" class="px-5 py-2 rounded-lg bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30 text-sm">进入拓扑总览</a>
-        <a href="ingest.html" class="px-5 py-2 rounded-lg bg-card border border-slate-600 hover:border-accent hover:text-accent text-sm">数据接入</a>
+<body>
+<div class="sm-app">
+  <aside class="sm-sider" id="smSider"></aside>
+
+  <main class="sm-main">
+    <header class="sm-topbar">
+      <div class="sm-topbar-l">
+        <h1 class="sm-h1">关于</h1>
+        <p class="sm-sub">网内拓扑自动测绘引擎 · 内网离线部署版本</p>
+      </div>
+      <div class="sm-toolbar">
+        <a class="sm-btn" href="ingest.html" data-ico="ingest">数据接入</a>
+        <a class="sm-btn is-primary" href="index.html" data-ico="topo">进入拓扑总览</a>
+      </div>
+    </header>
+
+    <div class="sm-content">
+      <!-- Hero -->
+      <section class="sm-card sm-anim" style="position:relative;overflow:hidden;margin-bottom:12px">
+        <canvas id="heroCanvas" style="position:absolute;inset:0;width:100%;height:100%;opacity:.5;pointer-events:none"></canvas>
+        <div style="position:relative;padding:34px 28px">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div class="sm-sider-logo" style="width:38px;height:38px;flex:0 0 38px">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </div>
+            <div>
+              <div style="font-size:24px;font-weight:800;letter-spacing:.12em;color:var(--sm-brand-2);line-height:1.2">StarMap 星图</div>
+              <div class="sm-t-3" style="font-size:12px;margin-top:2px">网内拓扑自动测绘引擎 · V1.1</div>
+            </div>
+          </div>
+          <div class="sm-t-2" style="margin-top:12px;font-size:13px">被动测绘 · 拓扑生长 · 风险识别 · 复核闭环 · 审计留痕</div>
+          <div class="sm-row is-center" style="gap:8px;margin-top:14px;flex-wrap:wrap">
+            <span class="sm-badge is-brand">零外网依赖</span>
+            <span class="sm-badge is-brand">单二进制分发</span>
+            <span class="sm-badge is-success" id="healthBadge">服务检测中…</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="sm-grid sm-grid-3">
+        <section class="sm-card sm-anim" style="--sm-d:60ms">
+          <div class="sm-card-hd"><h2>能力</h2><span class="sm-badge">5 类检测</span></div>
+          <div class="sm-card-bd">
+            <ul class="sm-stack-sm" style="font-size:13px">
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>PCAP 离线导入 / 多网卡实时抓包 / 探针上报</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>拓扑自动生长：节点合并、网段聚合、老化降噪、NAT 修复</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>FRP / Clash / 反代 / 未知出口 / 多网域融合检测</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>事件复核闭环：确认归档、误报加白、暂缓</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>白名单抑制与全量审计留痕</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="sm-card sm-anim" style="--sm-d:120ms">
+          <div class="sm-card-hd"><h2>技术栈</h2></div>
+          <div class="sm-card-bd">
+            <ul class="sm-stack-sm" style="font-size:13px">
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>Go 1.22 + Gin</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>gopacket 报文解析（JA3 / JA4 / SNI / Host）</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>modernc.org/sqlite 纯 Go 持久化</li>
+              <li class="sm-row is-center" style="gap:8px"><span class="sm-dot is-on"></span>原生 HTML/CSS/SVG 前端，自绘拓扑引擎</li>
+            </ul>
+            <div class="sm-alert is-info" style="margin-top:12px">
+              <span class="sm-alert-ico" data-ico="info"></span>
+              <div class="sm-alert-body" style="font-size:12px">本期不含：登录/RBAC、流量解密、漏洞扫描、IDS。</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="sm-card sm-anim" style="--sm-d:180ms">
+          <div class="sm-card-hd"><h2>项目信息</h2></div>
+          <div class="sm-card-bd">
+            <div class="sm-stack-sm" style="font-size:13px">
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">版本</span><span class="sm-mono" id="ver">V1.1</span></div>
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">归属</span><span>极客星空实验室</span></div>
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">许可证</span><span style="color:var(--sm-brand-2);font-weight:600">Apache-2.0</span></div>
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">部署形态</span><span>内网离线 · 单二进制</span></div>
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">服务状态</span><span id="health">检测中…</span></div>
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">拓扑规模</span><span id="scale">—</span></div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
-  </section>
-
-  <div class="p-8 max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-5">
-    <section class="bg-card rounded-xl border border-slate-700/60 p-6">
-      <h2 class="font-bold text-accent mb-3">能力</h2>
-      <ul class="text-sm space-y-2 text-slate-300 list-disc list-inside">
-        <li>PCAP 离线导入 / 多网卡实时抓包 / 探针上报</li>
-        <li>拓扑自动生长：节点合并、网段聚合、老化降噪、NAT 修复</li>
-        <li>FRP / Clash / 反代 / 未知出口 / 多网域融合检测</li>
-        <li>事件复核闭环：确认归档、误报加白、暂缓</li>
-        <li>白名单抑制与审计留痕</li>
-      </ul>
-    </section>
-    <section class="bg-card rounded-xl border border-slate-700/60 p-6">
-      <h2 class="font-bold text-accent mb-3">技术栈</h2>
-      <ul class="text-sm space-y-2 text-slate-300 list-disc list-inside">
-        <li>Go 1.22 + Gin</li>
-        <li>gopacket 报文解析（JA3 / JA4 / SNI / Host）</li>
-        <li>modernc.org/sqlite 纯 Go 持久化</li>
-        <li>Tailwind CSS + Cytoscape.js + jsPDF</li>
-      </ul>
-      <div class="mt-4 text-xs text-slate-500">本期不含：登录/RBAC、流量解密、漏洞扫描、IDS。</div>
-    </section>
-    <section class="bg-card rounded-xl border border-slate-700/60 p-6">
-      <h2 class="font-bold text-accent mb-3">项目信息</h2>
-      <div class="text-sm space-y-2.5 text-slate-300">
-        <div class="flex justify-between"><span class="text-slate-400">版本</span><span>V1.0</span></div>
-        <div class="flex justify-between"><span class="text-slate-400">归属</span><span>极客星空实验室</span></div>
-        <div class="flex justify-between"><span class="text-slate-400">许可证</span><span class="text-accent">Apache-2.0</span></div>
-        <div class="flex justify-between"><span class="text-slate-400">服务状态</span><span id="health">检测中…</span></div>
-      </div>
-    </section>
-  </div>
+  </main>
 </div>
 
-<script src="assets/layout.js"></script>
 <script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
 <script>
-/* Hero 拓扑动画：比全局背景更亮的独立 canvas */
+'use strict';
+
+/* Hero：轻量拓扑连线动画（canvas，纯本地，无外部依赖） */
 (function () {
-  const canvas = document.getElementById('hero-topo');
-  const ctx = canvas.getContext('2d');
-  let W, H, nodes = [], pulses = [];
-  const N = 60, LINK = 160;
+  var canvas = document.getElementById('heroCanvas');
+  if (!canvas) return;
+  if (UI.reducedMotion) { canvas.style.display = 'none'; return; }
+  var ctx = canvas.getContext('2d');
+  var W = 0, H = 0, nodes = [];
+  var N = 46, LINK = 150;
+
   function resize() {
     W = canvas.width = canvas.offsetWidth;
     H = canvas.height = canvas.offsetHeight;
   }
   function init() {
     nodes = [];
-    for (let i = 0; i < N; i++) nodes.push({
-      x: Math.random() * W, y: Math.random() * H,
-      vx: (Math.random() - .5) * .4, vy: (Math.random() - .5) * .4,
-      r: Math.random() * 2 + 1,
-      c: ['#38BDF8', '#4ADE80', '#FB923C', '#F87171'][Math.random() * 20 | 0] || '#38BDF8',
-    });
+    for (var i = 0; i < N; i++) {
+      nodes.push({
+        x: Math.random() * W, y: Math.random() * H,
+        vx: (Math.random() - .5) * .28, vy: (Math.random() - .5) * .28,
+        r: Math.random() * 1.5 + .8
+      });
+    }
   }
   function tick() {
     ctx.clearRect(0, 0, W, H);
-    for (const n of nodes) {
-      n.x += n.vx; n.y += n.vy;
-      if (n.x < 0 || n.x > W) n.vx *= -1;
-      if (n.y < 0 || n.y > H) n.vy *= -1;
+    var i, j, a, b, d;
+    for (i = 0; i < N; i++) {
+      a = nodes[i];
+      a.x += a.vx; a.y += a.vy;
+      if (a.x < 0 || a.x > W) a.vx *= -1;
+      if (a.y < 0 || a.y > H) a.vy *= -1;
     }
-    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
-      const a = nodes[i], b = nodes[j];
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (d < LINK) {
-        ctx.globalAlpha = (1 - d / LINK) * .35;
-        ctx.strokeStyle = '#38BDF8'; ctx.lineWidth = .7;
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-        if (Math.random() < .0015) pulses.push({ a, b, t: 0 });
+    ctx.lineWidth = .7;
+    for (i = 0; i < N; i++) {
+      for (j = i + 1; j < N; j++) {
+        a = nodes[i]; b = nodes[j];
+        d = Math.sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+        if (d < LINK) {
+          ctx.globalAlpha = (1 - d / LINK) * .5;
+          ctx.strokeStyle = '#6699ff';
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        }
       }
     }
+    ctx.globalAlpha = .8;
+    ctx.fillStyle = '#0052d9';
+    for (i = 0; i < N; i++) {
+      ctx.beginPath(); ctx.arc(nodes[i].x, nodes[i].y, nodes[i].r, 0, 6.2832); ctx.fill();
+    }
     ctx.globalAlpha = 1;
-    pulses = pulses.filter(p => p.t <= 1);
-    for (const p of pulses) {
-      p.t += .03;
-      const x = p.a.x + (p.b.x - p.a.x) * p.t, y = p.a.y + (p.b.y - p.a.y) * p.t;
-      ctx.fillStyle = '#7DD3FC';
-      ctx.beginPath(); ctx.arc(x, y, 2.2, 0, 7); ctx.fill();
-    }
-    for (const n of nodes) {
-      ctx.fillStyle = n.c;
-      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 7); ctx.fill();
-    }
     requestAnimationFrame(tick);
   }
   resize(); init(); tick();
-  addEventListener('resize', () => { resize(); init(); });
+  window.addEventListener('resize', function () { resize(); init(); });
 })();
 
-API.health()
-  .then(() => document.getElementById('health').innerHTML = '<span class="text-riskLow">● 在线</span>')
-  .catch(() => document.getElementById('health').innerHTML = '<span class="text-slate-500">○ 未连接</span>');
+API.health().then(function (h) {
+  document.getElementById('health').innerHTML = '<span class="sm-dot is-on"></span> 在线' +
+    (h && h.version ? ' <span class="sm-mono" style="font-size:12px">' + UI.esc(h.version) + '</span>' : '');
+  document.getElementById('healthBadge').textContent = '后端服务在线';
+  if (h && h.version) document.getElementById('ver').textContent = h.version;
+}).catch(function () {
+  document.getElementById('health').innerHTML = '<span class="sm-dot is-off"></span> 未连接';
+  document.getElementById('healthBadge').className = 'sm-badge';
+  document.getElementById('healthBadge').textContent = '后端服务未连接';
+});
+
+API.stats().then(function (s) {
+  document.getElementById('scale').textContent = (s.NodeCount || 0) + ' 节点 / ' + (s.EdgeCount || 0) + ' 链路';
+}).catch(function () { /* 未连接时保持占位 */ });
 </script>
 </body>
 </html>

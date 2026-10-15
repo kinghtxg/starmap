@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"sync"
 	"time"
 
 	"starmap/internal/model"
@@ -34,6 +35,12 @@ type Detector struct {
 	// NowFunc 可注入时钟（测试用）
 	NowFunc func() time.Time
 
+	// mu 保护 started / Cfg / egress.baseline。
+	// P0-1 修复：HTTP 上传同步评估（evaluateAsync）与 Run 的 30s 周期评估
+	// 会并发进入 evalUnknownEgress，对 egress.baseline 裸 map 并发写，触发
+	// Go runtime "fatal error: concurrent map writes"。fatal error 不经过
+	// panic()，因此 gin.Recovery() 无法拦截，进程直接退出。
+	mu      sync.Mutex
 	started time.Time
 	egress  *egressTracker
 	stop    chan struct{}
@@ -55,7 +62,11 @@ func New(st *store.Store, eng *topology.Engine, cfg model.SystemConfig) *Detecto
 }
 
 // UpdateConfig 热更新配置。
-func (d *Detector) UpdateConfig(cfg model.SystemConfig) { d.Cfg = cfg }
+func (d *Detector) UpdateConfig(cfg model.SystemConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.Cfg = cfg
+}
 
 // Run 启动周期性评估循环（阻塞，ctx 取消退出）。
 func (d *Detector) Run(ctx context.Context) {
@@ -80,6 +91,10 @@ func (d *Detector) Stop() { close(d.stop) }
 
 // Evaluate 执行一轮全部规则评估，返回新建的事件（去重命中的仅更新证据）。
 func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
+	// P0-1：整轮评估串行化，覆盖 started / Cfg / egress.baseline 的共享写。
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	now := d.NowFunc()
 	if d.started.IsZero() {
 		d.started = now // 学习期自首次评估起算

@@ -2,7 +2,11 @@
 // JSON tag 即 REST API 字段，见 SPEC §3。
 package model
 
-import "time"
+import (
+	"time"
+
+	"starmap/internal/auth"
+)
 
 // 风险等级
 const (
@@ -31,7 +35,11 @@ const (
 
 // Node 拓扑节点
 type Node struct {
-	ID        int64     `json:"id"`
+	ID int64 `json:"id"`
+	// NodeKey 跨进程重启稳定的节点身份：优先 MAC（mac:<mac>），无 MAC 用主 IP（ip:<ip>），
+	// 外部聚合节点为 ext:<cidr>。一经确定不再变更，用作拓扑持久化主键与白名单 node 维度取值，
+	// 修复 P0-2（重启后 node_id 重排导致历史事件变孤儿、白名单 node 维度错配静默抑制）。
+	NodeKey   string    `json:"node_key"`
 	IPs       []string  `json:"ips"`
 	MAC       string    `json:"mac"`
 	FirstSeen time.Time `json:"first_seen"`
@@ -186,4 +194,8 @@ type SystemConfig struct {
 	DBPath             string   `json:"db_path" yaml:"db_path"`
 	ProbeToken         string   `json:"probe_token" yaml:"probe_token"`                   // §10.7 探针上报可选 token
 	AuditRetentionDays int      `json:"audit_retention_days" yaml:"audit_retention_days"` // §10.8 审计日志保留天数
+	// P0-4：CORS 白名单。为空表示仅允许同源（不发 Access-Control-Allow-Origin）。
+	CorsOrigins []string `json:"cors_origins" yaml:"cors_origins"`
+	// 可选账号系统 / APSSO SSO 门卫，默认 mode=none 即不启用（合规裁定 K1，见 docs/AUTH-APSSO.md）。
+	Auth auth.Config `json:"auth" yaml:"auth"`
 }

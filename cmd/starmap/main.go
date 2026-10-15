@@ -42,6 +42,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
+	// 1.1 校验可选账号系统 / APSSO 配置（默认 none，永远合法）
+	if err := cfg.Auth.Validate(); err != nil {
+		log.Fatalf("认证配置非法: %v", err)
+	}
 
 	// 2. 存储
 	st, err := store.Open(cfg.DBPath)
@@ -72,6 +76,11 @@ func main() {
 	if ds, err := st.ListDomains(); err == nil {
 		engine.SetDomains(ds)
 	}
+	// 3.1 恢复持久化拓扑（P0-2）：ListNodes/ListEdges 载入内存并按原 ID 重建索引，
+	// 保证历史事件的 node_id 与白名单 node 维度在重启后仍指向同一个节点。
+	if err := engine.AttachStore(st); err != nil {
+		log.Fatalf("恢复拓扑失败: %v", err)
+	}
 	agg := parser.NewAggregator(cfg.LongConnSeconds, cfg.HeartbeatMaxBytes)
 
 	// 4. 检测调度器 + 复核 + 探测器
@@ -95,6 +104,8 @@ func main() {
 
 	// 老化 goroutine
 	engine.RunAging(ctx, time.Minute)
+	// 拓扑批量落盘（P0-2）：2s 一次聚合写库，避免每个报文都写；ctx 取消时补一次 flush
+	engine.RunPersist(ctx, 2*time.Second)
 	// 审计日志保留期清理（§10.8，每日一次）
 	go func() {
 		t := time.NewTicker(24 * time.Hour)
@@ -162,7 +173,7 @@ func main() {
 			}
 			return st.SetConfigKV("system_config", string(b))
 		},
-		Version: "V1.0",
+		Version: "V1.1",
 	})
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
@@ -184,10 +195,13 @@ func main() {
 	defer shCancel()
 	_ = httpSrv.Shutdown(shCtx)
 	det.Stop()
-	// 退出前落盘全部会话
+	// 退出前落盘全部会话 + 拓扑
 	for _, ses := range agg.Finalize() {
 		s := ses
 		_, _ = st.SaveSession(&s)
+	}
+	if err := engine.Flush(); err != nil {
+		log.Printf("[topology] 退出前拓扑落盘失败: %v", err)
 	}
 	log.Println("已退出")
 }

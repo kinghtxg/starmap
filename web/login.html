@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>登录 · StarMap 星图</title>
+<style>
+/* StarMap 登录页 · 全内联，零外部资源（内网部署） */
+:root{
+  --brand:#0052D9;            /* 主色：厂商级标准蓝 */
+  --brand-hover:#0043B3;
+  --brand-active:#003C9E;
+  --brand-weak:rgba(0,82,217,.08);
+  --brand-ring:rgba(0,82,217,.16);
+  --ink:#1D2129;              /* 主文本 */
+  --ink-2:#4E5969;            /* 次文本 */
+  --ink-3:#86909C;            /* 辅助/占位 */
+  --line:#DCDEE3;             /* 分隔线 */
+  --line-2:#E5E6EB;
+  --surface:#FFFFFF;
+  --canvas:#F2F3F5;
+  --danger:#D54941;
+  --danger-weak:#FCE8E6;
+  --dark:#0F172A;             /* 品牌侧深色，与产品主色板一致 */
+  --accent:#38BDF8;
+  --radius:8px;
+  --ease:cubic-bezier(.22,.61,.36,1);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",Arial,sans-serif;
+  font-size:14px;line-height:1.5;color:var(--ink);
+  background:var(--canvas);
+  -webkit-font-smoothing:antialiased;
+  display:flex;align-items:center;justify-content:center;
+  padding:24px;
+  opacity:0;animation:pageIn .5s var(--ease) forwards;
+}
+@keyframes pageIn{from{opacity:0}to{opacity:1}}
+
+/* ---------- 布局 ---------- */
+.shell{
+  width:100%;max-width:960px;min-height:560px;
+  display:grid;grid-template-columns:1.05fr 1fr;
+  background:var(--surface);border:1px solid var(--line-2);border-radius:14px;
+  overflow:hidden;box-shadow:0 2px 6px rgba(15,23,42,.04),0 18px 48px rgba(15,23,42,.10);
+  opacity:0;transform:translateY(14px) scale(.994);
+  animation:cardIn .58s .06s var(--ease) forwards;
+}
+@keyframes cardIn{to{opacity:1;transform:none}}
+@media (max-width:860px){
+  .shell{grid-template-columns:1fr;max-width:420px;min-height:0}
+  .brand{display:none}
+}
+
+/* ---------- 左侧品牌区 ---------- */
+.brand{
+  position:relative;background:var(--dark);color:#E2E8F0;
+  padding:44px 40px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;
+}
+.brand canvas{position:absolute;inset:0;width:100%;height:100%;opacity:.55;pointer-events:none}
+.brand::after{
+  content:"";position:absolute;inset:auto -30% -40% -30%;height:60%;
+  background:radial-gradient(60% 100% at 50% 100%,rgba(56,189,248,.20),transparent 70%);
+  pointer-events:none;animation:glow 9s ease-in-out infinite alternate;
+}
+@keyframes glow{from{opacity:.55}to{opacity:1}}
+.brand > *{position:relative;z-index:1}
+.logo{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:600;letter-spacing:.2px}
+.logo .mark{
+  width:28px;height:28px;border-radius:7px;display:grid;place-items:center;
+  background:linear-gradient(150deg,rgba(56,189,248,.22),rgba(56,189,248,.05));
+  border:1px solid rgba(56,189,248,.35);
+}
+.brand h1{margin:0 0 10px;font-size:22px;font-weight:600;letter-spacing:.3px;color:#F8FAFC}
+.brand p{margin:0;color:#94A3B8;font-size:13px;line-height:1.8;max-width:33em}
+.brand .meta{margin-top:26px;display:flex;flex-direction:column;gap:8px}
+.brand .meta span{
+  display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#64748B;
+}
+.brand .meta i{width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.85}
+.footnote{font-size:12px;color:#475569;border-top:1px solid rgba(148,163,184,.18);padding-top:14px}
+
+/* ---------- 右侧表单区 ---------- */
+.pane{padding:44px 40px;display:flex;flex-direction:column}
+.pane-inner{width:100%;max-width:300px;margin:auto}
+h2{margin:0 0 6px;font-size:20px;font-weight:600;letter-spacing:.2px}
+.sub{margin:0 0 26px;font-size:13px;color:var(--ink-3)}
+
+.stage{position:relative}
+.panel{transition:opacity .26s var(--ease),transform .26s var(--ease)}
+.panel[hidden]{display:none}
+.panel.enter{animation:panelIn .34s var(--ease) both}
+@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+.field{margin-bottom:16px}
+.field > label{display:block;font-size:13px;color:var(--ink-2);margin-bottom:6px}
+.control{position:relative}
+input[type=text],input[type=password]{
+  width:100%;height:40px;padding:0 38px 0 12px;font:inherit;font-size:14px;color:var(--ink);
+  background:#fff;border:1px solid var(--line);border-radius:var(--radius);
+  outline:none;transition:border-color .16s var(--ease),box-shadow .16s var(--ease),background .16s var(--ease);
+}
+input::placeholder{color:var(--ink-3)}
+input:hover{border-color:#C3C6CE}
+input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-ring);background:#fff}
+input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
+.toggle{
+  position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  width:28px;height:28px;border:0;background:transparent;color:var(--ink-3);
+  border-radius:6px;cursor:pointer;display:grid;place-items:center;
+  transition:color .16s var(--ease),background .16s var(--ease);
+}
+.toggle:hover{color:var(--ink-2);background:var(--brand-weak)}
+.toggle:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+
+.btn{
+  width:100%;height:40px;margin-top:4px;border:0;border-radius:var(--radius);
+  font:inherit;font-size:14px;font-weight:500;color:#fff;cursor:pointer;
+  background:var(--brand);
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  transition:background .16s var(--ease),transform .12s var(--ease),box-shadow .16s var(--ease);
+}
+.btn:hover{background:var(--brand-hover);box-shadow:0 4px 12px rgba(0,82,217,.22)}
+.btn:active{background:var(--brand-active);transform:translateY(1px)}
+.btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.btn[disabled]{opacity:.7;cursor:progress;box-shadow:none}
+.btn.ghost{
+  background:#fff;color:var(--brand);border:1px solid var(--line);
+}
+.btn.ghost:hover{background:var(--brand-weak);border-color:var(--brand);box-shadow:none}
+
+.spinner{
+  width:15px;height:15px;border-radius:50%;
+  border:2px solid rgba(255,255,255,.45);border-top-color:#fff;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.alert{
+  min-height:20px;margin:0 0 12px;font-size:13px;color:var(--danger);
+  opacity:0;transform:translateY(-2px);transition:opacity .2s var(--ease),transform .2s var(--ease);
+}
+.alert.show{opacity:1;transform:none}
+.alert.shake{animation:shake .34s var(--ease)}
+@keyframes shake{
+  0%,100%{transform:translateX(0)}20%{transform:translateX(-5px)}
+  40%{transform:translateX(5px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}
+}
+.alert.info{color:var(--ink-2)}
+
+.divider{
+  display:flex;align-items:center;gap:10px;margin:20px 0 14px;
+  color:var(--ink-3);font-size:12px;
+}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line-2)}
+.hint{font-size:12px;color:var(--ink-3);line-height:1.8;margin:14px 0 0}
+.hint a{color:var(--brand);text-decoration:none}
+.hint a:hover{text-decoration:underline}
+.badge{
+  display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;margin-bottom:14px;
+  border-radius:4px;background:var(--brand-weak);color:var(--brand);font-size:12px;
+}
+.tips{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-2);font-size:12px;color:var(--ink-3);line-height:1.8}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
+</style>
+</head>
+<body>
+<main class="shell">
+  <!-- 左：品牌区 -->
+  <section class="brand">
+    <canvas id="bg" aria-hidden="true"></canvas>
+    <div>
+      <div class="logo">
+        <span class="mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="2.4" fill="#38BDF8"/>
+            <circle cx="2.6" cy="3.4" r="1.3" fill="#7DD3FC" opacity=".85"/>
+            <circle cx="13.4" cy="4.2" r="1.1" fill="#7DD3FC" opacity=".7"/>
+            <circle cx="3.2" cy="12.6" r="1.1" fill="#7DD3FC" opacity=".7"/>
+            <path d="M8 8 2.6 3.4M8 8l5.4-3.8M8 8 3.2 12.6" stroke="#38BDF8" stroke-width=".9" opacity=".55"/>
+          </svg>
+        </span>
+        StarMap 星图
+      </div>
+      <h1 style="margin-top:30px">网内拓扑自动测绘引擎</h1>
+      <p>被动感知网内流量，自动测绘资产拓扑，对可疑行为<strong style="color:#CBD5E1;font-weight:600">只打标签、不定性</strong>。</p>
+      <div class="meta">
+        <span><i></i>PCAP 导入 · 网卡抓包 · 远端探针</span>
+        <span><i></i>五类风险规则 · 复核闭环 · 全量审计</span>
+        <span><i></i>单二进制分发 · 无外网依赖</span>
+      </div>
+    </div>
+    <div class="footnote">© 极客星空实验室 · Apache-2.0<br>请仅在获得授权的网络环境中使用。</div>
+  </section>
+
+  <!-- 右：认证区 -->
+  <section class="pane">
+    <div class="pane-inner">
+      <h2 id="title">登录</h2>
+      <p class="sub" id="subtitle">正在读取认证配置…</p>
+
+      <div class="stage">
+        <!-- 加载态 -->
+        <div class="panel" id="p-loading">
+          <div class="alert info show">正在连接服务…</div>
+        </div>
+
+        <!-- local：账号密码 -->
+        <div class="panel" id="p-local" hidden>
+          <div class="badge">本地账号</div>
+          <div class="alert" id="err" role="alert" aria-live="assertive"></div>
+          <form id="form" autocomplete="on" novalidate>
+            <div class="field">
+              <label for="username">用户名</label>
+              <div class="control">
+                <input id="username" name="username" type="text" placeholder="请输入用户名" autocomplete="username" spellcheck="false" required>
+              </div>
+            </div>
+            <div class="field">
+              <label for="password">密码</label>
+              <div class="control">
+                <input id="password" name="password" type="password" placeholder="请输入密码" autocomplete="current-password" required>
+                <button class="toggle" type="button" id="eye" aria-label="显示密码" tabindex="0">
+                  <svg id="eye-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M8 3.2c3 0 5.4 1.9 6.4 4.8-1 2.9-3.4 4.8-6.4 4.8S2.6 10.9 1.6 8C2.6 5.1 5 3.2 8 3.2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                    <circle cx="8" cy="8" r="1.9" stroke="currentColor" stroke-width="1.2"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <button class="btn" type="submit" id="submit">登 录</button>
+          </form>
+        </div>
+
+        <!-- oidc：APSSO -->
+        <div class="panel" id="p-oidc" hidden>
+          <div class="alert" id="err2" role="alert" aria-live="assertive"></div>
+          <button class="btn" type="button" id="sso">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M6.2 7.1V5.6a1.8 1.8 0 0 1 3.6 0v1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+              <rect x="3.4" y="7.1" width="9.2" height="6" rx="1.4" stroke="currentColor" stroke-width="1.3"/>
+            </svg>
+            <span id="sso-text">使用 APSSO 登录</span>
+          </button>
+          <div class="divider">单点登录</div>
+          <p class="hint" style="margin-top:0">将由实验室统一身份服务（APSSO）完成认证，StarMap 不保存你的口令。</p>
+        </div>
+
+        <!-- none：未启用 -->
+        <div class="panel" id="p-none" hidden>
+          <div class="alert info show">当前未启用登录（auth.mode = none），可直接访问控制台。</div>
+          <a class="btn ghost" href="/" style="text-decoration:none">进入控制台</a>
+        </div>
+      </div>
+
+      <div class="tips" id="tips">登录仅用于访问控制与审计留痕，<br>不影响任何检测、拓扑与风险判定。</div>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var panels = { loading: $('p-loading'), local: $('p-local'), oidc: $('p-oidc'), none: $('p-none') };
+
+  function show(name) {
+    Object.keys(panels).forEach(function (k) {
+      var el = panels[k];
+      if (!el) return;
+      if (k === name) {
+        el.hidden = false;
+        el.classList.remove('enter');
+        void el.offsetWidth;      // 重排以重启动画
+        el.classList.add('enter');
+      } else {
+        el.hidden = true;
+      }
+    });
+  }
+
+  function nextPath() {
+    var q = new URLSearchParams(location.search).get('next');
+    return (q && q.charAt(0) === '/' && q.charAt(1) !== '/') ? q : '/';
+  }
+
+  function alertTo(el, msg, shake) {
+    if (!el) return;
+    el.textContent = msg || '';
+    if (msg) {
+      el.classList.add('show');
+      if (shake) {
+        el.classList.remove('shake');
+        void el.offsetWidth;
+        el.classList.add('shake');
+      }
+    } else {
+      el.classList.remove('show');
+    }
+  }
+
+  // 读取认证模式
+  fetch('/api/auth/config', { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
+    .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function (cfg) {
+      var mode = (cfg && cfg.mode) || 'none';
+      if (mode === 'local') {
+        $('title').textContent = '账号登录';
+        $('subtitle').textContent = '请使用本地账号登录 StarMap 星图';
+        show('local');
+        setTimeout(function () { try { $('username').focus(); } catch (e) {} }, 320);
+      } else if (mode === 'oidc') {
+        var name = (cfg && cfg.provider_name) || 'APSSO';
+        $('title').textContent = '单点登录';
+        $('subtitle').textContent = '通过 ' + name + ' 统一身份认证访问 StarMap 星图';
+        $('sso-text').textContent = '使用 ' + name + ' 登录';
+        show('oidc');
+      } else {
+        $('title').textContent = '无需登录';
+        $('subtitle').textContent = '当前部署未启用认证';
+        $('tips').style.display = 'none';
+        show('none');
+      }
+    })
+    .catch(function () {
+      $('subtitle').textContent = '无法获取认证配置';
+      alertTo($('err'), '无法连接服务，请确认 StarMap 已启动后重试。');
+      show('local');
+    });
+
+  // 密码可见性
+  var eye = $('eye'), pwd = $('password');
+  if (eye && pwd) {
+    eye.addEventListener('click', function () {
+      var on = pwd.type === 'password';
+      pwd.type = on ? 'text' : 'password';
+      eye.setAttribute('aria-label', on ? '隐藏密码' : '显示密码');
+      $('eye-icon').style.opacity = on ? '.75' : '1';
+      pwd.focus();
+    });
+  }
+
+  // 本地登录
+  var form = $('form'), submit = $('submit');
+  if (form) {
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var user = $('username').value.trim(), pass = pwd.value;
+      if (!user || !pass) { alertTo($('err'), '请输入用户名和密码。', true); return; }
+      alertTo($('err'), '');
+      submit.disabled = true;
+      submit.innerHTML = '<span class="spinner"></span>正在登录…';
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass })
+      }).then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, d: d }; },
+                             function () { return { ok: r.ok, d: {} }; });
+      }).then(function (res) {
+        if (!res.ok) {
+          throw new Error((res.d && res.d.error) || '登录失败');
+        }
+        submit.innerHTML = '登录成功，正在跳转…';
+        location.replace(nextPath());
+      }).catch(function (err) {
+        submit.disabled = false;
+        submit.textContent = '登 录';
+        alertTo($('err'), err.message || '登录失败，请重试。', true);
+        try { pwd.select(); } catch (e) {}
+      });
+    });
+  }
+
+  // APSSO 登录
+  var sso = $('sso');
+  if (sso) {
+    sso.addEventListener('click', function () {
+      sso.disabled = true;
+      sso.innerHTML = '<span class="spinner"></span>正在跳转…';
+      var u = new URLSearchParams();
+      u.set('next', nextPath());
+      location.href = '/api/auth/oidc/start?' + u.toString();
+    });
+  }
+
+  // 品牌区背景：极缓的星点漂移（无外部库）
+  (function () {
+    var cv = $('bg');
+    if (!cv || !cv.getContext) return;
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    var ctx = cv.getContext('2d'), pts = [], raf = null, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    function resize() {
+      var r = cv.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      cv.width = r.width * dpr; cv.height = r.height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      var n = Math.max(18, Math.min(46, Math.round(r.width * r.height / 5200)));
+      pts = [];
+      for (var i = 0; i < n; i++) {
+        pts.push({
+          x: Math.random() * r.width, y: Math.random() * r.height,
+          vx: (Math.random() - .5) * .12, vy: (Math.random() - .5) * .12,
+          r: Math.random() * 1.3 + .6
+        });
+      }
+    }
+    function draw(w, h) {
+      ctx.clearRect(0, 0, w, h);
+      for (var i = 0; i < pts.length; i++) {
+        var p = pts[i];
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0 || p.x > w) p.vx *= -1;
+        if (p.y < 0 || p.y > h) p.vy *= -1;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832);
+        ctx.fillStyle = 'rgba(148,197,240,' + (0.25 + p.r * 0.22) + ')';
+        ctx.fill();
+      }
+      for (var a = 0; a < pts.length; a++) {
+        for (var b = a + 1; b < pts.length; b++) {
+          var dx = pts[a].x - pts[b].x, dy = pts[a].y - pts[b].y;
+          var d = Math.sqrt(dx * dx + dy * dy);
+          if (d < 92) {
+            ctx.beginPath();
+            ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y);
+            ctx.strokeStyle = 'rgba(56,189,248,' + (0.13 * (1 - d / 92)) + ')';
+            ctx.lineWidth = 1; ctx.stroke();
+          }
+        }
+      }
+    }
+    function loop() {
+      var r = cv.getBoundingClientRect();
+      if (r.width && r.height) { draw(r.width, r.height); }
+      raf = requestAnimationFrame(loop);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+    if (document.visibilityState !== 'hidden') { raf = requestAnimationFrame(loop); }
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') { if (raf) cancelAnimationFrame(raf); raf = null; }
+      else if (!raf) { raf = requestAnimationFrame(loop); }
+    });
+  })();
+})();
+</script>
+</body>
+</html>

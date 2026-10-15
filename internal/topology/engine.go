@@ -11,6 +11,7 @@ package topology
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"starmap/internal/model"
+	"starmap/internal/store"
 )
 
 // 节点标签
@@ -28,9 +30,52 @@ const (
 	LabelProbe      = "probe"        // 主动探测发现
 )
 
+// ---------- 稳定节点身份 NodeKey（P0-2） ----------
+
+// NodeKeyOf 生成节点稳定身份：优先 MAC（mac:<mac>），无 MAC 用主 IP（ip:<ip>）。
+// 该 key 不随进程重启变化，用作拓扑持久化主键与白名单 node 维度取值。
+func NodeKeyOf(mac, primaryIP string) string {
+	if m := strings.TrimSpace(mac); m != "" {
+		return "mac:" + strings.ToLower(m)
+	}
+	return "ip:" + strings.TrimSpace(primaryIP)
+}
+
+// ExternalNodeKey 外部聚合节点身份（无 MAC，按公网 /24 聚合）。
+func ExternalNodeKey(cidr string) string { return "ext:" + cidr }
+
+// primaryIP 取节点主 IP（IPs 已排序，首个即主 IP）。
+func primaryIP(n *model.Node) string {
+	if len(n.IPs) == 0 {
+		return ""
+	}
+	return n.IPs[0]
+}
+
+// nodeKeyFor 返回节点身份；已确定的身份不再变更（先到为准），
+// 避免后续学到 MAC 时改 key 导致库里出现同一节点的两行。
+func nodeKeyFor(n *model.Node) string {
+	if n.NodeKey != "" {
+		return n.NodeKey
+	}
+	if hasLabel(n, LabelExternalAg) && len(n.IPs) > 0 {
+		return ExternalNodeKey(n.IPs[0])
+	}
+	return NodeKeyOf(n.MAC, primaryIP(n))
+}
+
 type edgeKey struct {
 	a, b  int64
 	proto string
+}
+
+// edgeKeyOf 边的无向归一幂等键（端点排序 + 协议）。
+func edgeKeyOf(e *model.Edge) edgeKey {
+	k := edgeKey{a: e.SrcID, b: e.DstID, proto: e.Protocol}
+	if k.a > k.b {
+		k.a, k.b = k.b, k.a
+	}
+	return k
 }
 
 // 会话幂等摄入状态（同一会话可能多次 Ingest，只累计增量）
@@ -56,6 +101,7 @@ type Engine struct {
 	nodes   map[int64]*model.Node // 全部节点（内网真实节点 + 外部聚合节点）
 	ipNode  map[string]int64      // 内网 IP → 节点
 	macNode map[string]int64      // MAC → 节点（同 MAC 多 IP 合并）
+	nodeKey map[string]int64      // NodeKey → 节点（稳定身份唯一性保障，P0-2）
 	extAggr map[string]int64      // 公网 /24 CIDR → 外部聚合节点
 	edges   map[edgeKey]*model.Edge
 
@@ -66,6 +112,11 @@ type Engine struct {
 
 	sessions map[string]*sessState // 会话幂等摄入
 	domains  []model.NetDomain     // 网络域（用于节点 Domain 归属）
+
+	// 持久化（P0-2）：persist 为 nil 时引擎纯内存（单测场景）
+	persist    *store.Store
+	dirtyNodes map[int64]bool   // 待落盘节点
+	dirtyEdges map[edgeKey]bool // 待落盘边
 }
 
 // New 创建拓扑引擎。
@@ -81,12 +132,15 @@ func New(cfg model.SystemConfig) *Engine {
 		nodes:            map[int64]*model.Node{},
 		ipNode:           map[string]int64{},
 		macNode:          map[string]int64{},
+		nodeKey:          map[string]int64{},
 		extAggr:          map[string]int64{},
 		edges:            map[edgeKey]*model.Edge{},
 		gatewayMAC:       map[int64]string{},
 		subnetMembers:    map[string]map[int64]bool{},
 		aggregated:       map[string]bool{},
 		sessions:         map[string]*sessState{},
+		dirtyNodes:       map[int64]bool{},
+		dirtyEdges:       map[edgeKey]bool{},
 	}
 	if e.agingSeconds <= 0 {
 		e.agingSeconds = 86400
@@ -132,6 +186,176 @@ func (e *Engine) UpdateConfig(cfg model.SystemConfig) {
 			}
 		}
 	}
+}
+
+// ---------- 持久化：启动恢复 + 节流落盘（P0-2） ----------
+
+// AttachStore 绑定持久化存储，并从库里恢复上次运行留下的节点/边。
+// 必须在任何 Ingest 之前调用：恢复后 node.ID 沿用库内 id，
+// 历史事件的 NodeID 与白名单 node 维度才能跨重启指向同一个节点。
+// st 为 nil 时引擎退化为纯内存（单测场景）。
+func (e *Engine) AttachStore(st *store.Store) error {
+	if st == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.persist = st
+	return e.restoreLocked()
+}
+
+// restoreLocked 恢复拓扑到内存并重建索引（IP/MAC/NodeKey → 节点、ID → 节点）。
+func (e *Engine) restoreLocked() error {
+	nodes, err := e.persist.ListNodes()
+	if err != nil {
+		return err
+	}
+	var maxNodeID int64
+	for i := range nodes {
+		n := &nodes[i]
+		n.NodeKey = nodeKeyFor(n)
+		if _, dup := e.nodeKey[n.NodeKey]; dup || e.nodes[n.ID] != nil {
+			continue // 身份重复的行直接忽略，保证 NodeKey 唯一
+		}
+		e.nodes[n.ID] = n
+		e.nodeKey[n.NodeKey] = n.ID
+		for _, ip := range n.IPs {
+			if !hasLabel(n, LabelExternalAg) {
+				e.ipNode[ip] = n.ID
+			}
+			e.addSubnetMemberLocked(n.ID, ip)
+		}
+		if n.MAC != "" {
+			e.macNode[n.MAC] = n.ID
+		}
+		if hasLabel(n, LabelExternalAg) && len(n.IPs) > 0 {
+			e.extAggr[n.IPs[0]] = n.ID
+		}
+		if n.ID > maxNodeID {
+			maxNodeID = n.ID
+		}
+	}
+	if maxNodeID >= e.nextNodeID {
+		e.nextNodeID = maxNodeID + 1
+	}
+
+	edges, err := e.persist.ListEdges()
+	if err != nil {
+		return err
+	}
+	var maxEdgeID int64
+	for i := range edges {
+		ed := &edges[i]
+		if e.nodes[ed.SrcID] == nil || e.nodes[ed.DstID] == nil {
+			continue // 端点已被删除的悬空边
+		}
+		ek := edgeKeyOf(ed)
+		if _, ok := e.edges[ek]; ok {
+			continue
+		}
+		e.edges[ek] = ed
+		if ed.ID > maxEdgeID {
+			maxEdgeID = ed.ID
+		}
+	}
+	if maxEdgeID >= e.nextEdgeID {
+		e.nextEdgeID = maxEdgeID + 1
+	}
+	// 库内数据即最新快照，恢复本身不产生写回
+	e.dirtyNodes = map[int64]bool{}
+	e.dirtyEdges = map[edgeKey]bool{}
+	return nil
+}
+
+// Flush 把累计的脏节点/边一次性批量落盘（幂等 upsert，节点按 id、边按 (src_key,dst_key,protocol)）。
+// 调用方通过 RunPersist 以固定间隔驱动，绝不在每个报文里写库。
+func (e *Engine) Flush() error {
+	e.mu.Lock()
+	st := e.persist
+	if st == nil || (len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0) {
+		e.mu.Unlock()
+		return nil
+	}
+	nodeIDs := make([]int64, 0, len(e.dirtyNodes))
+	nodes := make([]model.Node, 0, len(e.dirtyNodes))
+	for id := range e.dirtyNodes {
+		if n := e.nodes[id]; n != nil {
+			n.NodeKey = nodeKeyFor(n)
+			nodeIDs = append(nodeIDs, id)
+			nodes = append(nodes, *n)
+		}
+	}
+	edgeKeys := make([]edgeKey, 0, len(e.dirtyEdges))
+	edges := make([]store.EdgeUpsert, 0, len(e.dirtyEdges))
+	for k := range e.dirtyEdges {
+		ed := e.edges[k]
+		if ed == nil {
+			continue
+		}
+		src, dst := e.nodes[ed.SrcID], e.nodes[ed.DstID]
+		if src == nil || dst == nil {
+			continue
+		}
+		edgeKeys = append(edgeKeys, k)
+		edges = append(edges, store.EdgeUpsert{Edge: *ed, SrcKey: nodeKeyFor(src), DstKey: nodeKeyFor(dst)})
+	}
+	e.dirtyNodes = map[int64]bool{}
+	e.dirtyEdges = map[edgeKey]bool{}
+	e.mu.Unlock()
+
+	if len(nodes) > 0 {
+		if err := st.UpsertNodes(nodes); err != nil {
+			e.remarkDirty(nodeIDs, edgeKeys)
+			return err
+		}
+	}
+	if len(edges) > 0 {
+		if err := st.UpsertEdges(edges); err != nil {
+			e.remarkDirty(nil, edgeKeys)
+			return err
+		}
+	}
+	return nil
+}
+
+// remarkDirty 写库失败时把脏集合放回去，等待下一轮重试（避免单次抖动丢失拓扑）。
+func (e *Engine) remarkDirty(nodeIDs []int64, edgeKeys []edgeKey) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, id := range nodeIDs {
+		e.dirtyNodes[id] = true
+	}
+	for _, k := range edgeKeys {
+		e.dirtyEdges[k] = true
+	}
+}
+
+// RunPersist 启动后台节流落盘（建议 2s 一次）：只在定时器到期时批量写，
+// ctx 取消时补一次 flush，保证优雅退出不丢数据。未绑定存储则不启动。
+func (e *Engine) RunPersist(ctx context.Context, interval time.Duration) {
+	if e.persist == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				if err := e.Flush(); err != nil {
+					log.Printf("[topology] 退出前拓扑落盘失败: %v", err)
+				}
+				return
+			case <-t.C:
+				if err := e.Flush(); err != nil {
+					log.Printf("[topology] 拓扑落盘失败: %v", err)
+				}
+			}
+		}
+	}()
 }
 
 // IsPrivate 判断 RFC1918/ULA/链路本地等内网地址。
@@ -209,10 +433,7 @@ func (e *Engine) Ingest(s *model.Session) {
 	}
 
 	// ---- 边生长 ----
-	ek := edgeKey{a: srcID, b: dstID, proto: s.FiveTuple.Proto}
-	if ek.a > ek.b {
-		ek.a, ek.b = ek.b, ek.a // 无向链路归一
-	}
+	ek := edgeKeyOf(&model.Edge{SrcID: srcID, DstID: dstID, Protocol: s.FiveTuple.Proto})
 	edge, ok := e.edges[ek]
 	if !ok {
 		edge = &model.Edge{
@@ -235,17 +456,23 @@ func (e *Engine) Ingest(s *model.Session) {
 	if s.FirstSeen.Before(edge.FirstSeen) {
 		edge.FirstSeen = s.FirstSeen
 	}
+	e.dirtyEdges[ek] = true
 
-	// 更新节点活跃时间
+	// 更新节点活跃时间（变更即标记脏，节流 flush 时批量落盘）
 	for _, id := range []int64{srcID, dstID} {
 		if n := e.nodes[id]; n != nil {
 			if s.LastSeen.After(n.LastSeen) {
 				n.LastSeen = s.LastSeen
+				e.dirtyNodes[id] = true
 			}
 			if s.FirstSeen.Before(n.FirstSeen) {
 				n.FirstSeen = s.FirstSeen
+				e.dirtyNodes[id] = true
 			}
-			n.Active = true
+			if !n.Active {
+				n.Active = true
+				e.dirtyNodes[id] = true
+			}
 		}
 	}
 }
@@ -264,6 +491,7 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 				sort.Strings(n.IPs)
 				e.ipNode[ip] = id
 				e.addSubnetMemberLocked(id, ip)
+				e.dirtyNodes[id] = true
 			}
 			if now.After(n.LastSeen) {
 				n.LastSeen = now
@@ -277,6 +505,11 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 			if e.nodes[id].MAC == "" {
 				e.nodes[id].MAC = mac
 			}
+			// NodeKey 一经确定不再改写（避免库里出现同一节点的两行身份）
+			if e.nodes[id].NodeKey == "" {
+				e.nodes[id].NodeKey = NodeKeyOf(mac, primaryIP(e.nodes[id]))
+			}
+			e.dirtyNodes[id] = true
 		}
 		return id
 	}
@@ -291,8 +524,13 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 			}
 			return id
 		}
+		key := ExternalNodeKey(cidr)
+		if id, ok := e.nodeKey[key]; ok { // 幂等：库里已有同一 /24 聚合节点
+			return id
+		}
 		n := &model.Node{
 			ID:        e.nextNodeID,
+			NodeKey:   key,
 			IPs:       []string{cidr},
 			FirstSeen: now,
 			LastSeen:  now,
@@ -303,13 +541,16 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 		}
 		e.nextNodeID++
 		e.nodes[n.ID] = n
+		e.nodeKey[n.NodeKey] = n.ID
 		e.extAggr[cidr] = n.ID
+		e.dirtyNodes[n.ID] = true
 		return n.ID
 	}
 
 	// 内网新节点
 	n := &model.Node{
 		ID:        e.nextNodeID,
+		NodeKey:   NodeKeyOf(mac, ip),
 		IPs:       []string{ip},
 		MAC:       mac,
 		FirstSeen: now,
@@ -320,11 +561,13 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 	}
 	e.nextNodeID++
 	e.nodes[n.ID] = n
+	e.nodeKey[n.NodeKey] = n.ID
 	e.ipNode[ip] = n.ID
 	if mac != "" {
 		e.macNode[mac] = n.ID
 	}
 	e.addSubnetMemberLocked(n.ID, ip)
+	e.dirtyNodes[n.ID] = true
 	return n.ID
 }
 
@@ -388,12 +631,16 @@ func (e *Engine) SetDomains(ds []model.NetDomain) {
 		if hasLabel(n, LabelExternalAg) {
 			continue
 		}
-		n.Domain = ""
+		want := ""
 		for _, ip := range n.IPs {
 			if d := e.matchDomainLocked(ip); d != "" {
-				n.Domain = d
+				want = d
 				break
 			}
+		}
+		if n.Domain != want {
+			n.Domain = want
+			e.dirtyNodes[n.ID] = true
 		}
 	}
 }
@@ -418,6 +665,7 @@ func (e *Engine) SetNodeRisk(nodeID int64, level string) {
 	defer e.mu.Unlock()
 	if n, ok := e.nodes[nodeID]; ok {
 		n.RiskLevel = level
+		e.dirtyNodes[nodeID] = true
 	}
 }
 
@@ -427,6 +675,7 @@ func (e *Engine) AddNodeLabel(nodeID int64, label string) {
 	defer e.mu.Unlock()
 	if n, ok := e.nodes[nodeID]; ok && !contains(n.Labels, label) {
 		n.Labels = append(n.Labels, label)
+		e.dirtyNodes[nodeID] = true
 	}
 }
 
@@ -465,6 +714,7 @@ func (e *Engine) ObserveHost(ip, mac string, ts time.Time) int64 {
 	if !contains(n.Labels, LabelProbe) {
 		n.Labels = append(n.Labels, LabelProbe)
 	}
+	e.dirtyNodes[id] = true
 	return id
 }
 
@@ -476,11 +726,13 @@ func (e *Engine) Age(now time.Time) {
 	for _, edge := range e.edges {
 		if edge.Active && edge.LastSeen.Before(cutoff) {
 			edge.Active = false
+			e.dirtyEdges[edgeKeyOf(edge)] = true
 		}
 	}
-	for _, n := range e.nodes {
+	for id, n := range e.nodes {
 		if n.Active && n.LastSeen.Before(cutoff) {
 			n.Active = false
+			e.dirtyNodes[id] = true
 		}
 	}
 }

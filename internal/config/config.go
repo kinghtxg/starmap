@@ -7,6 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"starmap/internal/auth"
 	"starmap/internal/model"
 )
 
@@ -25,10 +26,11 @@ func Default() model.SystemConfig {
 		ReverseProxyHosts:  10,    // SPEC §5：反代 Host 域名数阈值
 		LongConnSeconds:    3600,  // SPEC §5：长连接 > 1h
 		HeartbeatMaxBytes:  64,    // SPEC §5：心跳 payload < 64B
-		ListenAddr:         ":8080",
+		ListenAddr:         "127.0.0.1:8080", // P0-4：默认仅回环，对外请走反代
 		DBPath:             "starmap.db",
 		ProbeToken:         "", // §10.7：默认不校验
 		AuditRetentionDays: 90, // §10.8：审计日志保留 90 天
+		Auth:               auth.Default(),
 	}
 }
 
@@ -65,6 +67,9 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.AuditRetentionDays != 0 {
 		cfg.AuditRetentionDays = fileCfg.AuditRetentionDays
+	}
+	if fileCfg.CorsOrigins != nil {
+		cfg.CorsOrigins = fileCfg.CorsOrigins
 	}
 	if fileCfg.AgingSeconds != 0 {
 		cfg.AgingSeconds = fileCfg.AgingSeconds
