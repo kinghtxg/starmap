@@ -28,7 +28,17 @@
     }
     if (resp.status === 204) return null;
     const text = await resp.text();
-    return text ? JSON.parse(text) : null;
+    if (!text) return null;
+    // 后端若返回 HTML（异常兜底）而非 JSON，给出友好错误而非 raw "Unexpected token '<'"
+    const t = text.trim();
+    if (t.charAt(0) === '<') {
+      throw new Error('服务返回了非 JSON 响应（可能是接口不存在或服务异常），请检查请求路径与后端日志');
+    }
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      throw new Error('响应不是有效 JSON：' + (e && e.message ? e.message : e));
+    }
   }
 
   const API = {

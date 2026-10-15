@@ -1310,6 +1310,12 @@ func (s *Server) staticHandler(c *gin.Context) {
 	if path == "" {
 		path = "index.html"
 	}
+	// 未匹配的 API 路径返回 JSON 404，绝不 SPA 兜底返回 HTML。
+	// 否则前端 fetch 拿到 index.html 后 JSON.parse 会抛 "Unexpected token '<'"。
+	if path == "api" || strings.HasPrefix(path, "api/") {
+		fail(c, http.StatusNotFound, "接口不存在: "+c.Request.URL.Path)
+		return
+	}
 	// 防目录穿越
 	if strings.Contains(path, "..") {
 		fail(c, http.StatusBadRequest, "非法路径")
@@ -1317,6 +1323,11 @@ func (s *Server) staticHandler(c *gin.Context) {
 	}
 	data, err := web.FS.ReadFile(path)
 	if err != nil {
+		// 静态资源文件不存在 → 404，绝不 fallback 成 HTML（浏览器会把 HTML 当 JS/CSS 执行报错）
+		if isStaticAsset(path) {
+			fail(c, http.StatusNotFound, "资源不存在: "+path)
+			return
+		}
 		// SPA 兜底到首页
 		data, err = web.FS.ReadFile("index.html")
 		if err != nil {
@@ -1337,6 +1348,16 @@ func (s *Server) staticHandler(c *gin.Context) {
 		ctype = "image/svg+xml"
 	}
 	c.Data(http.StatusOK, ctype, data)
+}
+
+// isStaticAsset 判断路径是否为静态资源文件（存在性未匹配时直接 404，不做 SPA 兜底）。
+func isStaticAsset(path string) bool {
+	for _, ext := range []string{".js", ".css", ".png", ".jpg", ".jpeg", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map", ".json"} {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 主机资产库（V1.2） ----------

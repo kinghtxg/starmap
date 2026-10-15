@@ -188,7 +188,7 @@ func main() {
 			}
 			return st.SetConfigKV("system_config", string(b))
 		},
-		Version: "V1.1",
+		Version: "V1.2",
 	})
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
