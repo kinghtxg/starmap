@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   domain TEXT NOT NULL DEFAULT '',
   labels TEXT NOT NULL DEFAULT '[]',
   risk_level TEXT NOT NULL DEFAULT 'none',
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1,
+  location TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS edges (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +138,13 @@ CREATE TABLE IF NOT EXISTS ports (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_key ON ports(node_key, ip, port, proto);
 CREATE INDEX IF NOT EXISTS idx_ports_ip ON ports(ip);
 CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
+CREATE TABLE IF NOT EXISTS probes (
+  probe_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  last_seen DATETIME NOT NULL,
+  created_at DATETIME NOT NULL
+);
 `
 
 // Open 打开（不存在则创建）SQLite 数据库并建表。
@@ -174,6 +182,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_endpoints ON edges(src_key,dst_key,p
 
 func migrateTopologyKeys(db *sql.DB) error {
 	if err := ensureColumn(db, "nodes", "node_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "nodes", "location", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := ensureColumn(db, "edges", "src_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -399,8 +410,8 @@ func (s *Store) CreateNode(n *model.Node) (int64, error) {
 		n.NodeKey = deriveNodeKey(n.MAC, n.IPs)
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO nodes(node_key,ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?,?)`,
-		n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
+		`INSERT INTO nodes(node_key,location,ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		n.NodeKey, n.Location, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
 	if err != nil {
 		return 0, err
 	}
@@ -413,8 +424,8 @@ func (s *Store) UpdateNode(n *model.Node) error {
 		n.NodeKey = deriveNodeKey(n.MAC, n.IPs)
 	}
 	_, err := s.db.Exec(
-		`UPDATE nodes SET node_key=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
-		n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
+		`UPDATE nodes SET node_key=?,location=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
+		n.NodeKey, n.Location, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
 	return err
 }
 
@@ -435,8 +446,8 @@ func (s *Store) UpsertNodes(ns []model.Node) error {
 			n.NodeKey = deriveNodeKey(n.MAC, n.IPs)
 		}
 		res, err := tx.Exec(
-			`UPDATE nodes SET node_key=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
-			n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
+			`UPDATE nodes SET node_key=?,location=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE id=?`,
+			n.NodeKey, n.Location, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.ID)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -445,14 +456,14 @@ func (s *Store) UpsertNodes(ns []model.Node) error {
 			continue
 		}
 		_, err = tx.Exec(
-			`INSERT INTO nodes(id,node_key,ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			n.ID, n.NodeKey, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
+			`INSERT INTO nodes(id,node_key,location,ips,mac,first_seen,last_seen,domain,labels,risk_level,active) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			n.ID, n.NodeKey, n.Location, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active))
 		if err != nil {
 			// id 被同名 key 的旧行占用（理论上不会：恢复时已加载全部行）
 			// 退化为按 node_key 更新那一行，保持库内不重复。
 			if _, err2 := tx.Exec(
-				`UPDATE nodes SET ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE node_key=?`,
-				toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.NodeKey); err2 != nil {
+				`UPDATE nodes SET location=?,ips=?,mac=?,first_seen=?,last_seen=?,domain=?,labels=?,risk_level=?,active=? WHERE node_key=?`,
+				n.Location, toJSON(n.IPs), n.MAC, n.FirstSeen, n.LastSeen, n.Domain, toJSON(n.Labels), n.RiskLevel, b2i(n.Active), n.NodeKey); err2 != nil {
 				tx.Rollback()
 				return err
 			}
@@ -470,8 +481,8 @@ func (s *Store) NodeByKey(key string) (*model.Node, error) {
 	return n, err
 }
 
-// nodeColumns 节点查询列清单（含 P0-2 新增的稳定 key 列）。
-const nodeColumns = `SELECT id,node_key,ips,mac,first_seen,last_seen,domain,labels,risk_level,active FROM nodes`
+// nodeColumns 节点查询列清单（含 P0-2 稳定 key 列 + V1.3 探针位置列）。
+const nodeColumns = `SELECT id,node_key,location,ips,mac,first_seen,last_seen,domain,labels,risk_level,active FROM nodes`
 
 // GetNode 按 ID 查询节点。
 func (s *Store) GetNode(id int64) (*model.Node, error) {
@@ -488,7 +499,7 @@ func scanNode(row rowScanner) (*model.Node, error) {
 	var n model.Node
 	var ips, labels string
 	var active int
-	err := row.Scan(&n.ID, &n.NodeKey, &ips, &n.MAC, &n.FirstSeen, &n.LastSeen, &n.Domain, &labels, &n.RiskLevel, &active)
+	err := row.Scan(&n.ID, &n.NodeKey, &n.Location, &ips, &n.MAC, &n.FirstSeen, &n.LastSeen, &n.Domain, &labels, &n.RiskLevel, &active)
 	if err != nil {
 		return nil, err
 	}
@@ -1136,4 +1147,53 @@ func mustRowsAffected(res sql.Result) int64 {
 	}
 	n, _ := res.RowsAffected()
 	return n
+}
+
+// ---------- 探针注册（V1.3：按探针位置归纳拓扑） ----------
+
+// UpsertProbe 幂等写入/更新探针注册（按 probe_id）。
+func (s *Store) UpsertProbe(p *model.Probe) error {
+	now := time.Now()
+	_, err := s.db.Exec(`INSERT INTO probes(probe_id,name,location,last_seen,created_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(probe_id) DO UPDATE SET name=excluded.name, location=excluded.location, last_seen=excluded.last_seen`,
+		p.ProbeID, p.Name, p.Location, p.LastSeen, now)
+	return err
+}
+
+// ListProbes 查询全部探针。
+func (s *Store) ListProbes() ([]model.Probe, error) {
+	rows, err := s.db.Query(`SELECT probe_id,name,location,last_seen,created_at FROM probes ORDER BY location, probe_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Probe
+	for rows.Next() {
+		var p model.Probe
+		if err := rows.Scan(&p.ProbeID, &p.Name, &p.Location, &p.LastSeen, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ProbeByID 按 probe_id 查询（不存在返回 nil）。
+func (s *Store) ProbeByID(id string) (*model.Probe, error) {
+	var p model.Probe
+	err := s.db.QueryRow(`SELECT probe_id,name,location,last_seen,created_at FROM probes WHERE probe_id=?`, id).
+		Scan(&p.ProbeID, &p.Name, &p.Location, &p.LastSeen, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// DeleteProbe 删除探针注册。
+func (s *Store) DeleteProbe(id string) error {
+	_, err := s.db.Exec(`DELETE FROM probes WHERE probe_id=?`, id)
+	return err
 }

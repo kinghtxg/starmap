@@ -416,6 +416,21 @@ func (e *Engine) Ingest(s *model.Session) {
 	srcID := e.nodeForLocked(s.FiveTuple.SrcIP, s.MAC, now)
 	dstID := e.nodeForLocked(s.FiveTuple.DstIP, "", now)
 
+	// 探针位置归纳（V1.3）：会话带来源探针位置 → 内网节点归属该位置。
+	// 只标注内网节点，公网聚合节点（ext:）不归属探针位置。
+	if s.Location != "" {
+		if n := e.nodes[srcID]; n != nil && n.Location == "" {
+			n.Location = s.Location
+			e.dirtyNodes[srcID] = true
+		}
+		if IsPrivate(s.FiveTuple.DstIP) {
+			if n := e.nodes[dstID]; n != nil && n.Location == "" {
+				n.Location = s.Location
+				e.dirtyNodes[dstID] = true
+			}
+		}
+	}
+
 	// 首跳网关推断：内网 → 公网 会话的客户端方向 DstMAC 即网关 MAC
 	if IsPrivate(s.FiveTuple.SrcIP) && !IsPrivate(s.FiveTuple.DstIP) && s.DstMAC != "" {
 		if s.DstMAC != s.MAC { // 非本机直连

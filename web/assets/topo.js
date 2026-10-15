@@ -15,6 +15,7 @@
   var COL_GAP = 138;               // 同层节点水平间距
   var ROW_INNER = 118;             // 层内子行垂直间距
   var BAND_GAP = 66;               // 层间留白（走线区）
+  var GROUP_GAP = 90;              // 位置分组（泳道）间留白
   var PAD = 60;                    // 内容边距
   var LABEL_HIDE = 240;            // 超过该节点数隐藏全部标签
   var SUBLABEL_HIDE = 110;         // 超过该节点数隐藏副标签
@@ -152,7 +153,54 @@
     return { type: 'pc', tier: 4 };
   }
 
+  // V1.3：按探针位置分组布局（泳道归纳）。
+  // 节点带 Location 时，同一位置一组，组内独立分层布局，组间垂直堆叠。
   function layout(nodes, edges) {
+    var locs = [];
+    nodes.forEach(function (n) { if (n.Location && locs.indexOf(n.Location) < 0) locs.push(n.Location); });
+    if (locs.length <= 1) {
+      return layoutSingle(nodes, edges);
+    }
+
+    var locOf = {};
+    nodes.forEach(function (n) { locOf[String(n.ID)] = n.Location || ''; });
+
+    var out = { xy: {}, band: [], layers: [], info: {}, adj: {}, deg: {}, layerCount: 0 };
+    var yOff = 0;
+
+    function place(sub, subEdges, loc) {
+      var r = layoutSingle(sub, subEdges);
+      Object.keys(r.xy).forEach(function (id) {
+        out.xy[id] = { x: r.xy[id].x, y: r.xy[id].y + yOff };
+      });
+      r.band.forEach(function (b) {
+        out.band.push({ top: b.top + yOff, bottom: b.bottom + yOff, layer: b.layer, loc: loc });
+      });
+      Object.keys(r.info).forEach(function (id) { out.info[id] = r.info[id]; });
+      Object.keys(r.adj).forEach(function (id) { out.adj[id] = r.adj[id]; });
+      Object.keys(r.deg).forEach(function (id) { out.deg[id] = r.deg[id]; });
+      yOff += (r.band.length ? r.band[r.band.length - 1].bottom : PAD) + GROUP_GAP;
+    }
+
+    locs.forEach(function (loc) {
+      var sub = nodes.filter(function (n) { return (n.Location || '') === loc; });
+      var subEdges = edges.filter(function (e) {
+        return locOf[String(e.SrcID)] === loc && locOf[String(e.DstID)] === loc;
+      });
+      place(sub, subEdges, loc);
+    });
+
+    // 无位置节点归「未分组」泳道（放最后）
+    var ungrouped = nodes.filter(function (n) { return !n.Location; });
+    if (ungrouped.length) {
+      place(ungrouped, edges.filter(function (e) {
+        return locOf[String(e.SrcID)] === '' && locOf[String(e.DstID)] === '';
+      }), '');
+    }
+    return out;
+  }
+
+  function layoutSingle(nodes, edges) {
     var ids = nodes.map(function (n) { return String(n.ID); });
     var idSet = {};
     ids.forEach(function (i) { idSet[i] = true; });
@@ -367,7 +415,11 @@
       if (!isFinite(minX)) { minX = 0; maxX = 0; }
       var bh = '';
       geo.band.forEach(function (b) {
-        var name = LAYER_LABEL[b.layer] || ('第 ' + (b.layer + 1) + ' 层');
+        var layerName = LAYER_LABEL[b.layer] || ('第 ' + (b.layer + 1) + ' 层');
+        // V1.3：位置分组时，泳道标题优先显示位置名
+        var name = (b.loc !== undefined)
+          ? ((b.loc || '未分组') + ' · ' + layerName)
+          : layerName;
         bh += '<rect class="sm-topo-band" x="' + (minX - COL_GAP / 2) + '" y="' + b.top + '" width="' +
           (maxX - minX + COL_GAP) + '" height="' + (b.bottom - b.top) + '" rx="6"/>' +
           '<line class="sm-topo-band-line" x1="' + (minX - COL_GAP / 2) + '" y1="' + b.top + '" x2="' +

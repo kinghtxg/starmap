@@ -99,6 +99,9 @@
     },
     scanPorts: (target) => req('POST', '/api/ports/scan', { target }),
     scanPortsStatus: (id) => req('GET', '/api/ports/scan/' + encodeURIComponent(id)),
+    // 探针注册（V1.3）
+    probes: () => req('GET', '/api/probes'),
+    deleteProbe: (id) => req('DELETE', '/api/probes/' + encodeURIComponent(id)),
   };
 
   global.API = API;

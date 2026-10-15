@@ -127,6 +127,9 @@ func NewRouter(d Deps) *gin.Engine {
 		api.GET("/ports", s.listPorts)
 		api.POST("/ports/scan", s.scanPorts)
 		api.GET("/ports/scan/:id", s.scanPortsStatus)
+		// 探针注册（V1.3：按探针位置归纳拓扑）
+		api.GET("/probes", s.listProbes)
+		api.DELETE("/probes/:id", s.deleteProbe)
 	}
 
 	// 静态资源（embed.FS 单二进制分发）
@@ -275,6 +278,7 @@ type nodeJSON struct {
 	RiskLevel  string   `json:"RiskLevel"`
 	Active     bool     `json:"Active"`
 	Aggregated bool     `json:"Aggregated,omitempty"`
+	Location   string   `json:"Location,omitempty"` // 归属位置（探针位置归纳，V1.3）
 }
 
 func toNodeJSON(n *model.Node) nodeJSON {
@@ -299,6 +303,7 @@ func toNodeJSON(n *model.Node) nodeJSON {
 		RiskLevel:  n.RiskLevel,
 		Active:     n.Active,
 		Aggregated: strings.Contains(id, "/"),
+		Location:   n.Location,
 	}
 }
 
@@ -741,6 +746,8 @@ func (s *Server) ingestProbe(c *gin.Context) {
 	}
 	var report struct {
 		ProbeID  string              `json:"probe_id"`
+		Name     string              `json:"name"`
+		Location string              `json:"location"`
 		Token    string              `json:"token"`
 		SentAt   time.Time           `json:"sent_at"`
 		Ts       time.Time           `json:"ts"`
@@ -751,6 +758,11 @@ func (s *Server) ingestProbe(c *gin.Context) {
 	if err := json.Unmarshal(body, &report); err != nil {
 		fail(c, http.StatusBadRequest, "上报格式错误: "+err.Error())
 		return
+	}
+	// 位置优先取 report.location，其次 metadata.location（兼容旧探针）
+	location := report.Location
+	if location == "" && report.Metadata != nil {
+		location = report.Metadata["location"]
 	}
 	// token 校验
 	if want := s.d.Cfg.ProbeToken; want != "" {
@@ -792,6 +804,9 @@ func (s *Server) ingestProbe(c *gin.Context) {
 		if p.SrcIP == "" {
 			continue
 		}
+		if p.Location == "" {
+			p.Location = location
+		}
 		if s.d.Aggregator != nil {
 			s.d.Aggregator.Ingest(p)
 			accepted++
@@ -799,6 +814,9 @@ func (s *Server) ingestProbe(c *gin.Context) {
 	}
 	// 2) flows → 合成上下行报文进聚合器（统一流水线）
 	for _, f := range report.Flows {
+		if f.Location == "" {
+			f.Location = location
+		}
 		up, down := f.toPackets(baseTs)
 		if up == nil {
 			continue
@@ -812,6 +830,16 @@ func (s *Server) ingestProbe(c *gin.Context) {
 		}
 	}
 	atomic.AddInt64(&s.packetsTotal, int64(accepted))
+
+	// 探针注册（V1.3）：记录探针位置，供拓扑按位置归纳
+	if s.d.Store != nil {
+		_ = s.d.Store.UpsertProbe(&model.Probe{
+			ProbeID:  report.ProbeID,
+			Name:     report.Name,
+			Location: location,
+			LastSeen: time.Now(),
+		})
+	}
 
 	sessions := s.syncTopology()
 	events := s.evaluateAsync()
@@ -845,6 +873,7 @@ type probeFlow struct {
 	JA4                 string `json:"ja4"`
 	IsLongConn          bool   `json:"is_long_conn"`
 	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms"`
+	Location            string `json:"location"`
 }
 
 // toPackets 将 flow 转成合成上下行报文（长度按字节量折算，保留时间戳）。
@@ -882,6 +911,7 @@ func (f *probeFlow) toPackets(baseTs time.Time) (*parser.PacketInfo, *parser.Pac
 			JA4:                 f.JA4,
 			IsLongConn:          f.IsLongConn,
 			HeartbeatIntervalMs: f.HeartbeatIntervalMs,
+			Location:            f.Location,
 		}
 	}
 	upLen := f.BytesUp
@@ -1636,6 +1666,30 @@ func (s *Server) scanPortsStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, task)
+}
+
+// ---------- 探针注册（V1.3：按探针位置归纳拓扑） ----------
+
+func (s *Server) listProbes(c *gin.Context) {
+	probes, err := s.d.Store.ListProbes()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if probes == nil {
+		probes = []model.Probe{}
+	}
+	c.JSON(http.StatusOK, probes)
+}
+
+func (s *Server) deleteProbe(c *gin.Context) {
+	id := c.Param("id")
+	if err := s.d.Store.DeleteProbe(id); err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.d.Reviewer.Audit(s.actor(c), "probe_delete", id, "")
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // extractPortsFromSessions 从流量会话提取内网主机端口（流量角度，source=traffic）。

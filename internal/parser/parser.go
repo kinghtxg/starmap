@@ -40,6 +40,8 @@ type PacketInfo struct {
 	JA4                 string
 	IsLongConn          bool
 	HeartbeatIntervalMs int64
+	// Location 来源探针的位置（V1.3：按探针位置归纳拓扑）。
+	Location string
 }
 
 // ParsePacket 从 gopacket.Packet 提取 PacketInfo；非 IP/TCP/UDP 报文返回 nil。
@@ -318,6 +320,7 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 			StartTTL:  p.TTL,
 			FirstSeen: p.Timestamp,
 			LastSeen:  p.Timestamp,
+			Location:  p.Location,
 		}
 		st = &sessionState{session: ses}
 		// 以"发起方端口 > 对端端口"作为客户端方向的粗略启发（临时端口）
@@ -326,6 +329,8 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 			return srcIP == base.FiveTuple.SrcIP && srcPort == base.FiveTuple.SrcPort
 		}
 		a.sessions[key] = st
+	} else if ses := st.session; ses.Location == "" && p.Location != "" {
+		ses.Location = p.Location
 	}
 
 	ses := st.session

@@ -48,6 +48,8 @@ type Node struct {
 	Labels    []string  `json:"labels"`
 	RiskLevel string    `json:"risk_level"` // none|low|mid|high
 	Active    bool      `json:"active"`
+	// Location 归属位置（探针上报时携带，用于按探针位置自动归纳拓扑，V1.3）。
+	Location string `json:"location,omitempty"`
 }
 
 // Edge 拓扑链路
@@ -131,6 +133,9 @@ type Session struct {
 	IsLongConn          bool      `json:"is_long_conn"`
 	HeartbeatIntervalMs int64     `json:"heartbeat_interval_ms,omitempty"`
 	Closed              bool      `json:"closed"`
+	// Location 来源探针的位置（用于按探针位置归纳拓扑，V1.3）；ProbeID 为来源探针标识。
+	Location string `json:"location,omitempty"`
+	ProbeID  string `json:"probe_id,omitempty"`
 }
 
 // RiskEvent 风险事件
@@ -261,4 +266,13 @@ type PortRecord struct {
 	Source    string    `json:"source"`  // traffic | probe | arp
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
+}
+
+// Probe 远端探针注册（V1.3：按探针位置自动归纳拓扑）。
+type Probe struct {
+	ProbeID   string    `json:"probe_id"`
+	Name      string    `json:"name"`
+	Location  string    `json:"location"` // 探针部署位置（机房/分支/网段）
+	LastSeen  time.Time `json:"last_seen"`
+	CreatedAt time.Time `json:"created_at"`
 }

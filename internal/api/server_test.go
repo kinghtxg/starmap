@@ -405,6 +405,48 @@ func TestProbeIngestAPI(t *testing.T) {
 	}
 }
 
+func TestProbeLocationIngest(t *testing.T) {
+	h, _ := newTestRouter(t, testCfg())
+	body := map[string]any{
+		"probe_id": "probe-3f",
+		"name":     "3F机房探针",
+		"location": "3F机房",
+		"ts":       base.Format(time.RFC3339),
+		"flows": []map[string]any{{
+			"src_ip": "10.10.0.1", "dst_ip": "10.10.0.2",
+			"src_port": 40000, "dst_port": 80, "proto": "tcp",
+			"bytes_up": 5000, "bytes_down": 8000, "packets": 40,
+			"first_seen": base.Format(time.RFC3339),
+			"last_seen":  base.Add(30 * time.Second).Format(time.RFC3339),
+		}},
+	}
+	w := doReq(t, h, "POST", "/api/ingest/probe", body, nil)
+	if w.Code != 200 {
+		t.Fatalf("探针上报失败 %d: %s", w.Code, w.Body.String())
+	}
+	// 拓扑节点应带 location
+	w = doReq(t, h, "GET", "/api/topology", nil, nil)
+	var snap map[string]any
+	json.Unmarshal(w.Body.Bytes(), &snap)
+	nodes := snap["Nodes"].([]any)
+	found := false
+	for _, n := range nodes {
+		if nn, ok := n.(map[string]any); ok && nn["Location"] == "3F机房" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("节点应带 location=3F机房: %s", w.Body.String())
+	}
+	// 探针注册列表应包含该探针
+	w = doReq(t, h, "GET", "/api/probes", nil, nil)
+	var probes []map[string]any
+	json.Unmarshal(w.Body.Bytes(), &probes)
+	if len(probes) != 1 || probes[0]["location"] != "3F机房" {
+		t.Fatalf("探针注册错误: %s", w.Body.String())
+	}
+}
+
 func TestProbeToken(t *testing.T) {
 	cfg := testCfg()
 	cfg.ProbeToken = "secret-token"
