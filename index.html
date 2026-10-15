@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StarMap 星图 · 内网资产测绘与账外资产发现引擎</title>
+<meta name="description" content="StarMap 星图 —— 被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备。对可疑行为只打标签、不定性。单二进制、离线部署、Apache-2.0 开源。">
+<meta property="og:title" content="StarMap 星图 · 内网资产测绘与账外资产发现引擎">
+<meta property="og:description" content="让内网的每一台设备，都看得见、对得上账。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='3' fill='none' stroke='%2346d4ff' stroke-width='2'/%3E%3Ccircle cx='6' cy='7' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Ccircle cx='26' cy='7' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Ccircle cx='6' cy='25' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Ccircle cx='26' cy='25' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Cpath d='M8 8l6 6M24 8l-6 6M8 24l6-6M24 24l-6-6' stroke='%2346d4ff' stroke-width='1.6'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://miaoda.feishu.cn">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* ============================================================
+   StarMap 设计令牌（深空墨蓝 + 星图青 + 琥珀告警）
+   ============================================================ */
+:root{
+  --bg:#07080c;
+  --bg-2:#0c0e14;
+  --panel:#0c0e14;
+  --panel-2:#11141b;
+  --line:#1c2029;
+  --line-soft:#141821;
+  --ink:#f5f7fa;
+  --ink-dim:#aab4c2;
+  --ink-faint:#5b6370;
+  --cyan:#46d4ff;        /* 主品牌色：星图青 */
+  --teal:#4ade80;
+  --amber:#f2c94c;
+  --red:#ff5d5d;
+  --radius:8px;
+  --maxw:1200px;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.65;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+::selection{background:rgba(70,212,255,.25);color:#fff}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px}
+.mono{font-family:var(--mono)}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--cyan);display:inline-flex;align-items:center;gap:10px}
+.eyebrow::before{content:"";width:26px;height:1px;background:var(--cyan);opacity:.7}
+h2.sec-title{font-size:clamp(26px,3.4vw,40px);font-weight:600;letter-spacing:-.01em;margin:18px 0 14px;line-height:1.15}
+.sec-lead{color:var(--ink-dim);max-width:680px;font-size:16px}
+section{position:relative;padding:96px 0}
+.section-head{margin-bottom:52px}
+
+/* ---------- 顶部导航 ---------- */
+.nav{position:fixed;top:0;left:0;right:0;z-index:50;transition:background .3s,border-color .3s;border-bottom:1px solid transparent}
+.nav.in{background:rgba(5,8,15,.78);backdrop-filter:blur(14px);border-bottom-color:var(--line-soft)}
+.nav-inner{max-width:var(--maxw);margin:0 auto;padding:16px 28px;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:15px;letter-spacing:.02em}
+.brand svg{color:var(--cyan)}
+.nav-links{display:flex;gap:26px;font-size:14px;color:var(--ink-dim)}
+.nav-links a{transition:color .2s}
+.nav-links a:hover{color:var(--ink)}
+.nav-cta{display:flex;align-items:center;gap:14px}
+.nav-cta .gh{font-family:var(--mono);font-size:13px;color:var(--ink-dim);display:flex;align-items:center;gap:6px;transition:color .2s}
+.nav-cta .gh:hover{color:var(--ink)}
+.btn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:500;padding:9px 18px;border-radius:6px;border:1px solid var(--line);transition:all .2s;cursor:pointer}
+.btn-primary{background:var(--cyan);color:#04121c;border-color:var(--cyan);font-weight:600}
+.btn-primary:hover{background:#6fdcff}
+.btn-ghost{border-color:var(--line);color:var(--ink)}
+.btn-ghost:hover{border-color:var(--cyan);color:var(--cyan)}
+
+/* ---------- Hero ---------- */
+.hero{position:relative;padding:180px 0 110px;overflow:hidden}
+.hero-bg{position:absolute;inset:0;pointer-events:none}
+.hero-bg .glow{position:absolute;border-radius:50%;filter:blur(90px);opacity:.35}
+.hero-bg .g1{width:560px;height:560px;background:rgba(70,212,255,.18);top:-180px;right:-120px}
+.hero-bg .g2{width:420px;height:420px;background:rgba(74,222,128,.10);bottom:-160px;left:-100px}
+.hero-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(70,212,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(70,212,255,.035) 1px,transparent 1px);background-size:48px 48px;mask-image:radial-gradient(ellipse 80% 60% at 50% 30%,#000 0%,transparent 70%)}
+.hero .wrap{position:relative}
+.hero-tag{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12.5px;color:var(--ink-dim);border:1px solid var(--line);padding:6px 14px;border-radius:999px;margin-bottom:26px}
+.hero-tag .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 0 3px rgba(74,222,128,.18);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.hero h1{font-size:clamp(34px,5.4vw,60px);font-weight:900;letter-spacing:-.02em;line-height:1.12;margin-bottom:22px}
+.hero h1 em{font-style:normal;background:linear-gradient(100deg,#46d4ff,#4ade80);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero-sub{font-size:18px;color:var(--ink-dim);max-width:620px;margin-bottom:36px}
+.hero-cta{display:flex;gap:14px;margin-bottom:56px;flex-wrap:wrap}
+.hero-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;max-width:860px}
+.hero-stats .st{background:var(--panel);padding:22px 24px}
+.hero-stats .k{font-family:var(--mono);font-size:26px;font-weight:600;color:var(--ink)}
+.hero-stats .k span{font-size:15px;color:var(--cyan)}
+.hero-stats .v{font-size:13px;color:var(--ink-faint);margin-top:4px}
+
+/* ---------- 通用卡片 ---------- */
+.grid{display:grid;gap:16px}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+.grid-2{grid-template-columns:repeat(2,1fr)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:28px}
+.panel:hover{border-color:var(--line);}
+.panel .idx{font-family:var(--mono);font-size:12px;color:var(--cyan);letter-spacing:.12em;margin-bottom:14px}
+.panel h3{font-size:17px;font-weight:600;margin-bottom:10px}
+.panel p{font-size:14px;color:var(--ink-dim)}
+
+/* ---------- 痛点 ---------- */
+.pain .panel{position:relative;overflow:hidden}
+.pain .panel::after{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--red),transparent);opacity:.6}
+.pain h3{color:var(--ink)}
+.pain p{color:var(--ink-dim)}
+
+/* ---------- 概念/能力 ---------- */
+.concept .panel .ic{width:44px;height:44px;border-radius:10px;display:grid;place-items:center;background:rgba(70,212,255,.08);border:1px solid rgba(70,212,255,.2);color:var(--cyan);margin-bottom:18px}
+
+/* ---------- 架构 ---------- */
+.arch-wrap{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:36px;overflow:auto}
+.arch{font-family:var(--mono);font-size:13px;line-height:1.8;color:#c9d6ea;white-space:pre}
+.arch .hl{color:#7ad0ff}.arch .ok{color:#6fe3a5}.arch .dim{color:#5b6370}.arch .amb{color:var(--amber)}
+.arch-caption{font-size:13px;color:var(--ink-faint);margin-top:16px;font-family:var(--mono)}
+
+/* ---------- 能力矩阵 ---------- */
+table.matrix{width:100%;border-collapse:collapse;font-size:14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.matrix th,.matrix td{text-align:left;padding:14px 18px;border-bottom:1px solid var(--line-soft)}
+.matrix th{font-size:12px;color:var(--ink-faint);font-family:var(--mono);letter-spacing:.08em;background:var(--panel-2)}
+.matrix tr:last-child td{border-bottom:none}
+.matrix td .tag{font-family:var(--mono);font-size:12px;padding:2px 8px;border-radius:4px;background:rgba(70,212,255,.1);color:var(--cyan)}
+.matrix td .lv{font-family:var(--mono);font-size:12px;font-weight:600}
+.matrix td .lv.mid{color:var(--amber)}.matrix td .lv.high{color:var(--red)}
+
+/* ---------- 截图 ---------- */
+.shots{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.shots figure{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.shots img{width:100%;display:block}
+.shots figcaption{padding:12px 16px;font-size:13px;color:var(--ink-dim);border-top:1px solid var(--line-soft)}
+
+/* ---------- 代码块 ---------- */
+pre.code{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:22px 24px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.7;color:#d6e1f2}
+pre.code .c{color:#5b6370}
+.code-hd{font-family:var(--mono);font-size:12px;color:var(--ink-faint);letter-spacing:.08em;margin-bottom:10px}
+
+/* ---------- 路线图 ---------- */
+.road{display:flex;flex-direction:column;gap:0}
+.road .item{display:grid;grid-template-columns:110px 1fr;gap:24px;padding:22px 0;border-bottom:1px solid var(--line-soft)}
+.road .item:last-child{border-bottom:none}
+.road .phase{font-family:var(--mono);font-size:12px;color:var(--cyan);letter-spacing:.1em;padding-top:3px}
+.road .item h3{font-size:16px;font-weight:600;margin-bottom:6px}
+.road .item p{font-size:14px;color:var(--ink-dim)}
+
+/* ---------- 开源/动态/加入 ---------- */
+.opensrc .panel{text-align:left}
+.news .item{display:block;padding:20px 0;border-bottom:1px solid var(--line-soft)}
+.news .item:last-child{border-bottom:none}
+.news .date{font-family:var(--mono);font-size:12px;color:var(--ink-faint)}
+.news .t{font-size:16px;font-weight:600;margin:4px 0 6px}
+.news .t:hover{color:var(--cyan)}
+.news .d{font-size:14px;color:var(--ink-dim)}
+
+/* ---------- footer ---------- */
+footer{position:relative;padding:80px 0 60px;border-top:1px solid var(--line-soft)}
+footer .brand-row{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+footer .copy{font-size:13px;color:var(--ink-faint);margin-top:20px}
+footer .links{display:flex;gap:22px;font-size:14px;color:var(--ink-dim)}
+footer .links a:hover{color:var(--ink)}
+
+@media(max-width:860px){
+  .grid-3,.grid-2,.shots{grid-template-columns:1fr}
+  .hero-stats{grid-template-columns:repeat(2,1fr)}
+  .nav-links{display:none}
+  .hero h1{font-size:34px}
+  section{padding:64px 0}
+  .road .item{grid-template-columns:1fr;gap:8px}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3"/></svg>
+      StarMap 星图
+    </a>
+    <div class="nav-links">
+      <a href="#why">理念</a>
+      <a href="#how">能力</a>
+      <a href="#architecture">架构</a>
+      <a href="#matrix">能力矩阵</a>
+      <a href="#roadmap">路线图</a>
+      <a href="#news">动态</a>
+      <a href="#join">参与共建</a>
+    </div>
+    <div class="nav-cta">
+      <a class="gh" href="#">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <a class="btn btn-primary" href="#quickstart">快速开始</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="hero-bg">
+    <div class="glow g1"></div>
+    <div class="glow g2"></div>
+    <div class="hero-grid"></div>
+  </div>
+  <div class="wrap">
+    <div class="hero-tag"><span class="dot"></span>Open Source · Intranet Asset Discovery · Apache-2.0</div>
+    <h1>让内网的每一台设备，<br>都<em>看得见、对得上账</em>。</h1>
+    <p class="hero-sub">StarMap 星图被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备。对可疑行为只打标签、不定性——一款部署在内网、持续回答「网络里到底有什么」的资产测绘引擎。</p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#quickstart">快速开始 →</a>
+      <a class="btn btn-ghost" href="#architecture">查看技术架构</a>
+    </div>
+    <div class="hero-stats">
+      <div class="st"><div class="k">3 <span>路</span></div><div class="v">流量数据接入</div></div>
+      <div class="st"><div class="k">5 <span>类</span></div><div class="v">风险特征打标规则</div></div>
+      <div class="st"><div class="k">1 <span>个</span></div><div class="v">二进制 · 零外网依赖</div></div>
+      <div class="st"><div class="k">100<span>%</span></div><div class="v">只打标签 · 不定性不封禁</div></div>
+    </div>
+  </div>
+</header>
+
+<section id="why">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Why StarMap</span>
+      <h2 class="sec-title">资产底账，为什么总对不上</h2>
+      <p class="sec-lead">安全运营的起点是「知道自己有什么」。但内网资产长期处于「看不清」的状态——台账里的不一定在，网络里的不一定在账上。</p>
+    </div>
+    <div class="grid grid-3 pain">
+      <div class="panel"><div class="idx">PROBLEM / 01</div><h3>账外设备失管</h3><p>测试机、旁路设备、离职遗留主机散落在网段里，不在任何台账之上，却可能是攻击者的第一落脚点。看不见，就守不住。</p></div>
+      <div class="panel"><div class="idx">PROBLEM / 02</div><h3>资产底账靠手工</h3><p>资产登记依赖 Excel 与人工填报，设备更替、IP 变更后底账迅速失真。账实不符是常态，等保审计时只能临时补课。</p></div>
+      <div class="panel"><div class="idx">PROBLEM / 03</div><h3>影子 IT 难发现</h3><p>员工私搭的服务、未登记的开放端口、悄悄接入的旁路，构成安全盲区。传统扫描式测绘有周期、有盲点，难以及时覆盖。</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="how" style="background:var(--bg-2)">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">How it works</span>
+      <h2 class="sec-title">让流量自己「画」出资产地图</h2>
+      <p class="sec-lead">不依赖主动扫描，靠被动流量持续感知。三路数据统一汇入一条流水线，拓扑自动生长，账外设备自然浮现。</p>
+    </div>
+    <div class="grid grid-3 concept">
+      <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><h3>被动流量测绘</h3><p>PCAP 导入、网卡抓包、远端探针上报，三路流量统一汇入聚合器，自动生长节点与链路——同 MAC 合并、/24 聚合、边老化、NAT 修复。</p></div>
+      <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/><path d="M11 8v6M8 11h6"/></svg></div><h3>账外资产发现</h3><p>自动发现的主机登记为「账外资产」，与人工归档的台账对照，账实不符一目了然。未登记主机离线超时自动清理，台账始终保持新鲜。</p></div>
+      <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/><path d="m9 12 2 2 4-4"/></svg></div><h3>只打标签，不定性</h3><p>对可疑行为仅产出特征标签（如「疑似 FRP 隧道特征」），不判定违规、不告警外发、不联动封禁、不解密流量。合规边界清晰，可在授权环境放心部署。</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Architecture</span>
+      <h2 class="sec-title">单二进制，一条流水线</h2>
+      <p class="sec-lead">三路数据统一汇入聚合器 → 拓扑引擎 → 检测 → 复核/审计，SQLite 持久化，前端 embed 内嵌，无任何 CDN/外网依赖。</p>
+    </div>
+    <div class="arch-wrap">
+      <div class="arch">                ┌──────────────────────── StarMap（单二进制）────────────────────────┐
+  <span class="dim">PCAP 文件 ──►</span>  │  <span class="hl">ingest/pcapfile</span> ─┐                                              │
+  <span class="dim">网卡抓包 ──►</span>  │  <span class="hl">ingest/capture</span>  ─┼─► <span class="hl">parser.Aggregator</span> ─► <span class="hl">topology.Engine</span> ─┐   │
+  <span class="dim">远端探针 ──►</span>  │  <span class="hl">ingest/probe</span>    ─┘    (五元组/MAC/SNI/    (节点/边/聚合/老化)│   │
+                 │                         Host/JA3/JA4)                        ▼   │
+                 │                                         <span class="hl">detect.Detector</span>（周期评估）│
+                 │                                           │ <span class="amb">RiskEvent</span>        │
+                 │                                           ▼                     │
+                 │                           <span class="ok">review（复核）</span> + <span class="ok">audit（审计）</span> + <span class="ok">assets</span> │
+                 │                                           │                     │
+                 │                     <span class="hl">store</span>（SQLite，modernc 纯 Go 驱动）        │
+                 │   <span class="dim">web/（embed.FS 内嵌）</span> ◄── <span class="hl">api/server.go</span>（Gin REST）      │
+                 └─────────────────────────────────────────────────────────────────┘</div>
+      <div class="arch-caption">Go · Gin · gopacket · modernc.org/sqlite · 原生 HTML/CSS/JS（零构建、零 CDN）</div>
+    </div>
+  </div>
+</section>
+
+<section id="matrix" style="background:var(--bg-2)">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Capability Matrix</span>
+      <h2 class="sec-title">能力矩阵</h2>
+      <p class="sec-lead">从流量接入到资产归档，一套完整的内网资产测绘闭环。</p>
+    </div>
+    <table class="matrix">
+      <tr><th>能力</th><th>说明</th><th>状态</th></tr>
+      <tr><td><span class="tag">ingest</span></td><td>三路数据接入：PCAP/PCAPNG 导入 · 网卡实时抓包 · 远端探针上报</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">topology</span></td><td>拓扑自动测绘：同 MAC 多 IP 合并 · /24 聚合下钻 · 边老化 · NAT 修复</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">assets</span></td><td>主机资产库：账外资产自动登记 · 归档归属信息 · 离线自动清理</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">ports</span></td><td>端口记录：流量自动提取 + nmap 主动全端口扫描（双来源）</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">detect</span></td><td>风险特征打标：frp / clash / reverse_proxy / unknown_egress / multi_net</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">review</span></td><td>复核闭环：确认 / 误报加白 / 暂缓 · 白名单四维度抑制 · 全量审计</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">auth</span></td><td>可选认证：本地账号或 OIDC 单点登录（默认关闭，不做 RBAC）</td><td>✅ 可用</td></tr>
+    </table>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Quick Start</span>
+      <h2 class="sec-title">一分钟跑起来</h2>
+    </div>
+    <div class="grid grid-2">
+      <div>
+        <div class="code-hd">构建 & 运行</div>
+        <pre class="code"><span class="c"># 纯 Go 构建，无需 CGO</span>
+CGO_ENABLED=0 go build -o starmap ./cmd/starmap
+./starmap -config configs/config.yaml
+<span class="c"># 打开 http://127.0.0.1:8080</span></pre>
+      </div>
+      <div>
+        <div class="code-hd">导入数据 & 验证</div>
+        <pre class="code"><span class="c"># 导入 PCAP，驱动拓扑生长</span>
+curl -F "file=@testdata/out/frp_tunnel.pcap" \
+  http://127.0.0.1:8080/api/ingest/pcap
+
+<span class="c"># 测试与验收</span>
+go test ./...
+bash scripts/e2e.sh</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots" style="background:var(--bg-2)">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Screenshots</span>
+      <h2 class="sec-title">标准网管拓扑 · 原生桌面质感</h2>
+    </div>
+    <div class="shots">
+      <figure><img src="screenshots/topology.png" alt="拓扑总览"><figcaption>拓扑总览 —— 分层布局、设备图标、风险三色描边、minimap、下钻</figcaption></figure>
+      <figure><img src="screenshots/assets.png" alt="主机资产"><figcaption>主机资产 —— 账外资产发现与归档登记</figcaption></figure>
+      <figure><img src="screenshots/events.png" alt="事件工作台"><figcaption>事件工作台 —— 风险特征打标与复核闭环</figcaption></figure>
+      <figure><img src="screenshots/ingest.png" alt="数据接入"><figcaption>数据接入 —— PCAP 导入 / 抓包 / 探针 / 主动探测</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Roadmap</span>
+      <h2 class="sec-title">持续扩展</h2>
+    </div>
+    <div class="road">
+      <div class="item"><div class="phase">V1.0 · DONE</div><div><h3>流量测绘基座</h3><p>三路数据接入、拓扑自动测绘、五类风险打标、复核闭环、审计留痕。</p></div></div>
+      <div class="item"><div class="phase">V1.1 · DONE</div><div><h3>可靠性与部署</h3><p>拓扑持久化、并发安全、安全默认配置、UI 重构、标准拓扑图、可选 SSO。</p></div></div>
+      <div class="item"><div class="phase">V1.2 · DONE</div><div><h3>资产测绘增强</h3><p>主机资产库（账外资产）、端口记录（流量 + nmap）、探针 TLS 指纹贯通、跨平台主动探测。</p></div></div>
+      <div class="item"><div class="phase">NEXT</div><div><h3>资产指纹与探测增强</h3><p>服务指纹识别、资产变更比对、探针批次回执、流式 PCAP 解析、更多协议支持。</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="news" style="background:var(--bg-2)">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Updates</span>
+      <h2 class="sec-title">项目动态</h2>
+    </div>
+    <div class="news">
+      <a class="item" href="#"><div class="date">2026-10-15</div><div class="t">StarMap 开源发布：内网资产测绘与账外资产发现引擎</div><div class="d">V1.2 版本发布，覆盖流量测绘、账外资产发现、端口记录、风险打标完整闭环。</div></a>
+      <a class="item" href="#"><div class="date">2026-10-14</div><div class="t">V1.0 产品审查完成，P0 整改全部落地</div><div class="d">并发安全、拓扑持久化、安全默认配置等发布阻断项全部修复。</div></a>
+    </div>
+  </div>
+</section>
+
+<section id="join">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Join Us</span>
+      <h2 class="sec-title">和我们一起，把资产底账做扎实</h2>
+      <p class="sec-lead">StarMap 是 Apache-2.0 开源项目。如果你也关心内网资产测绘、账外资产治理，欢迎参与共建——无论是提 Issue、贡献代码，还是给个 Star。</p>
+    </div>
+    <div class="grid grid-3">
+      <div class="panel"><div class="idx">CONTRIBUTE</div><h3>贡献代码</h3><p>纯 Go + 原生前端，单二进制架构。欢迎贡献检测规则、协议解析、资产指纹能力。</p></div>
+      <div class="panel"><div class="idx">FEEDBACK</div><h3>反馈问题</h3><p>遇到 Bug 或有好想法，欢迎提 Issue。请附上复现步骤与日志，便于快速定位。</p></div>
+      <div class="panel"><div class="idx">ADOPT</div><h3>落地使用</h3><p>在内网部署试用，把发现的问题和场景反馈回来，帮助我们打磨成更实用的资产测绘工具。</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="brand-row">
+      <a class="brand" href="#">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#46d4ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3"/></svg>
+        StarMap 星图
+      </a>
+      <div class="links">
+        <a href="#why">理念</a>
+        <a href="#how">能力</a>
+        <a href="#architecture">架构</a>
+        <a href="#roadmap">路线图</a>
+        <a href="#join">参与共建</a>
+      </div>
+    </div>
+    <div class="copy">Apache License 2.0 · © 极客星空安全实验室 · 内网资产测绘与账外资产发现引擎</div>
+  </div>
+</footer>
+
+<script>
+// 顶部导航滚动背景
+var nav = document.getElementById('nav');
+var onScroll = function () { nav.classList.toggle('in', window.scrollY > 30); };
+window.addEventListener('scroll', onScroll);
+onScroll();
+</script>
+</body>
+</html>
