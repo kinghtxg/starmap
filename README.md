@@ -1,50 +1,84 @@
-# StarMap 星图 · 网内拓扑自动测绘引擎 V1.1
+<div align="center">
 
-> 极客星空实验室出品 · Apache-2.0
-> 纯 Web B/S 架构。被动感知网内流量，自动测绘资产拓扑，对可疑行为**只打标签、不定性**。
+# StarMap 星图
 
-## V1.1 更新要点
+**内网资产测绘与账外资产发现引擎**
 
-- **前端全面重构**：自研设计系统 `theme.css`（腾讯云规范风格、原生桌面质感、统一动效、操作按钮统一置于顶部工具栏），移除全部 Tailwind/Cytoscape/jsPDF CDN 依赖，**内网离线可用**。
-- **标准拓扑图**：自绘 SVG 拓扑引擎 `topo.js` —— 标准网络设备图标、分层布局、正交折线、风险三色描边、告警徽标、图例、minimap、缩放工具栏、右键菜单、导出 PNG/SVG、双击聚合节点下钻。
-- **拓扑持久化（P0-2）**：节点/边以稳定 NodeKey 落库，重启不丢拓扑，历史事件与白名单跨重启不再错配。
-- **可选账号系统 + APSSO SSO**：`auth.mode = none|local|oidc`，默认 none 零行为差异；OIDC 走 authorization_code + PKCE；`scripts/deploy-apsso.sh` 一键部署；不做 RBAC（合规红线不变）。
-- **安全默认加固（P0-3/P0-4）**：默认仅监听 `127.0.0.1`；CORS 白名单（默认空=仅同源）；保存配置不再静默清空探针令牌；审计 Actor 记录登录身份或来源 IP。
-- **并发安全（P0-1）**：检测评估全轮串行化，消除并发 map 写导致的进程 fatal crash。
+> 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
+
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
+[![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
+[![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
+
+</div>
+
+---
+
+## 这是什么
+
+StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三路数据被动感知网络流量，自动生长出资产拓扑与主机台账，把"网络里到底有哪些设备、哪些是台账之外的影子设备"这一基本问题持续回答清楚。
+
+核心价值是**账外资产发现**：企业在册资产台账之外，往往还散落着未登记的主机、测试机、旁路设备。StarMap 通过流量自动发现这些设备，与人工登记的资产台账对照，让"账实不符"一目了然。
+
+## 设计原则
+
+- **被动优先**：以流量发现为主（PCAP 导入 / 网卡抓包 / 远端探针上报），主动探测为辅。
+- **只打标签，不定性**：对可疑行为仅产出特征标签（如"疑似 FRP 隧道特征"），不判定"违规/违法"，不告警外发，不联动封禁。
+- **单二进制，离线可用**：纯 Go + SQLite（免 CGO），前端资源 `embed` 内嵌，无任何 CDN/外网依赖，内网一键部署。
+- **不建权限体系**：不内置 RBAC；可外接 OIDC 身份源（如 APSSO）做可选的访问门卫，默认关闭。
 
 ## 功能特性
 
-- **网内拓扑自动测绘**：PCAP 文件导入 / 网卡实时抓包 / 远端探针上报三路数据接入，自动生长节点与链路，同 MAC 多 IP 合并、/24 子网聚合（可下钻）、公网按 /24 聚合为外部节点、边老化灰度、降噪、NAT 修复。
-- **风险打标（四+一类规则，仅标签不定性）**：
-  - `frp`：Go-TLS JA3/JA4 指纹 + >1h 保活长连接 + 周期小包心跳，三中二 mid、三中三 high；
-  - `clash`：随机高熵 SNI + 高频短间隔公网外联 + 持续陌生目的；
-  - `reverse_proxy`：单内网 IP 映射 Host 数超阈值（默认 10，可配）；
-  - `unknown_egress`：对外服务端口/链路数超 1h 滚动基线（max(3×基线, 20)，启动后 10min 学习期）；
-  - `multi_net`：同节点/同 MAC/同首跳网关 MAC 命中 ≥2 个网络域 → high。
-- **复核闭环**：事件确认归档 / 误报自动加白 / 暂缓；白名单四种维度（cidr/ip/host/node）命中即抑制，已有 pending 事件自动转误报；全量操作审计留痕（默认保留 90 天）。
-- **网络域管理**：预置 gov/office/internet/prod 四域，CIDR 最长前缀匹配，CRUD 后节点归属即时重算。
-- **事件去重**：同 (type, node) 且 24h 内已有 pending/confirmed 事件 → 仅更新证据不重复建单（§10.5）。
-- **合规红线**：不自建账号与权限体系（可外接身份源做**可选**门卫，见「账号系统与 SSO」）、不解密流量、不漏洞扫描、无 IDS 告警外发、不做管控执行。
+### 流量驱动的资产发现
+
+- **三路数据接入**：PCAP/PCAPNG 离线导入、多网卡实时抓包（`-tags pcap`）、远端探针上报，统一汇入同一流水线。
+- **拓扑自动测绘**：同 MAC 多 IP 合并、`/24` 子网聚合（可下钻）、公网按 `/24` 聚合为外部节点、边老化灰度、降噪、NAT 修复。
+- **主机资产库**：自动发现的主机登记为**账外资产**，可人工归档登记归属单位 / 归属人 / 主机系统 / 位置；账外主机离线超时自动清理（默认 72h，可配）。
+- **端口记录**：从流量五元组自动提取内网服务端口，也支持调用系统 `nmap` 做主动全端口扫描（默认 `1-65535`，可配），双来源汇总。
+
+### 风险特征打标（仅标签）
+
+| 规则 | 特征 | 等级 |
+|---|---|---|
+| `frp` | Go-TLS JA3/JA4 指纹 + 长连接保活 + 周期小包心跳（三中二 mid，三中三 high） | mid/high |
+| `clash` | 随机高熵 SNI + 高频短间隔外联 + 持续陌生目的 | mid/high |
+| `reverse_proxy` | 单内网 IP 映射 Host 数超阈值（默认 10） | mid |
+| `unknown_egress` | 对外端口/链路数超 1h 滚动基线（带学习期） | mid |
+| `multi_net` | 同节点/MAC/网关命中 ≥2 个网络域 | high |
+
+### 可运营的闭环
+
+- **复核闭环**：事件确认归档 / 误报自动加白 / 暂缓；白名单四维度（cidr/ip/host/node）命中即抑制。
+- **网络域管理**：预置 gov/office/internet/prod 四域，CIDR 最长前缀匹配。
+- **全量审计**：所有操作留痕（操作人 / 动作 / 对象），默认保留 90 天。
+- **主动探测**：ARP / ICMP / Traceroute 跨平台（Linux + Windows），默认关闭。
+- **可选认证**：本地账号或 OIDC 单点登录（APSSO），`auth.mode = none|local|oidc`，默认 `none`。
+
+### 界面
+
+自研设计系统（腾讯云规范风格、原生桌面质感、统一动效），标准网管拓扑图（设备图标 / 分层布局 / 正交折线 / 图例 / minimap / 右键菜单 / 导出 PNG·SVG / 双击下钻），操作按钮全站统一置于顶部工具栏。
 
 ## 架构
 
 ```
-                 ┌──────────────────────── StarMap (单二进制) ────────────────────────┐
-  PCAP 文件 ──►  │ ingest/pcapfile ─┐                                                 │
-  网卡抓包 ──►  │ ingest/capture  ─┼─► parser.Aggregator ─► topology.Engine ─┐        │
-  远端探针 ──►  │ ingest/probe    ─┘   (五元组/MAC/TTL/    (节点/边/聚合/老化)│        │
-                 │                          SNI/Host/JA3/JA4)                 ▼        │
-                 │                                              detect.Detector (周期评估)│
-                 │                                                │ RiskEvent          │
-                 │                                                ▼                    │
-                 │                                  review（确认/误报加白/暂缓）+ audit │
-                 │                                                │                    │
-                 │                                  store (SQLite, modernc 纯 Go 驱动)  │
-                 │  web/ (embed.FS 内嵌) ◄── api/server.go (Gin REST /api/*)            │
-                 └──────────────────────────────────────────────────────────────────────┘
+                ┌────────────────────── StarMap（单二进制）──────────────────────┐
+ PCAP 文件 ──►  │  ingest/pcapfile ─┐                                            │
+ 网卡抓包 ──►  │  ingest/capture  ─┼─► parser.Aggregator ─► topology.Engine ─┐   │
+ 远端探针 ──►  │  ingest/probe    ─┘   (五元组/MAC/SNI/  (节点/边/聚合/老化)│   │
+                │                       Host/JA3/JA4)                       ▼   │
+                │                                        detect.Detector（周期评估）│
+                │                                          │ RiskEvent          │
+                │                                          ▼                    │
+                │                          review（复核）+ audit（审计）+ assets │
+                │                                          │                    │
+                │                    store（SQLite，modernc 纯 Go 驱动）        │
+                │  web/（embed.FS 内嵌）◄── api/server.go（Gin REST /api/*）     │
+                └────────────────────────────────────────────────────────────────┘
 ```
 
-技术栈：Go 1.22 + Gin + gopacket + modernc.org/sqlite（免 CGO）+ 前端静态页（Tailwind CDN + Cytoscape.js CDN）。
+技术栈：**Go 1.22+ · Gin · gopacket · modernc.org/sqlite（免 CGO）· 原生 HTML/CSS/JS（零构建、零 CDN）**。
 
 ## 快速开始
 
@@ -52,7 +86,7 @@
 # 构建（纯 Go，无需 CGO）
 CGO_ENABLED=0 go build -o starmap ./cmd/starmap
 
-# 运行（缺配置文件时用内置默认值）
+# 运行
 ./starmap -config configs/config.yaml
 # 打开 http://127.0.0.1:8080
 
@@ -62,90 +96,88 @@ go test ./...
 # 生成合成 PCAP 测试数据（5 类场景 → testdata/out/）
 go run testdata/gen_pcap.go
 
-# 端到端验收（构建→起服务→上传 5 个 PCAP→断言事件/拓扑/复核/去重）
+# 端到端验收（构建→起服务→上传 PCAP→断言事件/拓扑/复核/去重）
 bash scripts/e2e.sh
+
+# 全功能 API 冒烟测试（需先启动服务）
+python3 scripts/smoke_test.py
 
 # Linux 一键部署（systemd）
 sudo bash scripts/deploy.sh
 ```
 
-Docker（可选）：单二进制 + embed 静态资源，任意最小镜像即可运行，例如
-`FROM gcr.io/distroless/static-debian12` + `COPY starmap /starmap` + `ENTRYPOINT ["/starmap"]`。
-实时抓包需 `-tags pcap` 构建并安装 libpcap，且容器需要 `NET_ADMIN/NET_RAW` 能力。
+> 实时抓包需 `-tags pcap` 构建并安装 libpcap/npcap。主动端口扫描需系统安装 `nmap`。
 
-## API 摘要（/api 前缀，JSON）
+## 数据接入示例
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | /api/health · /api/stats | 健康检查 · 统计 |
-| GET | /api/topology | 拓扑快照（Nodes/Edges/Stats/GeneratedAt） |
-| GET | /api/topology/subnet/{cidr} | 聚合子网下钻 |
-| GET | /api/nodes/{id} | 节点详情（含对端） |
-| GET | /api/events?status=&type= | 事件列表（组合筛选） |
-| POST | /api/events/{id}/review | 复核 `{action: confirm\|false_positive\|defer, note, reviewer}` |
-| GET/POST/PUT/DELETE | /api/whitelist | 白名单 CRUD（kind: cidr/ip/host/node） |
-| GET/POST/PUT/DELETE | /api/domains | 网络域 CRUD |
-| POST | /api/ingest/pcap | PCAP/PCAPNG multipart 上传（≤200MB） |
-| POST | /api/ingest/probe | 探针上报 `{probe_id, token?, flows:[...], ts}` |
-| POST | /api/capture/start · /stop，GET /status | 抓包控制 |
-| GET/PUT | /api/config | 配置查询/热更新（持久化） |
-| GET | /api/audit | 审计日志 |
-| POST | /api/probe/trigger | 主动探测 `{type: arp\|icmp\|traceroute, target}`（默认关闭） |
+**PCAP 导入**（页面 `ingest.html` 上传，或）：
 
-## PCAP 导入与探针接入
+```bash
+curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pcap
+```
 
-**PCAP 导入**：页面 ingest.html 上传，或
-`curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pcap`。
-支持经典 PCAP 与 PCAPNG；超过 200MB 或损坏文件返回 4xx。上传后同步完成拓扑生长与一轮检测评估。
-
-**探针接入**：任意内网主机向 `POST /api/ingest/probe` 上报 JSON：
+**探针上报**：任意内网主机向 `POST /api/ingest/probe` 上报会话元数据，与抓包/PCAP 共用同一条流水线：
 
 ```json
 {
   "probe_id": "probe-01",
-  "token": "可选，配置 probe_token 后必填（也可用 X-Probe-Token 头）",
-  "ts": "2025-03-01T00:00:00Z",
+  "ts": "2026-01-01T00:00:00Z",
   "flows": [{
     "src_ip": "10.1.2.3", "dst_ip": "10.1.2.4",
     "src_port": 40000, "dst_port": 443, "proto": "tcp",
-    "bytes_up": 3000, "bytes_down": 8000, "packets": 40,
-    "first_seen": "2025-03-01T00:00:00Z", "last_seen": "2025-03-01T00:00:30Z",
-    "sni": "www.example.com"
+    "bytes_up": 3000, "bytes_down": 8000,
+    "sni": "www.example.com", "ja4": "t13d1516h2_..."
   }]
 }
 ```
 
-探针与抓包/PCAP 共用同一条 PacketSource → parser → topology 流水线。
-**风险提示**：探针上报默认无鉴权，生产环境请配置 `probe_token` 并置于可信网段。
+## 主要 API（`/api` 前缀）
 
-## 合规声明
-
-- 本系统对所有命中规则的流量**只打标签（label），不作任何定性结论**，不发送告警通知，不联动封禁。
-- **不解密**任何加密流量：仅解析 TLS ClientHello 明文元数据（SNI/密码套件/扩展）用于 JA3/JA4 指纹。
-- 不内置漏洞扫描、IDS 规则匹配或攻击载荷；主动探测（ARP/ICMP/Traceroute）默认关闭，需显式开启。
-- 请仅在获得授权的网络环境中使用。
-
-## JA4 说明
-
-JA4 指纹为**按公开算法规范（FoxIO 公开的 JA4 方法学字符串格式）自研实现**：
-仅复用其指纹字符串结构（`t13d1516h2_..._...`），不使用任何 FoxIO SAL 许可证约束的数据文件或代码，
-与项目 Apache-2.0 许可兼容。JA3 同理为公开算法（MD5 五段式）的独立实现，指纹表为社区公开观测值的自维护子集。
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` `/stats` | 健康检查 · 统计 |
+| GET | `/topology` | 拓扑快照 |
+| GET | `/topology/subnet/{cidr}` | 聚合子网下钻 |
+| GET | `/assets` `/assets/stats` | 资产列表 · 资产统计 |
+| POST/PUT/DELETE | `/assets/*` | 资产归档 / 维护 / 删除 |
+| GET | `/ports` | 端口记录（流量 + 扫描双来源） |
+| POST | `/ports/scan` | 主动端口扫描（nmap，异步） |
+| GET | `/events` | 事件列表（状态/类型筛选） |
+| POST | `/events/{id}/review` | 复核（confirm / false_positive / defer） |
+| GET/POST/PUT/DELETE | `/whitelist` `/domains` | 白名单 · 网络域 CRUD |
+| POST | `/ingest/pcap` `/ingest/probe` | PCAP 上传 · 探针上报 |
+| POST | `/probe/trigger` | 主动探测（arp/icmp/traceroute） |
+| GET/PUT | `/config` | 配置查询 / 热更新 |
+| GET | `/audit` | 审计日志 |
 
 ## 截图
 
-以下为导入 `testdata/out/` 合成 PCAP 后的真实运行截图（可用 `scripts/shot.py` 重新生成）：
+导入 `testdata/out/` 合成 PCAP 后的真实运行截图：
 
-| 页面 | 截图 |
-|---|---|
-| 拓扑总览 | ![topology](docs/screenshots/topology.png) |
-| 事件工作台 | ![events](docs/screenshots/events.png) |
-| 数据接入 | ![ingest](docs/screenshots/ingest.png) |
-| 网络域 | ![domains](docs/screenshots/domains.png) |
-| 白名单 | ![whitelist](docs/screenshots/whitelist.png) |
-| 审计日志 | ![logs](docs/screenshots/logs.png) |
+| 拓扑总览 | 主机资产 | 事件工作台 |
+|---|---|---|
+| ![topology](docs/screenshots/topology.png) | ![assets](docs/screenshots/assets.png) | ![events](docs/screenshots/events.png) |
 
-产品审查报告见 [docs/PM-REVIEW-2026-10-14.md](docs/PM-REVIEW-2026-10-14.md)（P0/P1/P2 分级整改清单）。
+| 数据接入 | 网络域 | 审计日志 |
+|---|---|---|
+| ![ingest](docs/screenshots/ingest.png) | ![domains](docs/screenshots/domains.png) | ![logs](docs/screenshots/logs.png) |
+
+## 合规声明
+
+- 对所有命中规则的流量**只打标签，不作定性结论**，不发送告警通知，不联动封禁。
+- **不解密**任何加密流量：仅解析 TLS ClientHello 明文元数据（SNI / 密码套件 / 扩展）用于 JA3/JA4 指纹。
+- 不内置漏洞扫描、IDS 规则匹配或攻击载荷；主动探测默认关闭，需显式开启。
+- **请仅在获得授权的网络环境中使用。**
+
+> JA4 指纹为按公开算法规范（FoxIO 的 JA4 方法学字符串格式）的自研实现，仅复用其指纹字符串结构，不使用其许可证约束的数据文件或代码，与 Apache-2.0 兼容。
+
+## 文档
+
+- [SPEC](SPEC.md) — 需求与数据模型规格
+- [CHANGELOG](CHANGELOG.md) — 版本变更
+- [docs/AUTH-APSSO.md](docs/AUTH-APSSO.md) — 账号系统与 APSSO SSO 接入指南
+- [docs/PM-DATA-INGEST-V2-DESIGN.md](docs/PM-DATA-INGEST-V2-DESIGN.md) — 数据接入 v2 产品设计
 
 ## 许可证
 
-Apache License 2.0，见 [LICENSE](LICENSE)。© 极客星空实验室。
+[Apache License 2.0](LICENSE) · © 极客星空安全实验室

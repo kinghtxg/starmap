@@ -190,12 +190,12 @@ func TestPingArgs(t *testing.T) {
 
 func TestIsPingAlive(t *testing.T) {
 	cases := map[string]bool{
-		"64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=0.2 ms": true,  // linux
-		"Reply from 192.168.1.1: bytes=32 time<1ms TTL=64":         true,  // windows en
-		"来自 192.168.1.1 的回复: 字节=32 时间<1ms TTL=64":                true,  // windows zh
-		"请求超时。":                                                        false, // windows zh timeout
-		"Request timed out.":                                          false, // windows en timeout
-		"100% packet loss":                                            false,
+		"64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=0.2 ms": true, // linux
+		"Reply from 192.168.1.1: bytes=32 time<1ms TTL=64":         true, // windows en
+		"来自 192.168.1.1 的回复: 字节=32 时间<1ms TTL=64":                  true, // windows zh
+		"请求超时。":              false, // windows zh timeout
+		"Request timed out.": false, // windows en timeout
+		"100% packet loss":   false,
 	}
 	for out, want := range cases {
 		if got := isPingAlive(out); got != want {

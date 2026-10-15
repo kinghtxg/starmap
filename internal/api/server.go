@@ -1476,11 +1476,11 @@ func (s *Server) assetStats(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"total":       total,
-		"archived":    archived,
-		"unarchived":  unarchived, // 账外资产
-		"online":      online,
-		"offline":     offline,
+		"total":      total,
+		"archived":   archived,
+		"unarchived": unarchived, // 账外资产
+		"online":     online,
+		"offline":    offline,
 	})
 }
 
@@ -1555,15 +1555,15 @@ func (s *Server) listPorts(c *gin.Context) {
 		return
 	}
 	type portJSON struct {
-		ID        int64  `json:"id"`
-		NodeKey   string `json:"node_key"`
-		IP        string `json:"ip"`
-		Port      int    `json:"port"`
-		Proto     string `json:"proto"`
-		Service   string `json:"service"`
-		State     string `json:"state"`
-		Source    string `json:"source"`
-		LastSeen  string `json:"last_seen"`
+		ID       int64  `json:"id"`
+		NodeKey  string `json:"node_key"`
+		IP       string `json:"ip"`
+		Port     int    `json:"port"`
+		Proto    string `json:"proto"`
+		Service  string `json:"service"`
+		State    string `json:"state"`
+		Source   string `json:"source"`
+		LastSeen string `json:"last_seen"`
 	}
 	out := make([]portJSON, 0, len(ports))
 	for _, p := range ports {

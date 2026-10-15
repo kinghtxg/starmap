@@ -18,25 +18,25 @@ func Default() model.SystemConfig {
 		CaptureEnabled:     false,
 		CaptureInterfaces:  []string{},
 		CaptureBPF:         "",
-		AgingSeconds:       86400, // SPEC §4：边老化默认 86400 秒
-		AggregateThreshold: 20,    // SPEC §4：/24 聚合阈值默认 20
-		NoiseBytes:         400,   // SPEC §10.3：会话字节 < 400B 且短且少包 → 降噪
-		NoisePackets:       4,     // SPEC §4：包数 < 4
-		NoiseDurationSec:   2,     // SPEC §4：持续 < 2s
-		ReverseProxyHosts:  10,    // SPEC §5：反代 Host 域名数阈值
-		LongConnSeconds:    3600,  // SPEC §5：长连接 > 1h
-		HeartbeatMaxBytes:  64,    // SPEC §5：心跳 payload < 64B
+		AgingSeconds:       86400,            // SPEC §4：边老化默认 86400 秒
+		AggregateThreshold: 20,               // SPEC §4：/24 聚合阈值默认 20
+		NoiseBytes:         400,              // SPEC §10.3：会话字节 < 400B 且短且少包 → 降噪
+		NoisePackets:       4,                // SPEC §4：包数 < 4
+		NoiseDurationSec:   2,                // SPEC §4：持续 < 2s
+		ReverseProxyHosts:  10,               // SPEC §5：反代 Host 域名数阈值
+		LongConnSeconds:    3600,             // SPEC §5：长连接 > 1h
+		HeartbeatMaxBytes:  64,               // SPEC §5：心跳 payload < 64B
 		ListenAddr:         "127.0.0.1:8080", // P0-4：默认仅回环，对外请走反代
 		DBPath:             "starmap.db",
 		ProbeToken:         "", // §10.7：默认不校验
 		AuditRetentionDays: 90, // §10.8：审计日志保留 90 天
 		Auth:               auth.Default(),
 		// 主机资产库（V1.2）
-		UnarchivedOfflineHours: 72,          // 未归档主机离线 72h 自动清理
-		ArchiveOfflineSeconds:  600,         // 归档主机 last_seen 超 10min 判离线
-		NmapPath:               "",          // 默认 "nmap"，空则运行时按 "nmap" 探测
-		ScanPorts:              "1-65535",   // 主动扫描默认全端口
-		ScanRate:               "T4",        // 扫描速率
+		UnarchivedOfflineHours: 72,        // 未归档主机离线 72h 自动清理
+		ArchiveOfflineSeconds:  600,       // 归档主机 last_seen 超 10min 判离线
+		NmapPath:               "",        // 默认 "nmap"，空则运行时按 "nmap" 探测
+		ScanPorts:              "1-65535", // 主动扫描默认全端口
+		ScanRate:               "T4",      // 扫描速率
 	}
 }
 

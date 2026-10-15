@@ -4,5 +4,6 @@ package web
 import "embed"
 
 // FS 内嵌全部前端页面与静态资源。
+//
 //go:embed *.html assets
 var FS embed.FS

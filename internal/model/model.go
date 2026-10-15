@@ -225,12 +225,12 @@ type Asset struct {
 	IPs         []string  `json:"ips"`
 	MAC         string    `json:"mac"`
 	Hostname    string    `json:"hostname"`
-	OS          string    `json:"os"` // 主机系统（如 Windows Server 2022 / Ubuntu 22.04）
-	Status      string    `json:"status"` // unarchived | archived
-	Owner       string    `json:"owner"`        // 归属人
-	Department  string    `json:"department"`   // 归属单位
-	Location    string    `json:"location"`     // 物理位置
-	Description string    `json:"description"`  // 备注
+	OS          string    `json:"os"`          // 主机系统（如 Windows Server 2022 / Ubuntu 22.04）
+	Status      string    `json:"status"`      // unarchived | archived
+	Owner       string    `json:"owner"`       // 归属人
+	Department  string    `json:"department"`  // 归属单位
+	Location    string    `json:"location"`    // 物理位置
+	Description string    `json:"description"` // 备注
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 	Online      bool      `json:"online"` // 是否在线（last_seen 在阈值内）
@@ -255,10 +255,10 @@ type PortRecord struct {
 	NodeKey   string    `json:"node_key"`
 	IP        string    `json:"ip"`
 	Port      int       `json:"port"`
-	Proto     string    `json:"proto"`  // tcp | udp
+	Proto     string    `json:"proto"`   // tcp | udp
 	Service   string    `json:"service"` // 服务名（nmap 识别）
-	State     string    `json:"state"`  // open | closed | filtered
-	Source    string    `json:"source"` // traffic | probe | arp
+	State     string    `json:"state"`   // open | closed | filtered
+	Source    string    `json:"source"`  // traffic | probe | arp
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 }
