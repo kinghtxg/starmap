@@ -1398,10 +1398,13 @@ func (s *Server) syncAssets() {
 	if s.d.Engine == nil || s.d.Store == nil {
 		return
 	}
-	snap := s.d.Engine.Snapshot()
+	// V1.4 P0 修复：改用 AllNodes 遍历全量内网节点。
+	// 此前用 Snapshot 会把"已聚合 /24 网段"的成员节点隐藏掉，导致
+	// 网段内超过聚合阈值的主机永远进不了资产库（账外资产发现静默失效）。
+	nodes := s.d.Engine.AllNodes()
 	now := time.Now()
-	for i := range snap.Nodes {
-		n := &snap.Nodes[i]
+	for i := range nodes {
+		n := &nodes[i]
 		if n.NodeKey == "" || strings.HasPrefix(n.NodeKey, "ext:") {
 			continue
 		}

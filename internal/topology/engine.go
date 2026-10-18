@@ -379,6 +379,10 @@ func cidr24(ipStr string) string {
 	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
+// Subnet24 返回 IP 所属的 /24 网段（IPv6 为 /64）。
+// 导出版，供 detect 等包按"实际网段"做多网融合判定（政务网一机多网场景）。
+func Subnet24(ipStr string) string { return cidr24(ipStr) }
+
 // Ingest 增量摄入一条会话（可重复调用，内部按增量幂等累计）。
 func (e *Engine) Ingest(s *model.Session) {
 	if s == nil || s.FiveTuple.SrcIP == "" || s.FiveTuple.DstIP == "" {
@@ -960,6 +964,23 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 		Stats:       stats,
 		GeneratedAt: time.Now().UTC(),
 	}
+}
+
+// AllNodes 返回全部内网真实节点（不含外部聚合节点，也**不隐藏**已聚合网段的成员）。
+// 与 Snapshot 的区别：Snapshot 为拓扑展示会把聚合网段的成员隐藏掉，导致
+// 资产同步/多网段判定漏掉绝大多数主机（V1.4 P0 修复）。
+func (e *Engine) AllNodes() []model.Node {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]model.Node, 0, len(e.nodes))
+	for _, n := range e.nodes {
+		if hasLabel(n, LabelExternalAg) || strings.HasPrefix(n.NodeKey, "ext:") {
+			continue
+		}
+		out = append(out, *n)
+	}
+	sort.Slice(out, func(i, j int) bool { return APINodeID(&out[i]) < APINodeID(&out[j]) })
+	return out
 }
 
 // SnapshotEdgePairs 返回快照边（端点已映射为可见字符串身份）。

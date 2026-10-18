@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -364,6 +365,59 @@ func TestMultiNet(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("跨 ≥2 网络域应产生 multi_net high 事件")
+	}
+}
+
+// 政务网核心场景（V1.4）：同一台设备（同 MAC）跨 /24 网段，但落在同一个大域内。
+// 旧实现只按 NetDomain（192.168.0.0/16）判定 → 同域内跨网段完全漏检。
+// 改为按流量自动归纳的实际网段判定后必须能检出（"一机两网"）。
+func TestMultiNetSameDomainCrossSubnet(t *testing.T) {
+	d, eng, st := newTestDetector(t, fullCfg())
+	eng.SetDomains([]model.NetDomain{
+		{Name: "prod", CIDRs: []string{"192.168.0.0/16"}},
+	})
+	st.CreateDomain(&model.NetDomain{Name: "prod", CIDRs: []string{"192.168.0.0/16"}})
+	// 同一 MAC 分别出现在 192.168.1.x 与 192.168.2.x 两个 /24 网段
+	setSessions(d, eng,
+		bigSession("192.168.1.5", "8.8.8.8", "aa:bb:cc:60:00:01", 9201, base),
+		bigSession("192.168.2.10", "8.8.8.8", "aa:bb:cc:60:00:01", 9202, base),
+	)
+	created, _ := d.Evaluate()
+	found := false
+	for _, ev := range created {
+		if ev.Type != model.EventTypeMultiNet {
+			continue
+		}
+		found = true
+		if ev.Level != model.RiskHigh {
+			t.Fatalf("multi_net 应为 high，实际 %s", ev.Level)
+		}
+		if !strings.Contains(ev.Evidence["basis"], "subnet") {
+			t.Fatalf("应按网段维度(basis 含 subnet)判定，实际 basis=%q", ev.Evidence["basis"])
+		}
+		if !strings.Contains(ev.Evidence["subnets"], "192.168.1.0/24") ||
+			!strings.Contains(ev.Evidence["subnets"], "192.168.2.0/24") {
+			t.Fatalf("subnets 应包含两个 /24 网段，实际 %q", ev.Evidence["subnets"])
+		}
+	}
+	if !found {
+		t.Fatal("同一 MAC 跨 /24 网段（同域内）应产生 multi_net high 事件")
+	}
+}
+
+// 单网段单域：不应误报
+func TestMultiNetSingleSubnetNoTrigger(t *testing.T) {
+	d, eng, _ := newTestDetector(t, fullCfg())
+	eng.SetDomains([]model.NetDomain{{Name: "prod", CIDRs: []string{"192.168.0.0/16"}}})
+	setSessions(d, eng,
+		bigSession("192.168.1.5", "8.8.8.8", "aa:bb:cc:60:00:02", 9211, base),
+		bigSession("192.168.1.6", "8.8.8.8", "aa:bb:cc:60:00:02", 9212, base),
+	)
+	created, _ := d.Evaluate()
+	for _, ev := range created {
+		if ev.Type == model.EventTypeMultiNet {
+			t.Fatalf("同一 /24 网段内不应触发 multi_net，实际 evidence=%v", ev.Evidence)
+		}
 	}
 }
 

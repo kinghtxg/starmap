@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -444,6 +445,58 @@ func TestProbeLocationIngest(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &probes)
 	if len(probes) != 1 || probes[0]["location"] != "3F机房" {
 		t.Fatalf("探针注册错误: %s", w.Body.String())
+	}
+}
+
+// V1.4 P0 回归：聚合网段内的成员主机必须全部进资产库。
+// 旧实现 syncAssets 遍历 Snapshot，而 Snapshot 会隐藏已聚合 /24 的成员，
+// 导致"网段内超过聚合阈值的主机永远发现不了"（账外资产发现静默失效）。
+func TestAssetSyncIncludesAggregatedMembers(t *testing.T) {
+	cfg := testCfg()
+	cfg.AggregateThreshold = 3 // 低阈值，5 台主机必然触发该 /24 聚合
+	h, _ := newTestRouter(t, cfg)
+
+	var flows []map[string]any
+	for i := 1; i <= 5; i++ {
+		flows = append(flows, map[string]any{
+			"src_ip":     fmt.Sprintf("192.168.5.%d", i),
+			"dst_ip":     "8.8.8.8",
+			"src_port":   40000 + i,
+			"dst_port":   443,
+			"proto":      "tcp",
+			"mac":        fmt.Sprintf("aa:bb:cc:70:00:%02d", i),
+			"bytes_up":   5000,
+			"bytes_down": 8000,
+			"packets":    40,
+			"first_seen": base.Format(time.RFC3339),
+			"last_seen":  base.Add(30 * time.Second).Format(time.RFC3339),
+		})
+	}
+	w := doReq(t, h, "POST", "/api/ingest/probe", map[string]any{"probe_id": "p-agg", "flows": flows}, nil)
+	if w.Code != 200 {
+		t.Fatalf("探针上报失败 %d: %s", w.Code, w.Body.String())
+	}
+
+	w = doReq(t, h, "GET", "/api/assets", nil, nil)
+	var assets []map[string]any
+	json.Unmarshal(w.Body.Bytes(), &assets)
+	if len(assets) < 5 {
+		t.Fatalf("聚合网段内 5 台主机都应进资产库（实际 %d），说明仍被聚合隐藏", len(assets))
+	}
+	// 抽查：确认 5 个不同 IP 都在
+	seen := map[string]bool{}
+	for _, a := range assets {
+		if ips, ok := a["ips"].([]any); ok {
+			for _, ip := range ips {
+				seen[fmt.Sprint(ip)] = true
+			}
+		}
+	}
+	for i := 1; i <= 5; i++ {
+		want := fmt.Sprintf("192.168.5.%d", i)
+		if !seen[want] {
+			t.Fatalf("资产库缺少主机 %s（聚合成员仍被隐藏）", want)
+		}
 	}
 }
 
