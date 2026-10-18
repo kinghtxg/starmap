@@ -1414,11 +1414,14 @@ func (s *Server) syncAssets() {
 		}
 		if existing == nil {
 			// 新发现主机 → 登记为账外资产（未归档）
+			// Location 先取探针位置，让用户能看到"这台设备从哪个位置被看到"；
+			// 后续归档登记时由用户填写真实物理位置覆盖。
 			a := &model.Asset{
 				NodeKey:   n.NodeKey,
 				IPs:       n.IPs,
 				MAC:       n.MAC,
 				Status:    model.AssetUnarchived,
+				Location:  n.Location,
 				FirstSeen: n.FirstSeen,
 				LastSeen:  n.LastSeen,
 				CreatedAt: now,
@@ -1430,6 +1433,10 @@ func (s *Server) syncAssets() {
 			existing.IPs = n.IPs
 			existing.MAC = n.MAC
 			existing.LastSeen = n.LastSeen
+			// 未归档资产跟随探针位置；已归档资产保留用户填写的物理位置，不覆盖
+			if existing.Status == model.AssetUnarchived && n.Location != "" {
+				existing.Location = n.Location
+			}
 			_, _ = s.d.Store.UpsertAsset(existing)
 		}
 	}
