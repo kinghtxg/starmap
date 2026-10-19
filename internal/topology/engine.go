@@ -889,6 +889,55 @@ func APINodeID(n *model.Node) string {
 
 func hasLabel(n *model.Node, l string) bool { return contains(n.Labels, l) }
 
+// isRiskAnchor 判断节点是否为"风险锚点"。
+// V1.6：中/高风险节点（多网融合、隧道、可疑出网等）不参与网段聚合，
+// 在拓扑中始终单独呈现。理由——大网里 /24 一旦超过聚合阈值就折叠成一个网段节点，
+// 若把异常设备一起折叠，就等于把"最该被看见的那台"藏起来，与项目的核心使命相悖。
+// 正常网络没有中/高风险节点，因此该策略对常规大网的可视性零成本。
+func isRiskAnchor(n *model.Node) bool {
+	return n.RiskLevel == model.RiskHigh || n.RiskLevel == model.RiskMid
+}
+
+// aggNodeLocked 构造网段聚合虚拟节点（调用方需持有 e.mu）。
+func (e *Engine) aggNodeLocked(cidr string) (model.Node, bool) {
+	set := e.subnetMembers[cidr]
+	if len(set) == 0 || !e.aggregated[cidr] {
+		return model.Node{}, false
+	}
+	agg := model.Node{
+		IPs:       []string{cidr},
+		Labels:    []string{LabelSubnetAgg},
+		RiskLevel: model.RiskNone,
+		Members:   len(set),
+	}
+	for id := range set {
+		n := e.nodes[id]
+		if n == nil {
+			continue
+		}
+		if agg.FirstSeen.IsZero() || n.FirstSeen.Before(agg.FirstSeen) {
+			agg.FirstSeen = n.FirstSeen
+		}
+		if n.LastSeen.After(agg.LastSeen) {
+			agg.LastSeen = n.LastSeen
+		}
+		if n.Active {
+			agg.Active = true
+		}
+		if riskRank(n.RiskLevel) > riskRank(agg.RiskLevel) {
+			agg.RiskLevel = n.RiskLevel
+		}
+	}
+	return agg, true
+}
+
+// AggregateNode 按 CIDR 取网段聚合虚拟节点（下钻视图作为外部上下文节点使用）。
+func (e *Engine) AggregateNode(cidr string) (model.Node, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.aggNodeLocked(cidr)
+}
+
 // Snapshot 生成拓扑快照：聚合网段的成员隐藏为子网节点。
 // 边的可见视图用 SnapshotEdgePairs（端点为字符串身份）获取。
 func (e *Engine) Snapshot() model.TopoSnapshot {
@@ -898,7 +947,7 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 	var nodes []model.Node
 	for _, n := range e.nodes {
 		if !hasLabel(n, LabelExternalAg) {
-			// 内网节点：若所属 /24 已聚合则隐藏
+			// 内网节点：若所属 /24 已聚合则隐藏——但风险锚点例外（V1.6）
 			hidden := false
 			for _, ip := range n.IPs {
 				if e.aggregated[cidr24(ip)] {
@@ -906,42 +955,25 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 					break
 				}
 			}
-			if hidden {
+			if hidden && !isRiskAnchor(n) {
 				continue
 			}
 		}
-		nodes = append(nodes, *n)
+		cp := *n
+		cp.Anchor = isRiskAnchor(n)
+		nodes = append(nodes, cp)
 	}
 
 	// 生成聚合子网虚拟节点
-	for cidr, set := range e.subnetMembers {
-		if !e.aggregated[cidr] {
-			continue
+	cidrs := make([]string, 0, len(e.subnetMembers))
+	for cidr := range e.subnetMembers {
+		cidrs = append(cidrs, cidr)
+	}
+	sort.Strings(cidrs)
+	for _, cidr := range cidrs {
+		if agg, ok := e.aggNodeLocked(cidr); ok {
+			nodes = append(nodes, agg)
 		}
-		agg := model.Node{
-			IPs:       []string{cidr},
-			Labels:    []string{LabelSubnetAgg},
-			RiskLevel: model.RiskNone,
-		}
-		for id := range set {
-			n := e.nodes[id]
-			if n == nil {
-				continue
-			}
-			if agg.FirstSeen.IsZero() || n.FirstSeen.Before(agg.FirstSeen) {
-				agg.FirstSeen = n.FirstSeen
-			}
-			if n.LastSeen.After(agg.LastSeen) {
-				agg.LastSeen = n.LastSeen
-			}
-			if n.Active {
-				agg.Active = true
-			}
-			if riskRank(n.RiskLevel) > riskRank(agg.RiskLevel) {
-				agg.RiskLevel = n.RiskLevel
-			}
-		}
-		nodes = append(nodes, agg)
 	}
 
 	vEdges := e.visibleEdgesLocked()
@@ -1048,10 +1080,12 @@ func (e *Engine) AllNodes() []model.Node {
 }
 
 // SnapshotEdgePairs 返回快照边（端点已映射为可见字符串身份）。
+// 末尾追加风险锚点的网段归属边（Kind="owner"），使一机两网的跨网归属在图上可见。
 func (e *Engine) SnapshotEdgePairs() []VisibleEdge {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.visibleEdgesLocked()
+	out := e.visibleEdgesLocked()
+	return append(out, e.ownershipEdgesLocked(out)...)
 }
 
 func (e *Engine) visibleEdgesLocked() []VisibleEdge {
@@ -1111,6 +1145,55 @@ type VisibleEdge struct {
 	FirstSeen time.Time
 	LastSeen  time.Time
 	Active    bool
+	// Kind 边类型："traffic"（默认，由实际会话产生）/ "owner"（归属关联，V1.6）。
+	// owner 边由节点自身 IP 的 /24 归属推导，无流量也会存在，
+	// 目的：让"一机两网"的跨网归属在图上可见，而不必依赖该网段内恰好有内部对端。
+	Kind string
+}
+
+// EdgeKindOwner 归属关联边。
+const EdgeKindOwner = "owner"
+
+// ownershipEdgesLocked 生成风险锚点的网段归属边（调用方需持有 e.mu）。
+// 仅对以自身身份可见的节点生成；若该节点与目标网段之间已有真实流量边，则跳过以免重线。
+func (e *Engine) ownershipEdgesLocked(existing []VisibleEdge) []VisibleEdge {
+	paired := map[string]bool{}
+	for _, ed := range existing {
+		if ed.Kind == EdgeKindOwner {
+			continue
+		}
+		paired[ed.Src+"|"+ed.Dst] = true
+		paired[ed.Dst+"|"+ed.Src] = true
+	}
+	var out []VisibleEdge
+	for _, n := range e.nodes {
+		if hasLabel(n, LabelExternalAg) || !isRiskAnchor(n) {
+			continue
+		}
+		src := APINodeID(n)
+		for _, ip := range n.IPs {
+			cidr := cidr24(ip)
+			if !e.aggregated[cidr] {
+				continue
+			}
+			dst := SubnetNodeID(cidr)
+			if dst == src || paired[src+"|"+dst] || paired[dst+"|"+src] {
+				continue
+			}
+			paired[src+"|"+dst] = true
+			out = append(out, VisibleEdge{
+				Src: src, Dst: dst, Protocol: "owner", Kind: EdgeKindOwner,
+				FirstSeen: n.FirstSeen, LastSeen: n.LastSeen, Active: n.Active,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Src != out[j].Src {
+			return out[i].Src < out[j].Src
+		}
+		return out[i].Dst < out[j].Dst
+	})
+	return out
 }
 
 func (e *Engine) visibleMapLocked() map[int64]string {
@@ -1125,7 +1208,9 @@ func (e *Engine) visibleMapLocked() map[int64]string {
 					break
 				}
 			}
-			if aggCIDR != "" {
+			if aggCIDR != "" && !isRiskAnchor(n) {
+				// V1.6：风险锚点不折叠，保持自身身份，从而与两个网段聚合节点同时相连，
+				// 在图上直接呈现"一机跨两网"的拓扑签名。
 				visible[n.ID] = SubnetNodeID(aggCIDR)
 				continue
 			}
@@ -1143,7 +1228,9 @@ func (e *Engine) SubnetSnapshot(cidr string) model.TopoSnapshot {
 	nodes := make([]model.Node, 0, len(set))
 	for id := range set {
 		if n, ok := e.nodes[id]; ok {
-			nodes = append(nodes, *n)
+			cp := *n
+			cp.Anchor = isRiskAnchor(n)
+			nodes = append(nodes, cp)
 		}
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
@@ -1172,12 +1259,28 @@ func (e *Engine) SubnetSnapshot(cidr string) model.TopoSnapshot {
 	return model.TopoSnapshot{Nodes: nodes, Edges: edges, Stats: stats, GeneratedAt: time.Now().UTC()}
 }
 
-// SubnetVisibleEdges 下钻边（端点字符串身份：成员用真实 ID，外部端点用聚合身份）。
+// SubnetVisibleEdges 下钻边（端点字符串身份：本网段成员用真实 ID，外部端点用聚合身份）。
+//
+// V1.6 修复（P1）：成员此前一律经 visibleMapLocked 映射成 subnet:<自身 CIDR>，
+// 导致下钻视图里所有网段内链路的两个端点都是同一个聚合 ID 而被前端丢弃，
+// 于是"下钻一个 /24"只看得到一堆孤立圆点，看不到主机之间谁连谁——
+// 而这正是"理清网内结构"最需要看的东西。
 func (e *Engine) SubnetVisibleEdges(cidr string) []VisibleEdge {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	set := e.subnetMembers[cidr]
 	visible := e.visibleMapLocked()
+	// 成员优先用自身真实身份；非成员才退回可见映射（可能是别的网段的聚合身份）
+	idOf := func(id int64) string {
+		if set[id] {
+			if n, ok := e.nodes[id]; ok {
+				// 成员所在 /24 已聚合时，visible 会给 subnet:cidr；
+				// 但下钻视图的真实节点 ID 是本节点自身，必须用它。
+				return strconv.FormatInt(n.ID, 10)
+			}
+		}
+		return visible[id]
+	}
 	var out []VisibleEdge
 	for _, edge := range e.edges {
 		ain := set[edge.SrcID]
@@ -1185,14 +1288,65 @@ func (e *Engine) SubnetVisibleEdges(cidr string) []VisibleEdge {
 		if !ain && !bin {
 			continue
 		}
-		a := visible[edge.SrcID]
-		b := visible[edge.DstID]
+		a := idOf(edge.SrcID)
+		b := idOf(edge.DstID)
+		if a == "" || b == "" || a == b {
+			continue
+		}
 		out = append(out, VisibleEdge{
 			Src: a, Dst: b, Protocol: edge.Protocol,
 			Bytes: edge.Bytes, Packets: edge.Packets,
 			FirstSeen: edge.FirstSeen, LastSeen: edge.LastSeen, Active: edge.Active,
 		})
 	}
+	// 归属边：只保留本网段成员发出的归属，避免别的网段的锚点边串进本视图
+	memberIDs := make(map[string]bool, len(set))
+	for id := range set {
+		memberIDs[strconv.FormatInt(id, 10)] = true
+	}
+	self := SubnetNodeID(cidr)
+	for _, ed := range e.ownershipEdgesLocked(out) {
+		if ed.Src == self || ed.Dst == self || !memberIDs[ed.Src] {
+			continue
+		}
+		out = append(out, ed)
+	}
+	return out
+}
+
+// SubnetContextNodes 返回下钻视图需要补充的"外部上下文"节点：
+// 既包括别的已聚合网段（跨网归属/一机两网），也包括外部 /24 聚合节点（出口方向）。
+// 不补这些节点，指向它们的边会因端点缺失被前端整条丢弃，下钻视图就只剩孤立主机（V1.6）。
+func (e *Engine) SubnetContextNodes(cidr string, endpoints []string) []model.Node {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []model.Node
+	for _, ep := range endpoints {
+		if seen[ep] {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(ep, "subnet:"):
+			c := strings.TrimPrefix(ep, "subnet:")
+			if c == cidr {
+				continue
+			}
+			if agg, ok := e.aggNodeLocked(c); ok {
+				seen[ep] = true
+				out = append(out, agg)
+			}
+		case strings.HasPrefix(ep, "ext:"):
+			c := strings.TrimPrefix(ep, "ext:")
+			if id, ok := e.extAggr[c]; ok {
+				if n, ok2 := e.nodes[id]; ok2 {
+					seen[ep] = true
+					out = append(out, *n)
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return APINodeID(&out[i]) < APINodeID(&out[j]) })
 	return out
 }
 

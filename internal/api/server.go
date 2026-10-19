@@ -281,6 +281,8 @@ type nodeJSON struct {
 	Active     bool     `json:"Active"`
 	Aggregated bool     `json:"Aggregated,omitempty"`
 	Location   string   `json:"Location,omitempty"` // 归属位置（探针位置归纳，V1.3）
+	Anchor     bool     `json:"Anchor,omitempty"`   // 风险锚点：未参与网段聚合（V1.6）
+	Members    int      `json:"Members,omitempty"`  // 聚合节点包含主机数（V1.6）
 }
 
 func toNodeJSON(n *model.Node) nodeJSON {
@@ -306,6 +308,8 @@ func toNodeJSON(n *model.Node) nodeJSON {
 		Active:     n.Active,
 		Aggregated: strings.Contains(id, "/"),
 		Location:   n.Location,
+		Anchor:     n.Anchor,
+		Members:    n.Members,
 	}
 }
 
@@ -319,6 +323,7 @@ type edgeJSON struct {
 	FirstSeen string `json:"FirstSeen"`
 	LastSeen  string `json:"LastSeen"`
 	Active    bool   `json:"Active"`
+	Kind      string `json:"Kind,omitempty"` // traffic|owner，owner=按 IP 网段推导的归属关联（V1.6）
 }
 
 func toEdgeJSON(e topology.VisibleEdge) edgeJSON {
@@ -332,6 +337,7 @@ func toEdgeJSON(e topology.VisibleEdge) edgeJSON {
 		FirstSeen: e.FirstSeen.UTC().Format(time.RFC3339),
 		LastSeen:  e.LastSeen.UTC().Format(time.RFC3339),
 		Active:    e.Active,
+		Kind:      e.Kind,
 	}
 }
 
@@ -386,19 +392,36 @@ func (s *Server) subnetSnapshot(c *gin.Context) {
 		return
 	}
 	nodes := make([]nodeJSON, 0, len(snap.Nodes))
+	have := make(map[string]bool, len(snap.Nodes))
 	for i := range snap.Nodes {
-		nodes = append(nodes, toNodeJSON(&snap.Nodes[i]))
+		nj := toNodeJSON(&snap.Nodes[i])
+		have[nj.ID] = true
+		nodes = append(nodes, nj)
 	}
 	vedges := s.d.Engine.SubnetVisibleEdges(cidr)
 	edges := make([]edgeJSON, 0, len(vedges))
+	ends := make([]string, 0, len(vedges)*2)
 	for _, e := range vedges {
 		edges = append(edges, toEdgeJSON(e))
+		ends = append(ends, e.Src, e.Dst)
+	}
+	// V1.6：把边的外部端点（其它聚合网段 / 外部 /24）补成上下文节点，
+	// 否则下钻视图里指向外部的边因端点不存在被前端丢弃，跨网归属与出口方向都看不见。
+	nodeCount := snap.Stats.NodeCount
+	for _, ctx := range s.d.Engine.SubnetContextNodes(cidr, ends) {
+		nj := toNodeJSON(&ctx)
+		if have[nj.ID] {
+			continue
+		}
+		have[nj.ID] = true
+		nodes = append(nodes, nj)
+		nodeCount++
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"Nodes": nodes,
 		"Edges": edges,
 		"Stats": gin.H{
-			"NodeCount":   snap.Stats.NodeCount,
+			"NodeCount":   nodeCount,
 			"EdgeCount":   snap.Stats.EdgeCount,
 			"ActiveNodes": snap.Stats.ActiveNodes,
 			"ActiveEdges": snap.Stats.ActiveEdges,

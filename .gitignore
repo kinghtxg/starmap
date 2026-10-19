@@ -3,3 +3,5 @@ starmap.db-wal
 starmap.db-shm
 *.exe
 release/
+.verify/
+*.exe~

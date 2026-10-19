@@ -14,9 +14,9 @@
   var NW = 52, NH = 52;            // 节点尺寸
   var COL_GAP = 138;               // 同层节点水平间距
   var ROW_INNER = 118;             // 层内子行垂直间距
-  var BAND_GAP = 66;               // 层间留白（走线区）
-  var GROUP_GAP = 90;              // 位置分组（泳道）间留白
-  var PAD = 60;                    // 内容边距
+  var BAND_GAP = 48;               // 层间留白（走线区）
+  var GROUP_GAP = 56;              // 位置分组（泳道）间留白
+  var PAD = 40;                    // 内容边距
   var LABEL_HIDE = 240;            // 超过该节点数隐藏全部标签
   var SUBLABEL_HIDE = 110;         // 超过该节点数隐藏副标签
   var FLOW_MAX_EDGES = 420;        // 超过该边数不做流光动画
@@ -81,7 +81,8 @@
     plus: ti('M12 6v12M6 12h12'),
     minus: ti('M6 12h12'),
     fit: ti('M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4'),
-    layout: ti('M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z')
+    layout: ti('M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z'),
+    legend: ti('M4 6h10M4 12h10M4 18h6M18 6h2M18 12h2')
   };
 
   /* ---------- 工具函数 ---------- */
@@ -250,6 +251,8 @@
     });
 
     // 3) 压缩空层
+    // 注意：压缩只用于排布（层间不留空行），层名必须用压缩前的原始层级，
+    // 否则「外部网络」泳道里会放主机、「核心层」里会放网段聚合，标签与内容对不上。
     var used = {};
     ids.forEach(function (i) { used[info[i].layer] = true; });
     var sorted = Object.keys(used).map(Number).sort(function (a, b) { return a - b; });
@@ -290,6 +293,8 @@
     layers.forEach(function (arr, li) {
       var n = arr.length;
       var per = clamp(Math.ceil(Math.sqrt(n) * 2.2), 6, 16);
+      // 只溢出 1~2 个时不要折行：多出来的会独占一整行，整层高度翻倍、画布被迫缩小一半
+      if (n <= per + 2) per = n;
       var rows = Math.ceil(n / per);
       var top = cursor;
       for (var r = 0; r < rows; r++) {
@@ -302,7 +307,8 @@
         }
       }
       var bottom = top + rows * ROW_INNER;
-      band.push({ top: top - 22, bottom: bottom - 22, layer: li });
+      // 用原始层级给泳道命名（sorted[li]），保证层名语义正确
+      band.push({ top: top - 22, bottom: bottom - 22, layer: sorted[li] });
       cursor = bottom + BAND_GAP;
     });
 
@@ -317,10 +323,13 @@
     'font-family:"PingFang SC","Microsoft YaHei",Arial,sans-serif}' +
     '.sm-topo-edge{fill:none;stroke:#a9b4c6;stroke-linecap:round;stroke-linejoin:round}' +
     '.sm-topo-edge.is-inactive{stroke:#d4dae2;stroke-dasharray:5 4}' +
+    '.sm-topo-edge.is-owner{stroke:#0052d9;stroke-dasharray:2 5;opacity:.55}' +
     '.sm-topo-plate{fill:#fff;stroke-width:1}' +
     '.sm-topo-glyph{fill:none;stroke:#4b5768;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}' +
     '.sm-topo-glyph .sm-fill{fill:#4b5768;stroke:none}' +
     '.sm-topo-ring{fill:none;stroke:#8f9aab;stroke-width:1;stroke-dasharray:3 3}' +
+    '.sm-topo-anchor-ring{fill:none;stroke:#e34d59;stroke-width:1.2;stroke-dasharray:5 4;opacity:.85}' +
+    '.sm-topo-node.is-anchor .sm-topo-plate{fill:#fff8f8}' +
     '.sm-topo-node.is-agg .sm-topo-plate{fill:#f4f7fd}' +
     '.sm-topo-label{font-size:11px;fill:#4b5768;text-anchor:middle;font-family:Consolas,Menlo,monospace}' +
     '.sm-topo-sublabel{font-size:10px;fill:#b3bac5;text-anchor:middle;' +
@@ -351,6 +360,7 @@
       '<button class="sm-btn is-icon is-sm" data-t="zout" title="缩小">' + TICO.minus + '</button>' +
       '<button class="sm-btn is-icon is-sm" data-t="fit" title="适应画布">' + TICO.fit + '</button>' +
       '<button class="sm-btn is-icon is-sm" data-t="relayout" title="重新布局">' + TICO.layout + '</button>' +
+      '<button class="sm-btn is-icon is-sm" data-t="legend" title="显示 / 隐藏图例">' + TICO.legend + '</button>' +
       '<div class="sm-topo-zoom" data-t="ztxt">100%</div>' +
       '</div>' +
       '<div class="sm-topo-legend"></div>' +
@@ -368,6 +378,8 @@
     var elNotice = wrap.querySelector('.sm-topo-notice');
     var elOverlay = wrap.querySelector('.sm-topo-overlay');
     var elZoom = wrap.querySelector('[data-t="ztxt"]');
+    var btnLegend = wrap.querySelector('[data-t="legend"]');
+    if (btnLegend) btnLegend.classList.add('is-pressed');
 
     var data = { Nodes: [], Edges: [] };
     var geo = null;
@@ -437,10 +449,12 @@
         var d = edgeD(a, b);
         if (!d) return;
         var inactive = e.Active === false;
+        // V1.6：归属关联边（按 IP 网段推导，无流量）——虚线细线，不做流光
+        var owner = e.Kind === 'owner';
         var key = 'e' + i;
-        eh += '<g class="sm-topo-edge-grp" data-edge="' + key + '">' +
-          '<path class="sm-topo-edge' + (inactive ? ' is-inactive' : '') + '" d="' + d + '" style="stroke-width:' + w.toFixed(2) + '"/>' +
-          (!inactive && edges.length <= FLOW_MAX_EDGES && num(e.Bytes) > 0
+        eh += '<g class="sm-topo-edge-grp' + (owner ? ' is-owner' : '') + '" data-edge="' + key + '">' +
+          '<path class="sm-topo-edge' + (owner ? ' is-owner' : (inactive ? ' is-inactive' : '')) + '" d="' + d + '" style="stroke-width:' + (owner ? 1 : w).toFixed(2) + '"/>' +
+          (!owner && !inactive && edges.length <= FLOW_MAX_EDGES && num(e.Bytes) > 0
             ? '<path class="sm-topo-flow" d="' + d + '" style="stroke-width:' + Math.max(1.2, w * 0.8).toFixed(2) + '"/>' : '') +
           '<path class="sm-topo-edge-hit" d="' + d + '"/>' +
           '</g>';
@@ -463,22 +477,34 @@
 
       /* 节点 */
       var nh = '';
+      var anchorCount = 0;
       nodes.forEach(function (n) {
         var id = String(n.ID);
         var p = geo.xy[id];
         if (!p) return;
         var t = geo.info[id] || { type: 'unknown' };
         var agg = t.type === 'subnet' || isAggNode(n);
+        if (n.Anchor && !agg) anchorCount++;
         var lvl = n.RiskLevel || 'none';
         var color = RISK[lvl] || RISK.none;
         var active = n.Active !== false;
         var ip = primaryIP(n);
         var label = ip || (n.MAC ? String(n.MAC).slice(0, 17) : id);
         if (label.length > 18) label = label.slice(0, 17) + '…';
-        var sub = agg ? (ip || '网段') : TYPE_LABEL[t.type];
+        // V1.6：聚合节点显示体量（成员台数）；风险锚点标出"异常"身份
+        var anchor = !!n.Anchor;
+        var sub;
+        if (agg) {
+          sub = num(n.Members)
+            ? (num(n.Members) + ' 台 · 已聚合')
+            : (String(id).indexOf('ext:') === 0 ? '外部网段' : '网段聚合');
+        } else if (anchor) sub = TYPE_LABEL[t.type] + ' · 异常';
+        else sub = TYPE_LABEL[t.type];
 
-        nh += '<g class="sm-topo-node' + (agg ? ' is-agg' : '') + (active ? '' : ' is-off') + '" data-id="' + esc(id) + '" transform="translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')">' +
+        nh += '<g class="sm-topo-node' + (agg ? ' is-agg' : '') + (anchor ? ' is-anchor' : '') +
+          (active ? '' : ' is-off') + '" data-id="' + esc(id) + '" transform="translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')">' +
           (agg ? '<rect class="sm-topo-ring" x="-32" y="-32" width="64" height="64" rx="10"/>' : '') +
+          (anchor ? '<rect class="sm-topo-anchor-ring" x="-34" y="-34" width="68" height="68" rx="10"/>' : '') +
           '<rect class="sm-topo-sel-ring" x="-31" y="-31" width="62" height="62" rx="8"/>' +
           '<rect class="sm-topo-plate" x="-26" y="-26" width="52" height="52" rx="6" ' +
           'style="stroke:' + color + ';stroke-width:' + (lvl === 'high' || lvl === 'mid' ? 1.8 : 1.2) + '"/>' +
@@ -487,15 +513,23 @@
           (alerts[id] ? '<g class="sm-topo-badge" transform="translate(20,-20)">' +
             '<circle class="sm-topo-badge-bg' + (lvl === 'high' ? '' : ' sm-topo-badge-warn') + '" r="8.5"/>' +
             '<text class="sm-topo-badge-tx" y="3">' + (alerts[id] > 99 ? '99+' : alerts[id]) + '</text></g>' : '') +
-          (hideLabel ? '' : '<text class="sm-topo-label" y="40">' + esc(label) + '</text>' +
-            (hideSub ? '' : '<text class="sm-topo-sublabel" y="53">' + esc(sub) + '</text>')) +
+          // 聚合节点体量信息价值最高，即便大图隐藏标签也保留，否则只看得到一堆无标识方框
+          (hideLabel && !agg ? '' : '<text class="sm-topo-label" y="40">' + esc(label) + '</text>' +
+            (hideSub && !agg ? '' : '<text class="sm-topo-sublabel" y="53">' + esc(sub) + '</text>')) +
           '</g>';
       });
       gNodes.innerHTML = nh;
 
-      /* 大图保护提示 */
+      /* 大图保护 / 锚点提示 */
+      var tips = [];
       if (nodes.length > LABEL_HIDE) {
-        elNotice.innerHTML = '<span>节点 ' + nodes.length + ' 个，已隐藏标签以保证渲染性能（缩放后可查看局部）</span>';
+        tips.push('节点 ' + nodes.length + ' 个，已隐藏标签以保证渲染性能（缩放后可查看局部）');
+      }
+      if (anchorCount > 0) {
+        tips.push('异常锚点 ' + anchorCount + ' 个已从网段聚合中单独展开（红色虚环）');
+      }
+      if (tips.length) {
+        elNotice.innerHTML = '<span>' + tips.join(' · ') + '</span>';
         elNotice.classList.remove('sm-hide');
       } else {
         elNotice.classList.add('sm-hide');
@@ -541,7 +575,10 @@
       h += '<div class="sm-lg-t">链路</div>' +
         '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#a9b4c6;height:3px"></span><span>粗细 = 流量</span></div>' +
         '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 4px,transparent 4px 8px)"></span><span>虚线 = 已老化</span></div>' +
-        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed #8f9aab"></span><span>双环 = 可下钻</span></div>';
+        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed #8f9aab"></span><span>双环 = 可下钻</span></div>' +
+        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed ' + RISK.high +
+        ';box-shadow:0 0 0 1px rgba(227,77,89,.2)"></span><span>红色虚环 = 异常锚点（不聚合）</span></div>' +
+        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 2px,transparent 2px 7px);opacity:.6"></span><span>细点线 = 网段归属（非流量）</span></div>';
       elLegend.innerHTML = h;
     }
 
@@ -850,6 +887,11 @@
       else if (t === 'zout') zoomBy(1 / 1.2);
       else if (t === 'fit') fit();
       else if (t === 'relayout') { render(); fit(); emit('relayout', null); }
+      // 图例占地方不小，小屏/大图时挡住节点，给一个开关键
+      else if (t === 'legend') {
+        elLegend.classList.toggle('sm-hide');
+        b.classList.toggle('is-pressed', !elLegend.classList.contains('sm-hide'));
+      }
     });
 
     function syncSelection() {

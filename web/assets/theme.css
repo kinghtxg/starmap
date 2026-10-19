@@ -689,6 +689,9 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
 /* 边 */
 .sm-topo-edge { fill: none; stroke: #a9b4c6; stroke-linecap: round; stroke-linejoin: round; transition: stroke var(--sm-t) var(--sm-ease), opacity var(--sm-t) var(--sm-ease); }
 .sm-topo-edge.is-inactive { stroke: var(--sm-gray-6); stroke-dasharray: 5 4; opacity: .75; }
+/* V1.6：归属关联边——按 IP 网段推导，无实际流量；虚线 + 品牌色低饱和，避免与流量边混淆 */
+.sm-topo-edge.is-owner { stroke: var(--sm-brand-2); stroke-dasharray: 2 5; opacity: .55; }
+.sm-topo-edge-grp.is-owner:hover .sm-topo-edge.is-owner { opacity: 1; }
 .sm-topo-edge.is-hover { stroke: var(--sm-brand-2); }
 .sm-topo-flow { fill: none; stroke: var(--sm-brand-3); stroke-linecap: round; stroke-dasharray: 6 26; opacity: .85; animation: sm-dash 1.4s linear infinite; }
 .sm-topo-edge-grp.is-dim { opacity: .16; }
@@ -705,6 +708,14 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
 .sm-topo-glyph .sm-fill { fill: var(--sm-gray-2); stroke: none; }
 .sm-topo-ring { fill: none; stroke: var(--sm-gray-4); stroke-width: 1; stroke-dasharray: 3 3; }
 .sm-topo-node.is-agg .sm-topo-plate { fill: #f4f7fd; }
+/* V1.6：风险锚点——中/高风险节点不参与网段聚合，用红色虚线环标出"这台上榜设备没被折叠" */
+.sm-topo-anchor-ring {
+  fill: none; stroke: var(--sm-danger); stroke-width: 1.2; stroke-dasharray: 5 4;
+  animation: sm-anchor-breathe 2.8s var(--sm-ease) infinite;
+}
+.sm-topo-node.is-anchor .sm-topo-plate { fill: #fff8f8; }
+@keyframes sm-anchor-breathe { 0%, 100% { opacity: .35; } 50% { opacity: .95; } }
+@media (prefers-reduced-motion: reduce) { .sm-topo-anchor-ring { animation: none; opacity: .8; } }
 .sm-topo-node.is-sel .sm-topo-plate { stroke: var(--sm-brand-2); stroke-width: 2; }
 .sm-topo-node.is-sel .sm-topo-sel-ring { opacity: 1; }
 .sm-topo-sel-ring { fill: none; stroke: var(--sm-brand-2); stroke-width: 1.5; opacity: 0; transition: opacity var(--sm-t) var(--sm-ease); stroke-dasharray: 4 3; }
@@ -741,6 +752,8 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
   max-width: 260px;
 }
 .sm-topo-legend .sm-lg-t { grid-column: 1 / -1; font-weight: 600; color: var(--sm-text-3); letter-spacing: .06em; margin-top: 2px; }
+/* 图例开关的按下态 */
+.sm-topo-tools .sm-btn.is-pressed { background: var(--sm-brand-bg, #eef3fe); color: var(--sm-brand-2); border-color: var(--sm-brand-2); }
 .sm-topo-legend .sm-lg-i { display: flex; align-items: center; gap: 6px; }
 .sm-topo-legend .sm-lg-sw { width: 22px; height: 12px; border-radius: 2px; flex: none; }
 .sm-topo-legend svg { width: 14px; height: 14px; flex: none; color: var(--sm-gray-2); }
@@ -754,10 +767,12 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
 .sm-mm-view { fill: rgba(0, 82, 217, .10); stroke: var(--sm-brand-2); stroke-width: 1; }
 .sm-mm-node { fill: var(--sm-gray-4); }
 .sm-topo-notice {
-  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 7;
+  /* 右上角（缩放工具左侧）：图内容居中，四角最少遮挡；放顶部居中会盖住根节点 */
+  position: absolute; right: 64px; top: 14px; z-index: 7;
   background: rgba(29, 33, 41, .86); color: #fff; font-size: var(--sm-font-xs);
   padding: 5px 12px; border-radius: var(--sm-r-pill); box-shadow: var(--sm-shadow-2);
   display: flex; align-items: center; gap: 6px; pointer-events: none;
+  max-width: min(56%, 640px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .sm-topo-overlay {
   position: absolute; inset: 0; z-index: 8;

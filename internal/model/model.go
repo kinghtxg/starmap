@@ -50,6 +50,14 @@ type Node struct {
 	Active    bool      `json:"active"`
 	// Location 归属位置（探针上报时携带，用于按探针位置自动归纳拓扑，V1.3）。
 	Location string `json:"location,omitempty"`
+
+	// ---- 以下为快照派生字段（仅 Snapshot/SubnetSnapshot 计算时填充，不落库）----
+
+	// Anchor 风险锚点：中/高风险节点不参与网段聚合，在拓扑中始终单独呈现。
+	// 否则大网里那台"一机两网"或"跑隧道"的设备会被聚合节点吞掉，恰恰藏起了最该看见的东西（V1.6）。
+	Anchor bool `json:"anchor,omitempty"`
+	// Members 聚合节点包含的主机台数（仅聚合虚拟节点有效），用于在图上标出网段体量（V1.6）。
+	Members int `json:"members,omitempty"`
 }
 
 // Edge 拓扑链路

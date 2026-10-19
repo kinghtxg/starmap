@@ -14,7 +14,7 @@
     <header class="sm-topbar">
       <div class="sm-topbar-l">
         <h1 class="sm-h1">拓扑总览</h1>
-        <p class="sm-sub">标准网管拓扑视图 · 风险三色描边 · 双击聚合节点下钻 · 右键快捷操作</p>
+        <p class="sm-sub">自生长拓扑 · 异常锚点不聚合（红虚环）· 双击网段下钻 · 右键快捷操作</p>
       </div>
       <div class="sm-toolbar">
         <button class="sm-btn is-warn sm-hide" id="btnBack" data-act="back">返回上级</button>
@@ -170,13 +170,23 @@ function bindTopo() {
       '<div class="sm-tip-row"><span>风险</span><span>' + UI.esc(UI.riskLabel(lv)) + '</span></div>' +
       '<div class="sm-tip-row"><span>网络域</span><span>' + UI.esc(n.Domain || '-') + '</span></div>' +
       '<div class="sm-tip-row"><span>最后活跃</span><span>' + UI.esc(UI.fmtAgo(n.LastSeen)) + '</span></div>' +
-      (isAggNode(n) ? '<div style="margin-top:4px;opacity:.7">双击下钻子网</div>' : ''),
+      (isAggNode(n) ? '<div class="sm-tip-row"><span>网段主机</span><span>' + (n.Members || '—') + ' 台</span></div>' : '') +
+      (isAggNode(n) ? '<div style="margin-top:4px;opacity:.7">双击下钻子网</div>' : '') +
+      (n.Anchor ? '<div style="margin-top:4px;color:#e34d59">异常锚点 · 未参与网段聚合</div>' : ''),
       p.x, p.y);
   });
 
   topo.on('edgeHover', function (p) {
     if (!p || !p.edge) { UI.tip.hide(); return; }
     var e = p.edge;
+    if (e.Kind === 'owner') {
+      UI.tip.show(
+        '<b>' + UI.esc(nodeLabel(nodeCache[p.a] || { ID: p.a })) + ' &rarr; ' + UI.esc(nodeLabel(nodeCache[p.b] || { ID: p.b })) + '</b>' +
+        '<div class="sm-tip-row"><span>类型</span><span>网段归属</span></div>' +
+        '<div style="margin-top:4px;opacity:.7">由该设备 IP 的 /24 归属推导，链路本身无流量</div>',
+        p.x, p.y);
+      return;
+    }
     UI.tip.show(
       '<b>' + UI.esc(nodeLabel(nodeCache[p.a] || { ID: p.a })) + ' &harr; ' + UI.esc(nodeLabel(nodeCache[p.b] || { ID: p.b })) + '</b>' +
       '<div class="sm-tip-row"><span>协议</span><span>' + UI.esc(e.Protocol || '-') + '</span></div>' +
