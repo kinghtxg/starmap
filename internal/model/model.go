@@ -219,6 +219,11 @@ type SystemConfig struct {
 	AutoDiscoverySec     int64    `json:"auto_discovery_sec" yaml:"auto_discovery_sec"`       // 扫描间隔（秒），默认 1800
 	AutoDiscoveryCIDRs   []string `json:"auto_discovery_cidrs" yaml:"auto_discovery_cidrs"`   // 目标网段列表
 	AutoDiscoveryMethod  string   `json:"auto_discovery_method" yaml:"auto_discovery_method"` // arp | icmp
+	// 自动跟随流量已发现的新网段（V1.5）：开启后每轮扫描目标 = 配置网段 ∪ 流量已发现的全部内网 /24。
+	// 默认关闭；开启前需确认授权（会扩大主动扫描范围）。
+	AutoDiscoveryFollowDiscovered bool     `json:"auto_discovery_follow_discovered" yaml:"auto_discovery_follow_discovered"`
+	AutoDiscoveryExcludeCIDRs     []string `json:"auto_discovery_exclude_cidrs" yaml:"auto_discovery_exclude_cidrs"` // 排除网段（不扫）
+	AutoDiscoveryMaxCIDRs         int      `json:"auto_discovery_max_cidrs" yaml:"auto_discovery_max_cidrs"`         // 单轮最多扫描网段数（默认 64）
 }
 
 // ---------- 主机资产库（V1.2） ----------

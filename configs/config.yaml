@@ -23,3 +23,7 @@ auto_discovery_enabled: false
 auto_discovery_sec: 1800      # 扫描间隔（秒），默认 30 分钟
 auto_discovery_method: "arp"  # arp | icmp
 auto_discovery_cidrs: []      # 目标网段，如 ["10.10.1.0/24","172.16.5.0/24"]
+# V1.5 新网段自动识别：开启后自动跟随流量已发现的新网段（默认关闭，会扩大扫描范围）
+auto_discovery_follow_discovered: false
+auto_discovery_exclude_cidrs: ["169.254.0.0/16"]  # 排除网段（不扫）
+auto_discovery_max_cidrs: 64                       # 单轮最多扫描网段数（防扫描面失控）

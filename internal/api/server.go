@@ -1176,10 +1176,13 @@ func configToMap(cfg *model.SystemConfig) gin.H {
 		"scan_ports":                   cfg.ScanPorts,
 		"scan_rate":                    cfg.ScanRate,
 		// 自动发现（V1.4）
-		"auto_discovery_enabled": cfg.AutoDiscoveryEnabled,
-		"auto_discovery_sec":     cfg.AutoDiscoverySec,
-		"auto_discovery_cidrs":   cfg.AutoDiscoveryCIDRs,
-		"auto_discovery_method":  cfg.AutoDiscoveryMethod,
+		"auto_discovery_enabled":           cfg.AutoDiscoveryEnabled,
+		"auto_discovery_sec":               cfg.AutoDiscoverySec,
+		"auto_discovery_cidrs":             cfg.AutoDiscoveryCIDRs,
+		"auto_discovery_method":            cfg.AutoDiscoveryMethod,
+		"auto_discovery_follow_discovered": cfg.AutoDiscoveryFollowDiscovered,
+		"auto_discovery_exclude_cidrs":     cfg.AutoDiscoveryExcludeCIDRs,
+		"auto_discovery_max_cidrs":         cfg.AutoDiscoveryMaxCIDRs,
 	}
 }
 
@@ -1327,6 +1330,24 @@ func (s *Server) putConfig(c *gin.Context) {
 		}
 		if len(list) > 0 {
 			cfg.AutoDiscoveryCIDRs = list
+		}
+	}
+	// V1.5 新网段自动跟随
+	if v, ok := m["auto_discovery_follow_discovered"].(bool); ok {
+		cfg.AutoDiscoveryFollowDiscovered = v
+	}
+	if v, ok := numFrom(m, "auto_discovery_max_cidrs"); ok {
+		cfg.AutoDiscoveryMaxCIDRs = int(v)
+	}
+	if v, ok := strFrom(m, "auto_discovery_exclude_cidrs"); ok {
+		var list []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				list = append(list, p)
+			}
+		}
+		if len(list) > 0 {
+			cfg.AutoDiscoveryExcludeCIDRs = list
 		}
 	}
 

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -157,7 +158,9 @@ func main() {
 	}()
 	// 自动发现（V1.4）：周期性对目标网段做主动扫描，让拓扑"自生长"。
 	// 默认关闭；需同时开启 probe_enabled（主动探测总开关）与 auto_discovery_enabled。
-	if cfg.AutoDiscoveryEnabled && len(cfg.AutoDiscoveryCIDRs) > 0 {
+	// V1.5：auto_discovery_follow_discovered 开启后，自动跟随流量已发现的新网段，
+	//       受排除列表与单轮上限约束，防止扫描面失控。
+	if cfg.AutoDiscoveryEnabled && (len(cfg.AutoDiscoveryCIDRs) > 0 || cfg.AutoDiscoveryFollowDiscovered) {
 		interval := time.Duration(cfg.AutoDiscoverySec) * time.Second
 		if interval <= 0 {
 			interval = 30 * time.Minute
@@ -166,17 +169,23 @@ func main() {
 		if method == "" {
 			method = "arp"
 		}
+		maxCIDRs := cfg.AutoDiscoveryMaxCIDRs
+		if maxCIDRs <= 0 {
+			maxCIDRs = 64
+		}
+		known := map[string]bool{} // 已纳入扫描的网段（用于识别"新网段"）
 		go func() {
 			t := time.NewTicker(interval)
 			defer t.Stop()
-			log.Printf("[auto-discovery] 已启用：每 %v 对 %d 个网段做 %s 扫描",
-				interval, len(cfg.AutoDiscoveryCIDRs), method)
+			log.Printf("[auto-discovery] 已启用：每 %v 做 %s 扫描（follow_discovered=%v, max=%d）",
+				interval, method, cfg.AutoDiscoveryFollowDiscovered, maxCIDRs)
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-t.C:
-					for _, cidr := range cfg.AutoDiscoveryCIDRs {
+					targets := buildScanTargets(cfg, engine, maxCIDRs, known)
+					for _, cidr := range targets {
 						res, err := scanner.Trigger(method, cidr)
 						if err != nil {
 							log.Printf("[auto-discovery] %s %s 失败: %v", method, cidr, err)
@@ -328,4 +337,63 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	}
 	cfg.ProbeEnabled = saved.ProbeEnabled
 	cfg.CaptureEnabled = saved.CaptureEnabled
+}
+
+// ---------- 自动发现：扫描目标计算（V1.5 新网段自动识别） ----------
+
+// buildScanTargets 计算本轮扫描目标：
+//  1. 配置的固定网段（auto_discovery_cidrs）
+//  2. follow_discovered 开启时，追加流量已发现的全部内网 /24 网段
+//
+// 三重防误扫约束：仅内网（Engine.Subnets 只含内网 /24）、排除列表、单轮上限。
+// 首次纳入的网段会打「发现新网段」日志，便于审计。
+func buildScanTargets(cfg model.SystemConfig, eng *topology.Engine, maxN int, known map[string]bool) []string {
+	out := make([]string, 0, 16)
+	seen := map[string]bool{}
+
+	add := func(cidr string) {
+		if cidr == "" || seen[cidr] || len(out) >= maxN {
+			return
+		}
+		if isExcludedCIDR(cidr, cfg.AutoDiscoveryExcludeCIDRs) {
+			return
+		}
+		seen[cidr] = true
+		out = append(out, cidr)
+		if !known[cidr] {
+			known[cidr] = true
+			log.Printf("[auto-discovery] 发现新网段 %s（已纳入扫描）", cidr)
+		}
+	}
+
+	for _, c := range cfg.AutoDiscoveryCIDRs {
+		add(c)
+	}
+	if cfg.AutoDiscoveryFollowDiscovered && eng != nil {
+		for _, s := range eng.Subnets() {
+			add(s.CIDR)
+		}
+	}
+	if len(out) >= maxN {
+		log.Printf("[auto-discovery] 扫描目标已达单轮上限 %d，其余网段本轮跳过", maxN)
+	}
+	return out
+}
+
+// isExcludedCIDR 判断 cidr 是否落在排除列表内（支持 CIDR 包含关系，如排除 /16 覆盖其下 /24）。
+func isExcludedCIDR(cidr string, excludes []string) bool {
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	for _, ex := range excludes {
+		_, exNet, err := net.ParseCIDR(strings.TrimSpace(ex))
+		if err != nil {
+			continue
+		}
+		if exNet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

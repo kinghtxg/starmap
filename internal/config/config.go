@@ -42,6 +42,10 @@ func Default() model.SystemConfig {
 		AutoDiscoverySec:     1800, // 30 分钟
 		AutoDiscoveryCIDRs:   nil,
 		AutoDiscoveryMethod:  "arp",
+		// V1.5：新网段自动跟随。默认关闭；默认排除链路本地网段
+		AutoDiscoveryFollowDiscovered: false,
+		AutoDiscoveryExcludeCIDRs:     []string{"169.254.0.0/16"},
+		AutoDiscoveryMaxCIDRs:         64,
 	}
 }
 
@@ -109,6 +113,16 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.AutoDiscoveryMethod != "" {
 		cfg.AutoDiscoveryMethod = fileCfg.AutoDiscoveryMethod
+	}
+	// V1.5 新网段自动跟随
+	if fileCfg.AutoDiscoveryFollowDiscovered {
+		cfg.AutoDiscoveryFollowDiscovered = true
+	}
+	if len(fileCfg.AutoDiscoveryExcludeCIDRs) > 0 {
+		cfg.AutoDiscoveryExcludeCIDRs = fileCfg.AutoDiscoveryExcludeCIDRs
+	}
+	if fileCfg.AutoDiscoveryMaxCIDRs != 0 {
+		cfg.AutoDiscoveryMaxCIDRs = fileCfg.AutoDiscoveryMaxCIDRs
 	}
 	if fileCfg.AgingSeconds != 0 {
 		cfg.AgingSeconds = fileCfg.AgingSeconds

@@ -1,5 +1,23 @@
 # Changelog
 
+## V1.5 (2026-10-20)
+
+### 新增
+- **新网段自动识别**：`auto_discovery_follow_discovered` 开启后，自动发现每轮扫描目标 = 配置网段 ∪ 流量已发现的全部内网 /24。新网段首次纳入时打日志（`发现新网段 xxx`）。防误扫三重约束：仅内网网段、`auto_discovery_exclude_cidrs` 排除列表（默认排除链路本地 `169.254.0.0/16`）、`auto_discovery_max_cidrs` 单轮上限（默认 64）。
+- **网段清单视图**：拓扑页新增「网段清单」按钮，一览全部已发现内网网段（主机数/在线/网关 MAC/探针位置/最高风险/聚合状态），支持一键下钻。API `GET /api/subnets`。
+- **产品路线图**：`docs/PM-ROADMAP-2026-10.md`（定位/能力地图/优先级/里程碑/验收标准）。
+
+## V1.4 (2026-10-19)
+
+### 新增
+- **自动发现周期扫描**（拓扑自生长）：`auto_discovery_enabled` + `auto_discovery_sec` + `auto_discovery_cidrs` + `auto_discovery_method`（arp/icmp）。默认关闭（隔离环境不主动发包）。
+- **政务网探针模拟器**：`testdata/simprobe.go`，模拟多网段/一机两网/frp/clash/账外机，`go run testdata/simprobe.go`。
+- **多网融合按实际 /24 网段判定**：同一设备（同 MAC）拥有 ≥2 个 /24 网段 IP → high（直接对应政务网"一机两网"）。旧实现按手工配置的粗粒度域（/8 /12 /16）判定，同域内跨网段会漏检。保留域维度作为补充，evidence 用 `basis` 标明判定依据。
+
+### 修复
+- **聚合丢资产 P0**：`syncAssets` 改用 `Engine.AllNodes()` 遍历全量节点。此前用 `Snapshot()` 会隐藏已聚合 /24 的成员，导致网段内超过聚合阈值的主机永远进不了资产库（账外资产发现静默失效）。
+- **资产同步探针位置**：未归档资产跟随探针 `location`，已归档资产保留用户填写的物理位置不覆盖。
+
 ## V1.3 (2026-10-15)
 
 ### 新增
