@@ -44,6 +44,7 @@
   const API = {
     // 拓扑
     topology: () => req('GET', '/api/topology'),
+    subnets: () => req('GET', '/api/subnets'),
     node: (id) => req('GET', '/api/nodes/' + encodeURIComponent(id)),
     stats: () => req('GET', '/api/stats'),
     health: () => req('GET', '/api/health'),

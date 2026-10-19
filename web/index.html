@@ -28,6 +28,7 @@
         <span class="sm-toolbar-sep"></span>
         <button class="sm-btn" id="btnRelayout" data-act="relayout" data-ico="layout">重新布局</button>
         <button class="sm-btn" id="btnRefresh" data-act="refresh" data-ico="refresh">刷新数据</button>
+        <button class="sm-btn" id="btnSubnets" data-ico="grid">网段清单</button>
         <button class="sm-btn" data-act="png" data-ico="download">导出 PNG</button>
         <button class="sm-btn" data-act="svg" data-ico="download">导出 SVG</button>
       </div>
@@ -38,6 +39,7 @@
 
       <div class="sm-row sm-anim" style="flex:1;min-height:420px;margin-top:12px" >
         <div id="topo" class="sm-card sm-topo-wrap" style="flex:1;min-width:0"></div>
+        <div id="subnetPanel" class="sm-card sm-hide" style="flex:1;min-width:0;overflow:auto;padding:0"></div>
 
         <aside class="sm-card sm-hide" id="detailPanel" style="width:clamp(280px, 24vw, 360px);flex:0 0 clamp(280px, 24vw, 360px);display:flex;flex-direction:column;overflow:hidden">
           <div class="sm-card-hd">
@@ -342,6 +344,74 @@ UI.on('ctx-whitelist', function (el, ctx) {
 document.getElementById('fRisk').addEventListener('change', function () {
   if (topo) topo.setRiskFilter(this.value);
 });
+
+/* ---------- 网段清单视图（V1.4）：直接回答"网内结构" ---------- */
+var subnetView = false;
+
+document.getElementById('btnSubnets').addEventListener('click', function () {
+  subnetView = !subnetView;
+  document.getElementById('topo').classList.toggle('sm-hide', subnetView);
+  document.getElementById('subnetPanel').classList.toggle('sm-hide', !subnetView);
+  this.textContent = subnetView ? '拓扑视图' : '网段清单';
+  if (subnetView) loadSubnets();
+});
+
+function riskBadge(lv) {
+  if (lv === 'high') return '<span class="sm-badge is-danger">高</span>';
+  if (lv === 'mid') return '<span class="sm-badge is-warn">中</span>';
+  if (lv === 'low') return '<span class="sm-badge">低</span>';
+  return '<span class="sm-badge is-ok">正常</span>';
+}
+
+function loadSubnets() {
+  var host = document.getElementById('subnetPanel');
+  host.innerHTML = '<div style="padding:16px" class="sm-t-3">正在加载网段清单…</div>';
+  return API.subnets().then(function (list) {
+    list = list || [];
+    if (!list.length) {
+      host.innerHTML = '<div class="sm-empty" style="padding:48px 16px">尚未发现内网网段。导入流量或开启自动发现后，网段会自动出现。</div>';
+      return;
+    }
+    var totalHost = list.reduce(function (s, x) { return s + (x.host_count || 0); }, 0);
+    var rows = list.map(function (s) {
+      var agg = s.aggregated
+        ? '<span class="sm-badge is-brand">已聚合</span>'
+        : '<span class="sm-badge">展开</span>';
+      return '<tr>' +
+        '<td><span class="sm-mono">' + UI.esc(s.cidr) + '</span></td>' +
+        '<td>' + (s.host_count || 0) + '</td>' +
+        '<td>' + (s.online || 0) + '</td>' +
+        '<td><span class="sm-mono sm-t-3">' + UI.esc(s.gateway_mac || '—') + '</span></td>' +
+        '<td>' + UI.esc(s.location || '—') + '</td>' +
+        '<td>' + riskBadge(s.risk_level) + (s.risk_count ? ' <span class="sm-t-3">×' + s.risk_count + '</span>' : '') + '</td>' +
+        '<td>' + agg + '</td>' +
+        '<td><button class="sm-btn is-text is-sm" data-cidr="' + UI.escAttr(s.cidr) + '">下钻</button></td>' +
+        '</tr>';
+    }).join('');
+    host.innerHTML =
+      '<div class="sm-card-hd" style="padding:14px 16px">' +
+        '<div><h2 style="font-size:14px">网段清单</h2>' +
+        '<div class="sm-t-3">共 ' + list.length + ' 个网段 · ' + totalHost + ' 台主机</div></div>' +
+      '</div>' +
+      '<div class="sm-card-bd" style="padding:0">' +
+      '<table class="sm-table"><thead><tr>' +
+      '<th>网段</th><th>主机数</th><th>在线</th><th>网关 MAC</th><th>探针位置</th><th>最高风险</th><th>状态</th><th></th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+    Array.prototype.forEach.call(host.querySelectorAll('button[data-cidr]'), function (btn) {
+      btn.addEventListener('click', function () {
+        var cidr = btn.getAttribute('data-cidr');
+        // 切回拓扑视图并下钻该网段
+        subnetView = false;
+        document.getElementById('topo').classList.remove('sm-hide');
+        document.getElementById('subnetPanel').classList.add('sm-hide');
+        document.getElementById('btnSubnets').textContent = '网段清单';
+        drilldown(cidr);
+      });
+    });
+  }).catch(function () {
+    host.innerHTML = '<div class="sm-empty" style="padding:48px 16px">加载网段清单失败。</div>';
+  });
+}
 
 /* ---------- 加载 ---------- */
 function load() {

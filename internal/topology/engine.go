@@ -966,6 +966,70 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 	}
 }
 
+// SubnetInfo 网段清单条目（V1.4）：内网 /24 网段的汇总视图。
+// 直接回答"网内结构"：有哪些网段、每网段多少台、在线几台、网关是谁、风险如何。
+type SubnetInfo struct {
+	CIDR       string `json:"cidr"`
+	HostCount  int    `json:"host_count"`
+	Online     int    `json:"online"`
+	Aggregated bool   `json:"aggregated"`
+	GatewayMAC string `json:"gateway_mac,omitempty"`
+	Location   string `json:"location,omitempty"`
+	RiskCount  int    `json:"risk_count"` // 网段内 high 风险节点数
+	RiskLevel  string `json:"risk_level"` // 网段内最高风险等级
+}
+
+// Subnets 返回全部已发现的内网 /24 网段（含未聚合的），附带统计。
+// 与 SubnetCIDRs（只返回已聚合网段）不同，这里不隐藏任何网段。
+func (e *Engine) Subnets() []SubnetInfo {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make([]SubnetInfo, 0, len(e.subnetMembers))
+	for cidr, set := range e.subnetMembers {
+		info := SubnetInfo{CIDR: cidr, Aggregated: e.aggregated[cidr], RiskLevel: model.RiskNone}
+		gwCount := map[string]int{}
+		locCount := map[string]int{}
+		for id := range set {
+			n := e.nodes[id]
+			if n == nil {
+				continue
+			}
+			info.HostCount++
+			if n.Active {
+				info.Online++
+			}
+			if n.RiskLevel == model.RiskHigh {
+				info.RiskCount++
+			}
+			if riskRank(n.RiskLevel) > riskRank(info.RiskLevel) {
+				info.RiskLevel = n.RiskLevel
+			}
+			if gw := e.gatewayMAC[id]; gw != "" {
+				gwCount[gw]++
+			}
+			if n.Location != "" {
+				locCount[n.Location]++
+			}
+		}
+		info.GatewayMAC = mostFrequent(gwCount)
+		info.Location = mostFrequent(locCount)
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CIDR < out[j].CIDR })
+	return out
+}
+
+// mostFrequent 返回计数最多的键（并列时取字典序最小，保证稳定）。
+func mostFrequent(m map[string]int) string {
+	best, bestN := "", 0
+	for k, n := range m {
+		if n > bestN || (n == bestN && k < best) {
+			best, bestN = k, n
+		}
+	}
+	return best
+}
+
 // AllNodes 返回全部内网真实节点（不含外部聚合节点，也**不隐藏**已聚合网段的成员）。
 // 与 Snapshot 的区别：Snapshot 为拓扑展示会把聚合网段的成员隐藏掉，导致
 // 资产同步/多网段判定漏掉绝大多数主机（V1.4 P0 修复）。

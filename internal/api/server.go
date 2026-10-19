@@ -97,6 +97,8 @@ func NewRouter(d Deps) *gin.Engine {
 		api.GET("/health", s.health)
 		api.GET("/topology", s.topologySnapshot)
 		api.GET("/topology/subnet/*cidr", s.subnetSnapshot)
+		// 网段清单（V1.4）：全部已发现内网 /24 网段及统计
+		api.GET("/subnets", s.listSubnets)
 		api.GET("/nodes/:id", s.nodeDetail)
 		api.GET("/events", s.listEvents)
 		api.POST("/events/:id/review", s.reviewEvent)
@@ -356,6 +358,20 @@ func (s *Server) topologySnapshot(c *gin.Context) {
 		},
 		"GeneratedAt": snap.GeneratedAt.UTC().Format(time.RFC3339),
 	})
+}
+
+// listSubnets 网段清单（V1.4）：返回全部已发现的内网 /24 网段及统计。
+// 回答"网内结构"：有哪些网段、每网段多少台、在线几台、网关是谁、最高风险。
+func (s *Server) listSubnets(c *gin.Context) {
+	if s.d.Engine == nil {
+		c.JSON(http.StatusOK, []any{})
+		return
+	}
+	subs := s.d.Engine.Subnets()
+	if subs == nil {
+		subs = []topology.SubnetInfo{}
+	}
+	c.JSON(http.StatusOK, subs)
 }
 
 func (s *Server) subnetSnapshot(c *gin.Context) {

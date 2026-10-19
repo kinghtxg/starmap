@@ -500,6 +500,49 @@ func TestAssetSyncIncludesAggregatedMembers(t *testing.T) {
 	}
 }
 
+// V1.4 网段清单：应返回全部已发现内网网段及每网段主机数/在线数
+func TestSubnetsList(t *testing.T) {
+	h, _ := newTestRouter(t, testCfg())
+	var flows []map[string]any
+	add := func(ip, mac string) {
+		flows = append(flows, map[string]any{
+			"src_ip": ip, "dst_ip": "8.8.8.8",
+			"src_port": 40000, "dst_port": 443, "proto": "tcp", "mac": mac,
+			"bytes_up": 3000, "bytes_down": 6000, "packets": 30,
+			"first_seen": base.Format(time.RFC3339),
+			"last_seen":  base.Add(20 * time.Second).Format(time.RFC3339),
+		})
+	}
+	// 网段 A：3 台；网段 B：2 台
+	for i := 1; i <= 3; i++ {
+		add(fmt.Sprintf("10.10.1.%d", i), fmt.Sprintf("aa:bb:cc:11:00:%02d", i))
+	}
+	for i := 1; i <= 2; i++ {
+		add(fmt.Sprintf("172.16.5.%d", i), fmt.Sprintf("aa:bb:cc:22:00:%02d", i))
+	}
+	if w := doReq(t, h, "POST", "/api/ingest/probe",
+		map[string]any{"probe_id": "p-sub", "flows": flows}, nil); w.Code != 200 {
+		t.Fatalf("上报失败 %d", w.Code)
+	}
+
+	w := doReq(t, h, "GET", "/api/subnets", nil, nil)
+	if w.Code != 200 {
+		t.Fatalf("网段清单应 200，实际 %d", w.Code)
+	}
+	var subs []map[string]any
+	json.Unmarshal(w.Body.Bytes(), &subs)
+	if len(subs) != 2 {
+		t.Fatalf("应返回 2 个网段，实际 %d: %s", len(subs), w.Body.String())
+	}
+	got := map[string]int{}
+	for _, s := range subs {
+		got[fmt.Sprint(s["cidr"])] = int(s["host_count"].(float64))
+	}
+	if got["10.10.1.0/24"] != 3 || got["172.16.5.0/24"] != 2 {
+		t.Fatalf("网段主机数不符: %v", got)
+	}
+}
+
 func TestProbeToken(t *testing.T) {
 	cfg := testCfg()
 	cfg.ProbeToken = "secret-token"
