@@ -39,3 +39,34 @@ func TestLoadOverride(t *testing.T) {
 		t.Fatalf("未设置字段应保留默认值: %d", cfg.AggregateThreshold)
 	}
 }
+
+// V1.4 自动发现：默认关闭（隔离环境不主动发包），显式开启后加载配置
+func TestAutoDiscoveryDefaultsAndOverride(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "none.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AutoDiscoveryEnabled {
+		t.Fatal("自动发现默认必须关闭")
+	}
+	if cfg.AutoDiscoverySec != 1800 || cfg.AutoDiscoveryMethod != "arp" {
+		t.Fatalf("自动发现默认值异常: sec=%d method=%q", cfg.AutoDiscoverySec, cfg.AutoDiscoveryMethod)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, []byte(`auto_discovery_enabled: true
+auto_discovery_sec: 300
+auto_discovery_method: icmp
+auto_discovery_cidrs: ["10.10.1.0/24","172.16.5.0/24"]
+`), 0o644)
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.AutoDiscoveryEnabled || cfg.AutoDiscoverySec != 300 || cfg.AutoDiscoveryMethod != "icmp" {
+		t.Fatalf("自动发现覆盖失败: %+v", cfg)
+	}
+	if len(cfg.AutoDiscoveryCIDRs) != 2 || cfg.AutoDiscoveryCIDRs[0] != "10.10.1.0/24" {
+		t.Fatalf("网段列表覆盖失败: %v", cfg.AutoDiscoveryCIDRs)
+	}
+}

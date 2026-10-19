@@ -213,6 +213,12 @@ type SystemConfig struct {
 	ScanPorts string `json:"scan_ports" yaml:"scan_ports"`
 	// 扫描速率模板（nmap -T0~-T5），默认 "T4"。
 	ScanRate string `json:"scan_rate" yaml:"scan_rate"`
+	// 自动发现（V1.4）：周期性对目标网段做 ARP/ICMP 扫描，让拓扑"自生长"。
+	// 默认关闭——政务网等隔离环境默认不主动发包，需显式开启。
+	AutoDiscoveryEnabled bool     `json:"auto_discovery_enabled" yaml:"auto_discovery_enabled"`
+	AutoDiscoverySec     int64    `json:"auto_discovery_sec" yaml:"auto_discovery_sec"`       // 扫描间隔（秒），默认 1800
+	AutoDiscoveryCIDRs   []string `json:"auto_discovery_cidrs" yaml:"auto_discovery_cidrs"`   // 目标网段列表
+	AutoDiscoveryMethod  string   `json:"auto_discovery_method" yaml:"auto_discovery_method"` // arp | icmp
 }
 
 // ---------- 主机资产库（V1.2） ----------

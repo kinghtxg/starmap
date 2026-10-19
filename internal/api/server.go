@@ -1159,6 +1159,11 @@ func configToMap(cfg *model.SystemConfig) gin.H {
 		"archive_offline_seconds":      cfg.ArchiveOfflineSeconds,
 		"scan_ports":                   cfg.ScanPorts,
 		"scan_rate":                    cfg.ScanRate,
+		// 自动发现（V1.4）
+		"auto_discovery_enabled": cfg.AutoDiscoveryEnabled,
+		"auto_discovery_sec":     cfg.AutoDiscoverySec,
+		"auto_discovery_cidrs":   cfg.AutoDiscoveryCIDRs,
+		"auto_discovery_method":  cfg.AutoDiscoveryMethod,
 	}
 }
 
@@ -1285,6 +1290,28 @@ func (s *Server) putConfig(c *gin.Context) {
 	}
 	if v, ok := strFrom(m, "scan_rate"); ok && v != "" {
 		cfg.ScanRate = v
+	}
+	// 自动发现（V1.4）
+	if v, ok := m["auto_discovery_enabled"].(bool); ok {
+		cfg.AutoDiscoveryEnabled = v
+	}
+	if v, ok := numFrom(m, "auto_discovery_sec"); ok {
+		cfg.AutoDiscoverySec = int64(v)
+	}
+	if v, ok := strFrom(m, "auto_discovery_method"); ok && v != "" {
+		cfg.AutoDiscoveryMethod = v
+	}
+	if v, ok := strFrom(m, "auto_discovery_cidrs"); ok {
+		// 逗号分隔的网段列表，如 "10.10.1.0/24,172.16.5.0/24"
+		var list []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				list = append(list, p)
+			}
+		}
+		if len(list) > 0 {
+			cfg.AutoDiscoveryCIDRs = list
+		}
 	}
 
 	// 联动拓扑引擎与检测器

@@ -16,3 +16,10 @@ db_path: "starmap.db"         # SQLite 数据库路径
 probe_token: ""               # 探针上报 token（可选，配置则校验，§10.7）
 audit_retention_days: 90      # 审计日志保留天数（§10.8）
 cors_origins: []              # CORS 白名单；为空则仅同源（不发 Allow-Origin 头）
+
+# ---- 自动发现（V1.4）：周期扫描让拓扑自生长 ----
+# 默认关闭。政务网/隔离环境默认不主动发包，需显式开启；开启前请确认已获授权。
+auto_discovery_enabled: false
+auto_discovery_sec: 1800      # 扫描间隔（秒），默认 30 分钟
+auto_discovery_method: "arp"  # arp | icmp
+auto_discovery_cidrs: []      # 目标网段，如 ["10.10.1.0/24","172.16.5.0/24"]

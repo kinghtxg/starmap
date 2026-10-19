@@ -155,6 +155,42 @@ func main() {
 			}
 		}
 	}()
+	// 自动发现（V1.4）：周期性对目标网段做主动扫描，让拓扑"自生长"。
+	// 默认关闭；需同时开启 probe_enabled（主动探测总开关）与 auto_discovery_enabled。
+	if cfg.AutoDiscoveryEnabled && len(cfg.AutoDiscoveryCIDRs) > 0 {
+		interval := time.Duration(cfg.AutoDiscoverySec) * time.Second
+		if interval <= 0 {
+			interval = 30 * time.Minute
+		}
+		method := cfg.AutoDiscoveryMethod
+		if method == "" {
+			method = "arp"
+		}
+		go func() {
+			t := time.NewTicker(interval)
+			defer t.Stop()
+			log.Printf("[auto-discovery] 已启用：每 %v 对 %d 个网段做 %s 扫描",
+				interval, len(cfg.AutoDiscoveryCIDRs), method)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					for _, cidr := range cfg.AutoDiscoveryCIDRs {
+						res, err := scanner.Trigger(method, cidr)
+						if err != nil {
+							log.Printf("[auto-discovery] %s %s 失败: %v", method, cidr, err)
+							continue
+						}
+						if res != nil && len(res.Hosts) > 0 {
+							log.Printf("[auto-discovery] %s %s 发现 %d 台主机",
+								method, cidr, len(res.Hosts))
+						}
+					}
+				}
+			}
+		}()
+	}
 	go det.Run(ctx)
 
 	// 启动时自动抓包（配置开启时）

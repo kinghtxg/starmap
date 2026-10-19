@@ -37,6 +37,11 @@ func Default() model.SystemConfig {
 		NmapPath:               "",        // 默认 "nmap"，空则运行时按 "nmap" 探测
 		ScanPorts:              "1-65535", // 主动扫描默认全端口
 		ScanRate:               "T4",      // 扫描速率
+		// 自动发现（V1.4）：默认关闭，政务网等隔离环境需显式开启后才主动发包
+		AutoDiscoveryEnabled: false,
+		AutoDiscoverySec:     1800, // 30 分钟
+		AutoDiscoveryCIDRs:   nil,
+		AutoDiscoveryMethod:  "arp",
 	}
 }
 
@@ -91,6 +96,19 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.ScanRate != "" {
 		cfg.ScanRate = fileCfg.ScanRate
+	}
+	// 自动发现（V1.4）
+	if fileCfg.AutoDiscoveryEnabled {
+		cfg.AutoDiscoveryEnabled = true
+	}
+	if fileCfg.AutoDiscoverySec != 0 {
+		cfg.AutoDiscoverySec = fileCfg.AutoDiscoverySec
+	}
+	if len(fileCfg.AutoDiscoveryCIDRs) > 0 {
+		cfg.AutoDiscoveryCIDRs = fileCfg.AutoDiscoveryCIDRs
+	}
+	if fileCfg.AutoDiscoveryMethod != "" {
+		cfg.AutoDiscoveryMethod = fileCfg.AutoDiscoveryMethod
 	}
 	if fileCfg.AgingSeconds != 0 {
 		cfg.AgingSeconds = fileCfg.AgingSeconds
