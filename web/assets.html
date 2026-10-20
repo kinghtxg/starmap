@@ -14,7 +14,7 @@
     <header class="sm-topbar">
       <div class="sm-topbar-l">
         <h1 class="sm-h1">主机资产</h1>
-        <p class="sm-sub">网络资产管理 · 账外资产发现 · 端口记录（流量 + 主动扫描双来源）</p>
+        <p class="sm-sub">网络资产管理 · 台账对照（账实差异）· 账外资产发现 · 端口记录（流量 + 主动扫描双来源）</p>
       </div>
       <div class="sm-toolbar">
         <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
@@ -27,6 +27,7 @@
       <div class="sm-tabbar sm-anim" style="margin-top:14px">
         <button class="sm-tab is-active" data-tab="assets">主机资产</button>
         <button class="sm-tab" data-tab="ports">端口记录</button>
+        <button class="sm-tab" data-tab="ledger">台账对照</button>
       </div>
 
       <!-- 主机资产 -->
@@ -40,7 +41,7 @@
             <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索 IP / MAC / 归属" data-ico="search"></div>
             <select class="sm-select is-sm sm-w-auto" id="fStatus" aria-label="状态筛选">
               <option value="">全部</option>
-              <option value="unarchived">账外资产</option>
+              <option value="unarchived">未归档</option>
               <option value="archived">已纳管</option>
             </select>
           </div>
@@ -72,6 +73,29 @@
         </div>
         <div class="sm-card-ft" id="portPager"></div>
       </section>
+
+      <!-- 台账对照（V1.7） -->
+      <section id="tab-ledger" class="sm-card sm-anim sm-hide" style="margin-top:12px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+        <div class="sm-card-hd">
+          <div class="sm-row is-center" style="gap:10px;min-width:0">
+            <h2 style="white-space:nowrap">台账对照</h2>
+            <span class="sm-badge" id="ledgerBatch">未导入</span>
+          </div>
+          <div class="sm-toolbar">
+            <div class="sm-search" style="flex:0 1 168px;min-width:120px"><input class="sm-input is-sm" id="lKw" placeholder="搜索 IP / MAC" data-ico="search"></div>
+            <button class="sm-btn is-sm" data-act="ledger-refresh" data-ico="refresh">重新对照</button>
+            <button class="sm-btn is-sm is-primary" data-act="ledger-import" data-ico="upload">导入台账</button>
+            <button class="sm-btn is-sm is-icon is-text is-danger" data-act="ledger-clear" data-ico="trash" title="清空台账"></button>
+          </div>
+        </div>
+        <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+          <div id="ledgerSummary" style="padding:12px 16px 0"></div>
+          <div class="sm-tabbar" id="ledgerFilters" style="margin:10px 16px 0;background:transparent"></div>
+          <div class="sm-table-wrap" style="margin-top:10px">
+            <table class="sm-table" id="ledgerTable"></table>
+          </div>
+        </div>
+      </section>
     </div>
   </main>
 </div>
@@ -88,9 +112,11 @@ var curTab = 'assets';
 /* ---------- Tab 切换 ---------- */
 function switchTab(t) {
   curTab = t;
-  document.querySelectorAll('.sm-tab').forEach(function (b) { b.classList.toggle('is-active', b.getAttribute('data-tab') === t); });
+  document.querySelectorAll('.sm-tab[data-tab]').forEach(function (b) { b.classList.toggle('is-active', b.getAttribute('data-tab') === t); });
   document.getElementById('tab-assets').classList.toggle('sm-hide', t !== 'assets');
   document.getElementById('tab-ports').classList.toggle('sm-hide', t !== 'ports');
+  document.getElementById('tab-ledger').classList.toggle('sm-hide', t !== 'ledger');
+  if (t === 'ledger') loadLedger();
 }
 
 /* ---------- 统计 ---------- */
@@ -99,7 +125,7 @@ function renderStats() {
     st = st || {};
     var items = [
       { k: '资产总数', v: st.total || 0, i: 'asset', ex: '已纳管 ' + (st.archived || 0) + ' 台' },
-      { k: '账外资产', v: st.unarchived || 0, i: 'warn', cls: st.unarchived ? 'is-warn' : 'is-ok', ex: '系统自动发现、未登记台账' },
+      { k: '未归档资产', v: st.unarchived || 0, i: 'warn', cls: st.unarchived ? 'is-warn' : 'is-ok', ex: '系统发现、未登记归属' },
       { k: '在线主机', v: st.online || 0, i: 'node', cls: 'is-ok', ex: '最近活跃' },
       { k: '离线主机', v: st.offline || 0, i: 'clock', cls: 'is-off', ex: '超时未发现' }
     ];
@@ -120,7 +146,7 @@ function renderStats() {
 /* ---------- 主机资产 ---------- */
 function statusBadge(a) {
   if (a.status === 'archived') return '<span class="sm-badge is-brand">已纳管</span>';
-  return '<span class="sm-badge is-warning">账外</span>';
+  return '<span class="sm-badge is-warning">未归档</span>';
 }
 function onlineDot(on) {
   return on
@@ -284,6 +310,235 @@ function pollScan(id, host, m) {
   }, 3000);
 }
 
+/* ---------- 台账对照（V1.7） ---------- */
+var ledger = { summary: {}, managed: [], unmanaged: [], ghost: [], ip_mismatch: [] };
+var ledgerKind = 'all';
+
+var LEDGER_KINDS = [
+  { k: 'all', label: '全部' },
+  { k: 'unmanaged', label: '台账外设备' },
+  { k: 'managed', label: '在册在网' },
+  { k: 'ip_mismatch', label: 'IP 不符' },
+  { k: 'ghost', label: '僵尸记录' }
+];
+var LEDGER_BADGE = {
+  managed: '<span class="sm-badge is-ok">在册在网</span>',
+  unmanaged: '<span class="sm-badge is-danger">台账外</span>',
+  ghost: '<span class="sm-badge is-warning">僵尸记录</span>',
+  ip_mismatch: '<span class="sm-badge is-brand">IP 不符</span>'
+};
+var RISK_BADGE = {
+  high: '<span class="sm-badge is-danger">高</span>',
+  mid: '<span class="sm-badge is-warning">中</span>',
+  low: '<span class="sm-badge">低</span>'
+};
+
+function loadLedger() {
+  return API.ledgerDiff().then(function (d) {
+    ledger = d || { summary: {}, managed: [], unmanaged: [], ghost: [], ip_mismatch: [] };
+    renderLedger();
+  }).catch(function (e) {
+    UI.toast('台账对照失败：' + e.message, 'err');
+  });
+}
+
+function renderLedger() {
+  var s = ledger.summary || {};
+  var cards = [
+    { k: '台账条目', v: s.ledger_total || 0, i: 'asset', cls: '', ex: '人工登记' },
+    { k: '台账外设备', v: s.unmanaged || 0, i: 'warn', cls: (s.unmanaged ? 'is-high' : 'is-ok'), ex: '网内有、台账无' },
+    { k: '在册在网', v: s.managed || 0, i: 'check', cls: 'is-ok', ex: '账实一致' },
+    { k: '台账僵尸', v: s.ghost || 0, i: 'clock', cls: (s.ghost ? 'is-warn' : ''), ex: '台账有、网内无' }
+  ];
+  var sum = document.getElementById('ledgerSummary');
+  sum.innerHTML = '<div class="sm-grid sm-grid-4" style="gap:10px">' + cards.map(function (it) {
+    return '<div class="sm-stat ' + (it.cls || '') + '" style="padding:12px 14px">' +
+      '<div class="sm-stat-ico">' + UI.ico(it.i) + '</div>' +
+      '<div style="min-width:0">' +
+      '<div class="sm-stat-val" data-v="' + it.v + '">0</div>' +
+      '<div class="sm-stat-key">' + it.k + '</div>' +
+      '<div class="sm-stat-extra">' + UI.esc(it.ex) + '</div>' +
+      '</div></div>';
+  }).join('') + '</div>';
+  sum.querySelectorAll('.sm-stat-val').forEach(function (el) { UI.countTo(el, Number(el.getAttribute('data-v')) || 0); });
+
+  document.getElementById('ledgerBatch').textContent = (s.ledger_total || 0) + ' 条台账';
+
+  var counts = {
+    all: (s.managed || 0) + (s.unmanaged || 0) + (s.ghost || 0) + (s.ip_mismatch || 0),
+    managed: s.managed || 0, unmanaged: s.unmanaged || 0,
+    ghost: s.ghost || 0, ip_mismatch: s.ip_mismatch || 0
+  };
+  document.getElementById('ledgerFilters').innerHTML = LEDGER_KINDS.map(function (x) {
+    return '<button class="sm-tab' + (ledgerKind === x.k ? ' is-active' : '') + '" data-kind="' + x.k + '">' +
+      UI.esc(x.label) + ' <span class="sm-t-3">' + (counts[x.k] || 0) + '</span></button>';
+  }).join('');
+  document.querySelectorAll('#ledgerFilters .sm-tab').forEach(function (b) {
+    b.addEventListener('click', function () { ledgerKind = b.getAttribute('data-kind'); renderLedger(); });
+  });
+
+  renderLedgerTable();
+}
+
+function ledgerRows() {
+  var out = [];
+  ['unmanaged', 'managed', 'ip_mismatch', 'ghost'].forEach(function (k) {
+    (ledger[k] || []).forEach(function (x) { out.push(x); });
+  });
+  if (ledgerKind !== 'all') out = out.filter(function (x) { return x.kind === ledgerKind; });
+  var kw = (document.getElementById('lKw').value || '').toLowerCase();
+  if (kw) {
+    out = out.filter(function (x) {
+      var hay = [x.ip, x.ledger_ip, x.mac, x.hostname, x.department, x.owner, x.location].join(' ').toLowerCase();
+      return hay.indexOf(kw) >= 0;
+    });
+  }
+  return out;
+}
+
+function renderLedgerTable() {
+  var box = document.getElementById('ledgerTable');
+  var list = ledgerRows();
+  if (!list.length) {
+    var hasLedger = (ledger.summary && ledger.summary.ledger_total) > 0;
+    var hasHost = (ledger.summary && ledger.summary.host_total) > 0;
+    var title = hasLedger ? '该类差异为空' : '尚未导入资产台账';
+    var desc = hasLedger
+      ? '切换到其它分类查看，或重新导入一份最新台账。'
+      : (hasHost
+        ? '当前网内已发现 ' + ledger.summary.host_total + ' 台主机，全部无法与台账核对。导入台账 CSV 后即可得到「账外设备 / 在册在网 / 僵尸记录」三类差异。'
+        : '先导入流量发现主机，再导入台账 CSV 做账实对照。');
+    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="8">' +
+      UI.emptyHTML(title, desc) +
+      '<div style="margin-top:12px"><button class="sm-btn is-primary" data-act="ledger-import" data-ico="upload">导入台账 CSV</button></div>' +
+      '</td></tr></tbody>';
+    return;
+  }
+  var html = '<thead><tr>' +
+    '<th style="min-width:130px">IP 地址</th><th style="min-width:140px">MAC</th>' +
+    '<th style="min-width:150px">主机名 / 系统</th><th style="min-width:140px">归属 / 位置</th>' +
+    '<th style="min-width:90px">差异</th><th style="min-width:70px">在线</th>' +
+    '<th style="min-width:60px">风险</th><th style="min-width:100px">最后发现</th>' +
+    '</tr></thead><tbody>';
+  html += list.map(function (x) {
+    var ipCell = '<span class="sm-mono" style="font-size:12px">' + UI.esc(x.ip || '-') + '</span>';
+    if (x.kind === 'ip_mismatch' && x.ledger_ip) {
+      ipCell += '<div class="sm-t-3" style="font-size:11px">台账登记 ' + UI.esc(x.ledger_ip) + '</div>';
+    }
+    var hn = x.hostname ? '<div style="font-size:12px">' + UI.esc(x.hostname) + '</div>' : '';
+    var os = x.os ? '<span class="sm-chip">' + UI.esc(x.os) + '</span>' : '';
+    var owner = [x.department, x.owner].filter(Boolean).join(' / ');
+    var online = x.kind === 'ghost'
+      ? '<span class="sm-dot is-off"></span> 未发现'
+      : (x.online ? '<span class="sm-dot is-on"></span> 在线' : '<span class="sm-dot is-off"></span> 离线');
+    return '<tr>' +
+      '<td>' + ipCell + '</td>' +
+      '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(x.mac || '-') + '</span></td>' +
+      '<td>' + (hn + os || '-') + '</td>' +
+      '<td>' + (owner ? UI.esc(owner) : '-') +
+      (x.location ? '<div class="sm-t-3" style="font-size:11px">' + UI.esc(x.location) + '</div>' : '') + '</td>' +
+      '<td>' + (LEDGER_BADGE[x.kind] || '') + '</td>' +
+      '<td>' + online + '</td>' +
+      '<td>' + (RISK_BADGE[x.risk_level] || '<span class="sm-t-3">—</span>') + '</td>' +
+      '<td class="sm-t-3" style="font-size:12px">' + (x.last_seen ? UI.esc(UI.fmtAgo(x.last_seen)) : '—') + '</td>' +
+      '</tr>';
+  }).join('');
+  box.innerHTML = html + '</tbody>';
+}
+
+/* ---------- 台账导入 ---------- */
+var LEDGER_TEMPLATE = 'IP地址,MAC地址,主机名,操作系统,归属单位,归属人,物理位置,备注\n' +
+  '10.0.0.11,aa:bb:cc:00:00:11,oa-pc-01,Windows 10,办公室,张三,3F-301,正常办公\n';
+
+function downloadLedgerTemplate() {
+  var blob = new Blob(['\ufeff' + LEDGER_TEMPLATE], { type: 'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'starmap-台账模板.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 3000);
+}
+
+function ledgerImportModal() {
+  UI.modal({
+    title: '导入资产台账',
+    width: 620,
+    body:
+      '<div class="sm-stack">' +
+      '<div class="sm-alert is-info"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+      '<div class="sm-alert-body">台账是<strong>人工登记的“应该有什么”</strong>，导入后与拓扑观测结果对照。' +
+      '<br>每次导入<strong>全量替换</strong>上一份台账；CSV 需含 IP 列（ip / IP地址 / 地址），其余列可选。</div></div>' +
+      '<div class="sm-dropzone" id="lDrop" style="padding:20px">' +
+      '<div class="sm-dropzone-ico">' + UI.ico('upload') + '</div>' +
+      '<div style="font-weight:600">点击选择 CSV 文件，或拖拽到此处</div>' +
+      '<div class="sm-t-3" style="font-size:12px;margin-top:4px">支持 UTF-8 / 带 BOM 的 Excel 导出文件；单份上限 16MB</div>' +
+      '<input type="file" id="lFile" accept=".csv,text/csv" style="display:none">' +
+      '</div>' +
+      '<div class="sm-field"><label>或直接粘贴台账内容（含表头）</label>' +
+      '<textarea class="sm-textarea" id="lText" rows="6" placeholder="IP地址,MAC地址,主机名,归属单位,归属人&#10;10.0.0.11,aa:bb:cc:00:00:11,oa-pc-01,办公室,张三" style="font-family:var(--sm-mono);font-size:12px"></textarea></div>' +
+      '<div class="sm-row is-center" style="justify-content:space-between">' +
+      '<span class="sm-t-3" style="font-size:12px">列名支持中英文：ip/IP地址、mac/MAC地址、hostname/主机名、os/操作系统、department/归属单位、owner/归属人、location/物理位置、description/备注</span>' +
+      '<button class="sm-btn is-text is-sm" data-act="ledger-template" data-ico="download">下载模板</button></div>' +
+      '<div id="lStatus" style="font-size:12px"></div>' +
+      '</div>',
+    okText: '开始导入',
+    hideCancel: false,
+    onOk: function (m) {
+      var file = m.body.querySelector('#lFile').files[0];
+      var text = m.body.querySelector('#lText').value.trim();
+      var host = m.body.querySelector('#lStatus');
+      var p;
+      if (file) {
+        p = API.ledgerImport(file);
+      } else if (text) {
+        p = API.ledgerImportText(text, '手动粘贴');
+      } else {
+        UI.toast('请选择文件或粘贴台账内容', 'err');
+        return false;
+      }
+      host.innerHTML = UI.loadingHTML('正在导入并对照…');
+      return p.then(function (r) {
+        UI.toast('已导入 ' + r.imported + ' 条' + (r.skipped ? '（跳过 ' + r.skipped + ' 行）' : ''), 'ok');
+        ledgerKind = 'unmanaged'; // 导入后直接看"账外设备"，这是最关心的结果
+        loadLedger();
+        return true;
+      }).catch(function (e) {
+        host.innerHTML = UI.errorHTML(e);
+        return false;
+      });
+    },
+    onOpen: function (api, bd) {
+      var drop = bd.querySelector('#lDrop');
+      var input = bd.querySelector('#lFile');
+      var tip = bd.querySelector('#lDrop div[style*="font-weight"]');
+      drop.addEventListener('click', function () { input.click(); });
+      drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.classList.add('is-over'); });
+      drop.addEventListener('dragleave', function () { drop.classList.remove('is-over'); });
+      drop.addEventListener('drop', function (e) {
+        e.preventDefault(); drop.classList.remove('is-over');
+        if (e.dataTransfer.files.length) {
+          input.files = e.dataTransfer.files;
+          tip.textContent = '已选择：' + e.dataTransfer.files[0].name;
+        }
+      });
+      input.addEventListener('change', function () {
+        if (input.files.length) tip.textContent = '已选择：' + input.files[0].name;
+      });
+    }
+  });
+}
+
+function ledgerClear() {
+  UI.confirm({ title: '清空台账', content: '确定清空当前台账吗？清空后所有主机都将显示为“台账外设备”，需重新导入才能对照。', okText: '清空' })
+    .then(function (ok) {
+      if (!ok) return;
+      API.ledgerClear().then(function (r) {
+        UI.toast('已清空 ' + (r.deleted || 0) + ' 条台账', 'ok');
+        loadLedger();
+      });
+    });
+}
+
 /* ---------- 加载 ---------- */
 function loadAssets() {
   return API.assets().then(function (d) { assets = d || []; renderAssets(); }).catch(function (e) { UI.toast(e.message, 'err'); });
@@ -310,11 +565,16 @@ UI.on('del', function (el) {
     .then(function (ok) { if (ok) API.deleteAsset(key).then(function () { UI.toast('已删除', 'ok'); loadAll(); }); });
 });
 UI.on('scan', scanModal);
+UI.on('ledger-import', ledgerImportModal);
+UI.on('ledger-refresh', function () { UI.toast('正在重新对照…', 'info'); loadLedger(); });
+UI.on('ledger-template', downloadLedgerTemplate);
+UI.on('ledger-clear', ledgerClear);
 
 document.getElementById('fKw').addEventListener('input', renderAssets);
 document.getElementById('fStatus').addEventListener('change', renderAssets);
 document.getElementById('pIp').addEventListener('input', renderPorts);
-document.querySelectorAll('.sm-tab').forEach(function (b) {
+document.getElementById('lKw').addEventListener('input', renderLedger);
+document.querySelectorAll('.sm-tab[data-tab]').forEach(function (b) {
   b.addEventListener('click', function () { switchTab(b.getAttribute('data-tab')); });
 });
 

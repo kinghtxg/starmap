@@ -295,3 +295,21 @@ type Probe struct {
 	LastSeen  time.Time `json:"last_seen"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// ---------- 资产台账对照（V1.7） ----------
+
+// LedgerEntry 人工登记的资产台账条目。
+// 台账是"应该有什么"的权威来源，拓扑是"实际有什么"的观测结果，两者对照得出账实差异。
+type LedgerEntry struct {
+	ID          int64     `json:"id"`
+	IP          string    `json:"ip"` // 必填，台账登记 IP
+	MAC         string    `json:"mac"`
+	Hostname    string    `json:"hostname"`
+	OS          string    `json:"os"`
+	Department  string    `json:"department"`  // 归属单位
+	Owner       string    `json:"owner"`       // 归属人
+	Location    string    `json:"location"`    // 物理位置
+	Description string    `json:"description"` // 备注
+	Batch       string    `json:"batch"`       // 导入批次（文件名）
+	CreatedAt   time.Time `json:"created_at"`
+}

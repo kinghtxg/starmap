@@ -21,6 +21,7 @@ import (
 	"starmap/internal/auth"
 	"starmap/internal/detect"
 	"starmap/internal/ingest"
+	"starmap/internal/ledger"
 	"starmap/internal/model"
 	"starmap/internal/parser"
 	"starmap/internal/probe"
@@ -129,6 +130,11 @@ func NewRouter(d Deps) *gin.Engine {
 		api.GET("/ports", s.listPorts)
 		api.POST("/ports/scan", s.scanPorts)
 		api.GET("/ports/scan/:id", s.scanPortsStatus)
+		// 资产台账对照（V1.7）：台账（应该有什么）vs 拓扑观测（实际有什么）
+		api.GET("/ledger", s.listLedger)
+		api.POST("/ledger/import", s.ledgerImport)
+		api.DELETE("/ledger", s.clearLedger)
+		api.GET("/ledger/diff", s.ledgerDiff)
 		// 探针注册（V1.3：按探针位置归纳拓扑）
 		api.GET("/probes", s.listProbes)
 		api.DELETE("/probes/:id", s.deleteProbe)
@@ -1564,6 +1570,155 @@ func orEmpty(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// ---------- 资产台账对照（V1.7） ----------
+
+// ledgerMaxBytes 台账 CSV 上限（5 万行约 6MB，留一倍余量）。
+const ledgerMaxBytes = 16 << 20
+
+// collectLedgerHosts 把系统已发现的主机整理成对照用的 Host 列表。
+// 以资产库为准（资产库由 AllNodes 同步，已含被聚合网段折叠的主机，见 V1.4 P0），
+// 风险等级从拓扑节点补充——账外设备里"有没有高风险的"才是排查优先级的关键。
+func (s *Server) collectLedgerHosts() []ledger.Host {
+	s.syncAssets()
+	assets, err := s.d.Store.ListAssets("")
+	if err != nil {
+		return nil
+	}
+	risk := map[string]string{}
+	if s.d.Engine != nil {
+		for _, n := range s.d.Engine.AllNodes() {
+			if n.NodeKey != "" {
+				risk[n.NodeKey] = n.RiskLevel
+			}
+		}
+	}
+	offlineSec := s.d.Cfg.ArchiveOfflineSeconds
+	if offlineSec <= 0 {
+		offlineSec = 600
+	}
+	out := make([]ledger.Host, 0, len(assets))
+	for _, a := range assets {
+		out = append(out, ledger.Host{
+			NodeKey:    a.NodeKey,
+			IPs:        a.IPs,
+			MAC:        a.MAC,
+			Hostname:   a.Hostname,
+			OS:         a.OS,
+			Online:     time.Since(a.LastSeen) < time.Duration(offlineSec)*time.Second,
+			Department: a.Department,
+			Owner:      a.Owner,
+			Location:   a.Location,
+			RiskLevel:  risk[a.NodeKey],
+			LastSeen:   a.LastSeen,
+			Archived:   a.Status == model.AssetArchived,
+		})
+	}
+	return out
+}
+
+// ledgerImport 导入台账 CSV。支持三种提交方式（都为"全量替换"语义）：
+//  1. multipart/form-data 带 file 字段（浏览器上传）
+//  2. application/json  {"csv":"...","batch":"..."}（粘贴文本）
+//  3. text/csv 原始正文（curl / 脚本）
+func (s *Server) ledgerImport(c *gin.Context) {
+	if s.d.Store == nil {
+		fail(c, http.StatusServiceUnavailable, "存储未就绪")
+		return
+	}
+	var (
+		rdr   io.Reader = http.MaxBytesReader(c.Writer, c.Request.Body, ledgerMaxBytes)
+		batch           = "手动导入"
+	)
+	switch ct := c.ContentType(); {
+	case strings.HasPrefix(ct, "multipart/form-data"):
+		fh, err := c.FormFile("file")
+		if err != nil {
+			fail(c, http.StatusBadRequest, "缺少 file 字段（请选择 CSV 文件）")
+			return
+		}
+		f, err := fh.Open()
+		if err != nil {
+			fail(c, http.StatusBadRequest, "读取上传文件失败："+err.Error())
+			return
+		}
+		defer f.Close()
+		rdr = f
+		if fh.Filename != "" {
+			batch = fh.Filename
+		}
+	case ct == "application/json":
+		var body struct {
+			CSV   string `json:"csv"`
+			Batch string `json:"batch"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			fail(c, http.StatusBadRequest, "JSON 解析失败："+err.Error())
+			return
+		}
+		rdr = strings.NewReader(body.CSV)
+		if strings.TrimSpace(body.Batch) != "" {
+			batch = body.Batch
+		}
+	}
+
+	entries, st, err := ledger.ParseCSV(rdr, batch)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	n, err := s.d.Store.ReplaceLedger(entries)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, "写入台账失败："+err.Error())
+		return
+	}
+	s.d.Reviewer.Audit(s.actor(c), "ledger_import", batch,
+		fmt.Sprintf("导入 %d 条，跳过 %d 行", n, st.Skipped))
+	c.JSON(http.StatusOK, gin.H{
+		"imported": n,
+		"skipped":  st.Skipped,
+		"rows":     st.Rows,
+		"batch":    batch,
+	})
+}
+
+// listLedger 台账条目列表。
+func (s *Server) listLedger(c *gin.Context) {
+	entries, err := s.d.Store.ListLedger()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []model.LedgerEntry{}
+	}
+	c.JSON(http.StatusOK, gin.H{"entries": entries, "total": len(entries)})
+}
+
+// clearLedger 清空台账。
+func (s *Server) clearLedger(c *gin.Context) {
+	n, err := s.d.Store.ClearLedger()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.d.Reviewer.Audit(s.actor(c), "ledger_clear", "all", fmt.Sprintf("清空 %d 条台账", n))
+	c.JSON(http.StatusOK, gin.H{"deleted": n})
+}
+
+// ledgerDiff 台账 ↔ 拓扑观测 的三方对照（在册在网 / 台账外 / 台账僵尸 / IP 不符）。
+func (s *Server) ledgerDiff(c *gin.Context) {
+	entries, err := s.d.Store.ListLedger()
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	hosts := s.collectLedgerHosts()
+	res := ledger.Diff(entries, hosts)
+	res.Summary.LedgerTotal = len(entries)
+	res.Summary.HostTotal = len(hosts)
+	c.JSON(http.StatusOK, res)
 }
 
 func (s *Server) listAssets(c *gin.Context) {

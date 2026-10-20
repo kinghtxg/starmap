@@ -103,6 +103,16 @@
     // 探针注册（V1.3）
     probes: () => req('GET', '/api/probes'),
     deleteProbe: (id) => req('DELETE', '/api/probes/' + encodeURIComponent(id)),
+    // 资产台账对照（V1.7）
+    ledger: () => req('GET', '/api/ledger'),
+    ledgerDiff: () => req('GET', '/api/ledger/diff'),
+    ledgerImport: (file) => {
+      const fd = new FormData();
+      fd.append('file', file);
+      return req('POST', '/api/ledger/import', fd);
+    },
+    ledgerImportText: (csv, batch) => req('POST', '/api/ledger/import', { csv, batch }),
+    ledgerClear: () => req('DELETE', '/api/ledger'),
   };
 
   global.API = API;

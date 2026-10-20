@@ -357,6 +357,27 @@ document.getElementById('fRisk').addEventListener('change', function () {
 
 /* ---------- 网段清单视图（V1.4）：直接回答"网内结构" ---------- */
 var subnetView = false;
+// V1.7：台账对照结果按 /24 汇总，用于在网段清单里标出"哪个网段的账外机最集中"
+var ledgerUnmanaged = {};   // "10.10.1.0/24" -> 台账外设备数
+var ledgerImported = false; // 是否已导入台账（未导入时不显示"台账外"列，避免全部标红误导）
+
+function cidr24Of(ip) {
+  var p = String(ip || '').split('.');
+  if (p.length !== 4) return '';
+  return p[0] + '.' + p[1] + '.' + p[2] + '.0/24';
+}
+
+function loadLedgerMarks() {
+  return API.ledgerDiff().then(function (d) {
+    ledgerImported = !!(d && d.summary && d.summary.ledger_total > 0);
+    var m = {};
+    ((d && d.unmanaged) || []).forEach(function (x) {
+      var c = cidr24Of(x.ip);
+      if (c) m[c] = (m[c] || 0) + 1;
+    });
+    ledgerUnmanaged = m;
+  }).catch(function () { /* 台账未导入或接口不可用时静默降级 */ });
+}
 
 document.getElementById('btnSubnets').addEventListener('click', function () {
   subnetView = !subnetView;
@@ -376,8 +397,8 @@ function riskBadge(lv) {
 function loadSubnets() {
   var host = document.getElementById('subnetPanel');
   host.innerHTML = '<div style="padding:16px" class="sm-t-3">正在加载网段清单…</div>';
-  return API.subnets().then(function (list) {
-    list = list || [];
+  return Promise.all([API.subnets(), loadLedgerMarks()]).then(function (r) {
+    var list = r[0] || [];
     if (!list.length) {
       host.innerHTML = '<div class="sm-empty" style="padding:48px 16px">尚未发现内网网段。导入流量或开启自动发现后，网段会自动出现。</div>';
       return;
@@ -387,10 +408,15 @@ function loadSubnets() {
       var agg = s.aggregated
         ? '<span class="sm-badge is-brand">已聚合</span>'
         : '<span class="sm-badge">展开</span>';
+      var un = ledgerUnmanaged[s.cidr] || 0;
+      var unCell = ledgerImported
+        ? (un ? '<span class="sm-badge is-danger">' + un + ' 台</span>' : '<span class="sm-t-3">—</span>')
+        : '';
       return '<tr>' +
         '<td><span class="sm-mono">' + UI.esc(s.cidr) + '</span></td>' +
         '<td>' + (s.host_count || 0) + '</td>' +
         '<td>' + (s.online || 0) + '</td>' +
+        (ledgerImported ? '<td>' + unCell + '</td>' : '') +
         '<td><span class="sm-mono sm-t-3">' + UI.esc(s.gateway_mac || '—') + '</span></td>' +
         '<td>' + UI.esc(s.location || '—') + '</td>' +
         '<td>' + riskBadge(s.risk_level) + (s.risk_count ? ' <span class="sm-t-3">×' + s.risk_count + '</span>' : '') + '</td>' +
@@ -401,11 +427,13 @@ function loadSubnets() {
     host.innerHTML =
       '<div class="sm-card-hd" style="padding:14px 16px">' +
         '<div><h2 style="font-size:14px">网段清单</h2>' +
-        '<div class="sm-t-3">共 ' + list.length + ' 个网段 · ' + totalHost + ' 台主机</div></div>' +
+        '<div class="sm-t-3">共 ' + list.length + ' 个网段 · ' + totalHost + ' 台主机' +
+        (ledgerImported ? ' · 台账外设备按网段汇总' : '') + '</div></div>' +
       '</div>' +
       '<div class="sm-card-bd" style="padding:0">' +
       '<table class="sm-table"><thead><tr>' +
-      '<th>网段</th><th>主机数</th><th>在线</th><th>网关 MAC</th><th>探针位置</th><th>最高风险</th><th>状态</th><th></th>' +
+      '<th>网段</th><th>主机数</th><th>在线</th>' + (ledgerImported ? '<th>台账外</th>' : '') +
+      '<th>网关 MAC</th><th>探针位置</th><th>最高风险</th><th>状态</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>';
     Array.prototype.forEach.call(host.querySelectorAll('button[data-cidr]'), function (btn) {
       btn.addEventListener('click', function () {

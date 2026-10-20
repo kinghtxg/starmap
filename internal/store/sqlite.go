@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS probes (
   last_seen DATETIME NOT NULL,
   created_at DATETIME NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ip TEXT NOT NULL DEFAULT '',
+  mac TEXT NOT NULL DEFAULT '',
+  hostname TEXT NOT NULL DEFAULT '',
+  os TEXT NOT NULL DEFAULT '',
+  department TEXT NOT NULL DEFAULT '',
+  owner TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  batch TEXT NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_ip ON ledger(ip);
 `
 
 // Open 打开（不存在则创建）SQLite 数据库并建表。
@@ -1196,4 +1210,65 @@ func (s *Store) ProbeByID(id string) (*model.Probe, error) {
 func (s *Store) DeleteProbe(id string) error {
 	_, err := s.db.Exec(`DELETE FROM probes WHERE probe_id=?`, id)
 	return err
+}
+
+// ---------- 资产台账（V1.7） ----------
+
+const ledgerColumns = `id,ip,mac,hostname,os,department,owner,location,description,batch,created_at`
+
+// ReplaceLedger 全量替换台账（导入语义：一次导入 = 一份权威台账快照）。
+// 使用事务保证"要么全换、要么不动"，避免导入中途失败留下半份台账。
+func (s *Store) ReplaceLedger(entries []model.LedgerEntry) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM ledger`); err != nil {
+		return 0, err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO ledger(ip,mac,hostname,os,department,owner,location,description,batch,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	now := time.Now().UTC()
+	n := 0
+	for i := range entries {
+		e := &entries[i]
+		if _, err := stmt.Exec(e.IP, e.MAC, e.Hostname, e.OS, e.Department, e.Owner, e.Location, e.Description, e.Batch, now); err != nil {
+			return 0, err
+		}
+		n++
+	}
+	return n, tx.Commit()
+}
+
+// ListLedger 返回全部台账条目（按 IP 排序）。
+func (s *Store) ListLedger() ([]model.LedgerEntry, error) {
+	rows, err := s.db.Query(`SELECT ` + ledgerColumns + ` FROM ledger ORDER BY ip`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.LedgerEntry
+	for rows.Next() {
+		var e model.LedgerEntry
+		if err := rows.Scan(&e.ID, &e.IP, &e.MAC, &e.Hostname, &e.OS, &e.Department,
+			&e.Owner, &e.Location, &e.Description, &e.Batch, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ClearLedger 清空台账，返回删除条数。
+func (s *Store) ClearLedger() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM ledger`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
