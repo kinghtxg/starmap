@@ -28,6 +28,14 @@ const (
 	LabelSubnetAgg  = "subnet-agg"   // 子网聚合节点
 	LabelExternalAg = "external-agg" // 公网 /24 外部聚合节点
 	LabelProbe      = "probe"        // 主动探测发现
+
+	// V1.8：七层转发链。
+	// LabelXFFProxy 标记"请求里带 X-Forwarded-For 的转发节点"（nginx/HAProxy/SLB/API 网关）；
+	// LabelXFFClient 标记"只能通过 XFF 还原得知"的客户端——被动侧看不到它的直连流量。
+	LabelXFFProxy  = "xff-proxy"
+	LabelXFFClient = "xff-client"
+	// ProtoXFF 指向"经该代理转发"的关系边（无字节数，仅表达归属/路径）。
+	ProtoXFF = "xff"
 )
 
 // ---------- 稳定节点身份 NodeKey（P0-2） ----------
@@ -494,6 +502,70 @@ func (e *Engine) Ingest(s *model.Session) {
 			}
 		}
 	}
+
+	// 七层转发还原（V1.8）：请求带 X-Forwarded-For 时，真实客户端不在这条会话的
+	// 五元组里。把 XFF 还原出的客户端补成独立节点，并与转发节点连一条 xff 关系边，
+	// 否则"代理后面几百台客户端"在拓扑上完全不存在。
+	if s.RealClientIP != "" {
+		e.applyForwardedLocked(srcID, s.RealClientIP, now)
+	}
+}
+
+// applyForwardedLocked 处理一条转发链（调用方持有 e.mu）。
+// proxyID 是观测到的请求源（转发节点），clientIP 是 XFF 还原出的真实客户端。
+func (e *Engine) applyForwardedLocked(proxyID int64, clientIP string, now time.Time) {
+	// 只处理内网客户端：公网客户端归外网聚合节点，不单独建节点
+	if clientIP == "" || !IsPrivate(clientIP) {
+		return
+	}
+	proxy := e.nodes[proxyID]
+	if proxy == nil {
+		return
+	}
+	// 自我声明（XFF 首跳 == 观测源本身）不算转发关系，交由检测器判可疑；
+	// 若仍建节点会得到一个自己连自己的环。
+	for _, ip := range proxy.IPs {
+		if ip == clientIP {
+			return
+		}
+	}
+	clientID := e.nodeForLocked(clientIP, "", now)
+	if clientID == proxyID {
+		return
+	}
+
+	if !contains(proxy.Labels, LabelXFFProxy) {
+		proxy.Labels = append(proxy.Labels, LabelXFFProxy)
+		e.dirtyNodes[proxyID] = true
+	}
+	if n := e.nodes[clientID]; n != nil && !contains(n.Labels, LabelXFFClient) {
+		n.Labels = append(n.Labels, LabelXFFClient)
+		e.dirtyNodes[clientID] = true
+	}
+
+	// 关系边：client → proxy，无字节数（不是观测到的流量，而是还原出的路径）
+	ek := edgeKeyOf(&model.Edge{SrcID: clientID, DstID: proxyID, Protocol: ProtoXFF})
+	edge, ok := e.edges[ek]
+	if !ok {
+		edge = &model.Edge{
+			ID:        e.nextEdgeID,
+			SrcID:     ek.a,
+			DstID:     ek.b,
+			Protocol:  ProtoXFF,
+			FirstSeen: now,
+			LastSeen:  now,
+			Active:    true,
+		}
+		e.nextEdgeID++
+		e.edges[ek] = edge
+		e.dirtyEdges[ek] = true
+		return
+	}
+	if now.After(edge.LastSeen) {
+		edge.LastSeen = now
+		edge.Active = true
+		e.dirtyEdges[ek] = true
+	}
 }
 
 // nodeForLocked 返回 IP 对应节点 ID（不存在则创建）。
@@ -898,6 +970,17 @@ func isRiskAnchor(n *model.Node) bool {
 	return n.RiskLevel == model.RiskHigh || n.RiskLevel == model.RiskMid
 }
 
+// visibleAsSelf 判断节点是否"必须以自身身份出现在拓扑里"（不参与网段聚合）。
+//
+// 两类：
+//   - 风险锚点（中/高风险）：异常设备被聚合吞掉等于藏起最该看见的那台（V1.6）
+//   - 七层转发节点：它是个结构性的收口点，聚合掉它等于藏起"背后一片客户端"的入口（V1.8）
+//
+// 注意：转发节点不是"异常"，所以不置 Anchor 字段（那是风险语义，前端据此画红虚环）。
+func visibleAsSelf(n *model.Node) bool {
+	return isRiskAnchor(n) || hasLabel(n, LabelXFFProxy)
+}
+
 // aggNodeLocked 构造网段聚合虚拟节点（调用方需持有 e.mu）。
 func (e *Engine) aggNodeLocked(cidr string) (model.Node, bool) {
 	set := e.subnetMembers[cidr]
@@ -955,7 +1038,7 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 					break
 				}
 			}
-			if hidden && !isRiskAnchor(n) {
+			if hidden && !visibleAsSelf(n) {
 				continue
 			}
 		}
@@ -1048,6 +1131,85 @@ func (e *Engine) Subnets() []SubnetInfo {
 		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CIDR < out[j].CIDR })
+	return out
+}
+
+// ProxyInfo 七层转发节点及其背后的真实客户端（V1.8）。
+type ProxyInfo struct {
+	NodeID    int64     `json:"node_id"`
+	IPs       []string  `json:"ips"`
+	MAC       string    `json:"mac"`
+	Clients   int       `json:"clients"`
+	ClientIPs []string  `json:"client_ips"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Active    bool      `json:"active"`
+}
+
+// Proxies 返回全部已识别的七层转发节点，以及经它们转发的真实客户端清单。
+//
+// 从协议为 xff 的关系边推导（而不是另存一份内存表），因此重启后能从持久化边恢复。
+// 用途：回答"这个代理后面到底有多少台设备、都是谁"——这些设备被动侧看不到直连流量。
+func (e *Engine) Proxies() []ProxyInfo {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	byProxy := map[int64]*ProxyInfo{}
+	for _, edge := range e.edges {
+		if edge.Protocol != ProtoXFF {
+			continue
+		}
+		a, b := e.nodes[edge.SrcID], e.nodes[edge.DstID]
+		if a == nil || b == nil {
+			continue
+		}
+		var proxy, client *model.Node
+		switch {
+		case hasLabel(a, LabelXFFProxy):
+			proxy, client = a, b
+		case hasLabel(b, LabelXFFProxy):
+			proxy, client = b, a
+		default:
+			continue
+		}
+		info := byProxy[proxy.ID]
+		if info == nil {
+			info = &ProxyInfo{
+				NodeID:    proxy.ID,
+				IPs:       proxy.IPs,
+				MAC:       proxy.MAC,
+				Active:    proxy.Active,
+				FirstSeen: edge.FirstSeen,
+				LastSeen:  edge.LastSeen,
+			}
+			byProxy[proxy.ID] = info
+		}
+		if len(client.IPs) > 0 {
+			info.ClientIPs = append(info.ClientIPs, client.IPs[0])
+		}
+		if edge.FirstSeen.Before(info.FirstSeen) || info.FirstSeen.IsZero() {
+			info.FirstSeen = edge.FirstSeen
+		}
+		if edge.LastSeen.After(info.LastSeen) {
+			info.LastSeen = edge.LastSeen
+		}
+	}
+
+	out := make([]ProxyInfo, 0, len(byProxy))
+	for _, info := range byProxy {
+		sort.Strings(info.ClientIPs)
+		info.Clients = len(info.ClientIPs)
+		out = append(out, *info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Clients != out[j].Clients {
+			return out[i].Clients > out[j].Clients // 客户端多的排前面
+		}
+		if len(out[i].IPs) == 0 || len(out[j].IPs) == 0 {
+			return out[i].NodeID < out[j].NodeID
+		}
+		return out[i].IPs[0] < out[j].IPs[0]
+	})
 	return out
 }
 
@@ -1208,9 +1370,10 @@ func (e *Engine) visibleMapLocked() map[int64]string {
 					break
 				}
 			}
-			if aggCIDR != "" && !isRiskAnchor(n) {
+			if aggCIDR != "" && !visibleAsSelf(n) {
 				// V1.6：风险锚点不折叠，保持自身身份，从而与两个网段聚合节点同时相连，
 				// 在图上直接呈现"一机跨两网"的拓扑签名。
+				// V1.8：七层转发节点同样常驻，否则聚合会把"代理 + 背后一片客户端"一起吞掉。
 				visible[n.ID] = SubnetNodeID(aggCIDR)
 				continue
 			}

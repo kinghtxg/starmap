@@ -134,6 +134,17 @@ function loadAlerts() {
     .catch(function () { /* 事件接口失败不影响拓扑 */ });
 }
 
+/* ---------- 七层转发（V1.8）：代理节点 → 背后真实客户端 ---------- */
+var proxies = {}; // nodeID(string) -> ProxyInfo
+
+function loadProxies() {
+  return API.proxies().then(function (d) {
+    var m = {};
+    ((d && d.proxies) || []).forEach(function (p) { m[String(p.node_id)] = p; });
+    proxies = m;
+  }).catch(function () { /* 无代理数据时静默降级 */ });
+}
+
 /* ---------- 拓扑构建 ---------- */
 function buildGraph(data, keepView) {
   snapshot = data;
@@ -147,6 +158,7 @@ function buildGraph(data, keepView) {
   topo.setData(data);
   if (!keepView) topo.fit();
   loadAlerts();
+  loadProxies();
 }
 
 function bindTopo() {
@@ -164,6 +176,8 @@ function bindTopo() {
     if (!p || !p.node) { UI.tip.hide(); return; }
     var n = p.node;
     var lv = n.RiskLevel || 'none';
+    var labels = n.Labels || [];
+    var px = proxies[String(n.NumID || n.ID || '')];
     UI.tip.show(
       '<b>' + UI.esc(nodeLabel(n)) + '</b>' +
       '<div class="sm-tip-row"><span>类型</span><span>' + UI.esc(SM.Topo.typeLabel(nodeType(n))) + '</span></div>' +
@@ -172,7 +186,13 @@ function bindTopo() {
       '<div class="sm-tip-row"><span>最后活跃</span><span>' + UI.esc(UI.fmtAgo(n.LastSeen)) + '</span></div>' +
       (isAggNode(n) ? '<div class="sm-tip-row"><span>网段主机</span><span>' + (n.Members || '—') + ' 台</span></div>' : '') +
       (isAggNode(n) ? '<div style="margin-top:4px;opacity:.7">双击下钻子网</div>' : '') +
-      (n.Anchor ? '<div style="margin-top:4px;color:#e34d59">异常锚点 · 未参与网段聚合</div>' : ''),
+      (n.Anchor ? '<div style="margin-top:4px;color:#e34d59">异常锚点 · 未参与网段聚合</div>' : '') +
+      (labels.indexOf('xff-proxy') >= 0
+        ? '<div style="margin-top:4px;color:#7b61ff">七层转发节点 · 背后 ' + ((px && px.clients) || 0) + ' 台客户端</div>'
+        : '') +
+      (labels.indexOf('xff-client') >= 0
+        ? '<div style="margin-top:4px;color:#7b61ff">仅通过 X-Forwarded-For 还原得知</div>'
+        : ''),
       p.x, p.y);
   });
 
@@ -184,6 +204,14 @@ function bindTopo() {
         '<b>' + UI.esc(nodeLabel(nodeCache[p.a] || { ID: p.a })) + ' &rarr; ' + UI.esc(nodeLabel(nodeCache[p.b] || { ID: p.b })) + '</b>' +
         '<div class="sm-tip-row"><span>类型</span><span>网段归属</span></div>' +
         '<div style="margin-top:4px;opacity:.7">由该设备 IP 的 /24 归属推导，链路本身无流量</div>',
+        p.x, p.y);
+      return;
+    }
+    if (e.Protocol === 'xff') {
+      UI.tip.show(
+        '<b>' + UI.esc(nodeLabel(nodeCache[p.a] || { ID: p.a })) + ' &rarr; ' + UI.esc(nodeLabel(nodeCache[p.b] || { ID: p.b })) + '</b>' +
+        '<div class="sm-tip-row"><span>类型</span><span>经代理转发</span></div>' +
+        '<div style="margin-top:4px;opacity:.7">由 X-Forwarded-For 还原：客户端经该节点转发访问，链路本身不是观测到的流量</div>',
         p.x, p.y);
       return;
     }
@@ -211,9 +239,10 @@ function bindTopo() {
 }
 
 function nodeType(n) {
-  if (!topo) return 'unknown';
   if (String(n.ID).indexOf('ext:') === 0) return 'cloud';
   if (isAggNode(n)) return 'subnet';
+  // 普通节点的设备类型来自拓扑布局判定（按连接度数推断），不再一律显示"未知设备"
+  if (topo) return topo.typeOf(String(n.ID));
   return 'unknown';
 }
 
@@ -221,7 +250,10 @@ function nodeType(n) {
 function showDetail(id) {
   var panel = document.getElementById('detailPanel');
   var body = document.getElementById('detailBody');
+  var wasHidden = panel.classList.contains('sm-hide');
   panel.classList.remove('sm-hide');
+  // 侧栏展开挤压画布：重排一次，保持视觉中心（否则图被挤到左侧裁掉）
+  if (wasHidden && topo) requestAnimationFrame(function () { topo.resize(); });
   body.innerHTML = UI.loadingHTML('加载节点详情…');
   API.node(id).then(function (resp) {
     var n = resp.Node || resp;
@@ -258,12 +290,33 @@ function showDetail(id) {
       ? '<div class="sm-stack-sm" style="max-height:240px;overflow:auto">' + peers.map(function (e) {
         var other = e.SrcID === id ? e.DstID : e.SrcID;
         var on = nodeCache[other];
+        // xff 关系边没有字节数，显示"经代理"而不是"0 B"，避免误读成零流量
+        var meta = e.Protocol === 'xff'
+          ? '经代理'
+          : UI.esc(e.Protocol || '-') + ' · ' + UI.esc(UI.fmtBytes(e.Bytes));
         return '<div class="sm-row is-center" style="justify-content:space-between;padding:6px 8px;background:var(--sm-bg-alt);border-radius:3px">' +
           '<span class="sm-mono" style="font-size:12px;color:var(--sm-brand-2);cursor:pointer" data-act="peer" data-id="' + UI.escAttr(other) + '">' +
           UI.esc(on ? nodeLabel(on) : other) + '</span>' +
-          '<span class="sm-t-3" style="font-size:11px">' + UI.esc(e.Protocol || '-') + ' · ' + UI.esc(UI.fmtBytes(e.Bytes)) + '</span></div>';
+          '<span class="sm-t-3" style="font-size:11px">' + meta + '</span></div>';
       }).join('') + '</div>'
       : '<div class="sm-t-3" style="font-size:12px">暂无对端</div>';
+
+    // V1.8：七层转发 —— 代理背后的真实客户端（被动侧看不到它们的直连流量）
+    var px = proxies[String(n.NumID || n.ID || '')];
+    if (px && px.clients) {
+      h += '<div class="sm-divider"></div><div class="sm-label" style="margin-bottom:8px">经代理转发的客户端（' + px.clients + '）</div>' +
+        '<div class="sm-stack-sm" style="max-height:220px;overflow:auto">' +
+        (px.client_ips || []).map(function (cip) {
+          return '<div class="sm-row is-center" style="justify-content:space-between;padding:5px 8px;background:var(--sm-bg-alt);border-radius:3px">' +
+            '<span class="sm-mono" style="font-size:12px;color:#7b61ff">' + UI.esc(cip) + '</span>' +
+            '<span class="sm-t-3" style="font-size:11px">经 X-Forwarded-For 还原</span></div>';
+        }).join('') + '</div>' +
+        '<div class="sm-t-3" style="font-size:11px;margin-top:6px">这些设备被动侧看不到直连流量，只能靠 XFF 还原</div>';
+    }
+    if ((n.Labels || []).indexOf('xff-client') >= 0) {
+      h += '<div class="sm-alert is-info" style="margin-top:12px"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+        '<div class="sm-alert-body">该设备只能通过 X-Forwarded-For 还原得知（位于七层代理之后），网内未观测到它的直连流量。</div></div>';
+    }
 
     body.innerHTML = h;
   }).catch(function (e) {
@@ -339,7 +392,10 @@ UI.on('relayout', function () { if (topo) { topo.relayout(); UI.toast('已重新
 UI.on('back', backToTop);
 UI.on('png', function () { if (topo) { topo.exportPNG(); UI.toast('PNG 已导出', 'ok'); } });
 UI.on('svg', function () { if (topo) { topo.exportSVG(); UI.toast('SVG 已导出', 'ok'); } });
-UI.on('close-detail', function () { document.getElementById('detailPanel').classList.add('sm-hide'); });
+UI.on('close-detail', function () {
+  document.getElementById('detailPanel').classList.add('sm-hide');
+  if (topo) requestAnimationFrame(function () { topo.resize(); });
+});
 UI.on('peer', function (el) { showDetail(el.getAttribute('data-id')); });
 UI.on('topo-reload', load);
 UI.on('ctx-detail', function (el, ctx) { showDetail(ctx.id); });

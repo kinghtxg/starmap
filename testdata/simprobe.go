@@ -43,6 +43,9 @@ type flow struct {
 	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms,omitempty"`
 	FirstSeen           string `json:"first_seen"`
 	LastSeen            string `json:"last_seen"`
+	// 七层转发链（V1.8）：探针自己做 HTTP 解析时可直接上报
+	XFF     []string `json:"xff,omitempty"`
+	XRealIP string   `json:"x_real_ip,omitempty"`
 }
 
 type report struct {
@@ -190,6 +193,36 @@ func probeUnmanaged() report {
 	}
 }
 
+// 场景 5：★ 七层反代转发 —— nginx(10.10.1.101) 把内网门户(10.10.1.100) 暴露出去，
+// 后端只看到 nginx 的 IP，真实客户端只能靠 X-Forwarded-For 还原。
+// 不识别 XFF → 拓扑上只有一台 nginx，后面 3 台客户端完全不可见。
+func probeXFFProxy() report {
+	const proxy = "10.10.1.101"
+	const portal = "10.10.1.100"
+	clients := []struct {
+		ip   string
+		port int
+	}{
+		{"10.10.3.10", 51001},
+		{"10.10.3.11", 51002},
+		{"10.10.3.12", 51003},
+	}
+	var flows []flow
+	for _, c := range clients {
+		f := mkFlow(proxy, portal, "02:00:0a:01:a1:00", c.port, 80, 4000, 12000, 0,
+			flow{HTTPHost: "portal.gov.local", XRealIP: c.ip})
+		f.XFF = []string{c.ip}
+		flows = append(flows, f)
+	}
+	return report{
+		ProbeID:  "probe-gov-internal",
+		Name:     "政务内网核心探针",
+		Location: "政务内网-核心段",
+		Ts:       now.Format(time.RFC3339),
+		Flows:    flows,
+	}
+}
+
 func randStr(n int) string {
 	const cs = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
@@ -229,6 +262,7 @@ func main() {
 		{"政务外网段（正常上网 + clash 代理）", probeGovExternal},
 		{"★ 一机两网违规（同 MAC 跨两个 /24）", probeViolationDualNet},
 		{"账外机（未纳管设备）", probeUnmanaged},
+		{"★ 七层反代转发（XFF 还原真实客户端）", probeXFFProxy},
 	}
 
 	for round := 1; round <= *rounds; round++ {

@@ -115,6 +115,7 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 	candidates = append(candidates, evalReverseProxy(rc)...)
 	candidates = append(candidates, evalUnknownEgress(rc)...)
 	candidates = append(candidates, evalMultiNet(rc)...)
+	candidates = append(candidates, evalXFFSpoof(rc)...)
 
 	whitelist, err := d.Store.ListWhitelist()
 	if err != nil {

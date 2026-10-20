@@ -23,6 +23,7 @@ const (
 	EventTypeReverseProxy  = "reverse_proxy"
 	EventTypeUnknownEgress = "unknown_egress"
 	EventTypeMultiNet      = "multi_net"
+	EventTypeXFFSpoof      = "xff_spoof"
 )
 
 // 风险事件状态
@@ -144,6 +145,13 @@ type Session struct {
 	// Location 来源探针的位置（用于按探针位置归纳拓扑，V1.3）；ProbeID 为来源探针标识。
 	Location string `json:"location,omitempty"`
 	ProbeID  string `json:"probe_id,omitempty"`
+	// 七层转发链（V1.8）：请求经 nginx/HAProxy/SLB/API 网关转发时，
+	// 被动侧只能看到代理 IP，真实客户端只在 X-Forwarded-For 里。
+	// XFF 按链序排列，XFF[0] 为最原始客户端；RealClientIP 为还原结果；ProxyHops 为链长。
+	XFF          []string `json:"xff,omitempty"`
+	XRealIP      string   `json:"x_real_ip,omitempty"`
+	RealClientIP string   `json:"real_client_ip,omitempty"`
+	ProxyHops    int      `json:"proxy_hops,omitempty"`
 }
 
 // RiskEvent 风险事件

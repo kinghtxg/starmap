@@ -40,6 +40,9 @@ type PacketInfo struct {
 	JA4                 string
 	IsLongConn          bool
 	HeartbeatIntervalMs int64
+	// XFF / XRealIP 七层转发链（V1.8）。探针若已解析可直接上报，优先级高于载荷反解。
+	XFF     []string
+	XRealIP string
 	// Location 来源探针的位置（V1.3：按探针位置归纳拓扑）。
 	Location string
 }
@@ -275,6 +278,7 @@ type sessionState struct {
 	lastTs     time.Time
 	helloDone  bool
 	hostDone   bool
+	fwdDone    bool // 已解析过转发头（XFF/X-Real-IP），只解析首批 HTTP 载荷
 }
 
 // Aggregator 内存会话表：按五元组聚合 PacketInfo 为 model.Session。
@@ -399,10 +403,47 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 			ses.HTTPHost = host
 		}
 	}
+	// 七层转发链（V1.8）：探针已解析的直接采用，否则从 HTTP 载荷反解。
+	// XFF 只在请求方向出现，解析一次即可（keep-alive 后续请求不必重复解）。
+	if len(p.XFF) > 0 || p.XRealIP != "" {
+		applyForwarded(ses, p.XFF, p.XRealIP)
+		st.fwdDone = true
+	} else if p.Proto == "tcp" && !st.fwdDone && len(p.Payload) > 0 {
+		if fi := ExtractForwarded(p.Payload); fi.RealClient != "" {
+			st.fwdDone = true
+			applyForwarded(ses, fi.XFF, fi.XRealIP)
+			if ses.HTTPHost == "" && fi.Host != "" {
+				ses.HTTPHost = fi.Host
+				st.hostDone = true
+			}
+		}
+	}
 
 	// 长连接判定
 	if ses.LastSeen.Sub(ses.FirstSeen).Seconds() >= float64(a.LongConnSeconds) {
 		ses.IsLongConn = true
+	}
+}
+
+// applyForwarded 把转发链写入会话（V1.8）。
+// XFF[0] 是最原始客户端；X-Real-IP 作为兜底；ProxyHops = 链长，即请求穿过的代理层数。
+func applyForwarded(ses *model.Session, xff []string, xreal string) {
+	if ses == nil {
+		return
+	}
+	if len(xff) > 0 {
+		ses.XFF = append([]string(nil), xff...)
+		ses.RealClientIP = xff[0]
+		ses.ProxyHops = len(xff)
+	}
+	if xreal != "" {
+		if ses.XRealIP == "" {
+			ses.XRealIP = xreal
+		}
+		if ses.RealClientIP == "" {
+			ses.RealClientIP = xreal
+			ses.ProxyHops = 1
+		}
 	}
 }
 

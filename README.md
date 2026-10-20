@@ -43,6 +43,7 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 - **三路数据接入**：PCAP/PCAPNG 离线导入、多网卡实时抓包（`-tags pcap`）、远端探针上报，统一汇入同一流水线。
 - **拓扑自动测绘（自生长）**：同 MAC 多 IP 合并、`/24` 子网聚合（可下钻）、公网按 `/24` 聚合为外部节点、边老化灰度、降噪、NAT 修复。
 - **异常不隐藏（风险锚点）**：中/高风险节点不参与网段聚合，始终单独呈现（红色虚环）；跨网归属另画虚线归属边，双归属主机会同时连到两个网段聚合节点——**一机两网在拓扑上直接可见**。
+- **七层转发还原（XFF）**：经 nginx / HAProxy / SLB / API 网关转发的请求，被动侧只看得到代理 IP；解析 `X-Forwarded-For` / `X-Real-IP` / RFC 7239 `Forwarded`，把**代理背后被遮蔽的真实客户端**还原成独立节点（紫色虚线表示"经代理转发"），代理节点不参与聚合。这些客户端同样进入资产库与台账对照。
 - **自动发现（可选）**：周期对目标网段做 ARP/ICMP 扫描，让拓扑持续生长；开启 `auto_discovery_follow_discovered` 后**自动跟随流量发现的新网段**（受排除列表与单轮上限约束，防扫描面失控）。默认关闭。
 - **网段清单**：一览全部已发现内网网段（主机数 / 在线 / 网关 MAC / 探针位置 / 最高风险），支持一键下钻。
 - **下钻即拓扑**：进入某个 `/24` 后完整保留网段内主机间链路，并补出其它聚合网段/外部 `/24` 作为上下文节点，看清"网段内谁连谁"与"这个网段往哪出去"。
@@ -162,6 +163,7 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 | POST | `/probe/trigger` | 主动探测（arp/icmp/traceroute） |
 | GET/POST/DELETE | `/ledger` `/ledger/import` `/ledger/clear` | 资产台账：列表 · 导入 CSV · 清空 |
 | GET | `/ledger/diff` | 账实三方对照（在册在网 / 台账外 / 僵尸 / IP 不符） |
+| GET | `/proxies` | 七层转发节点 + 背后真实客户端（XFF 还原） |
 | GET/PUT | `/config` | 配置查询 / 热更新 |
 | GET | `/audit` | 审计日志 |
 
@@ -186,6 +188,11 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 台账外的 6 台里，前 3 台正好是模拟的违规设备——高风险自动排在最前面：
 
 ![ledger](docs/screenshots/ledger.png)
+
+**七层转发还原**：`10.10.1.101` 是模拟的 nginx 反代，后端只看到它。解析 XFF 后，
+背后 3 台客户端（`10.10.3.10-12`）被还原成节点，并与代理连紫色虚线；右侧详情列出全部客户端：
+
+![xff](docs/screenshots/topology-xff.png)
 
 ## 合规声明
 

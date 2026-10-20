@@ -692,6 +692,9 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
 /* V1.6：归属关联边——按 IP 网段推导，无实际流量；虚线 + 品牌色低饱和，避免与流量边混淆 */
 .sm-topo-edge.is-owner { stroke: var(--sm-brand-2); stroke-dasharray: 2 5; opacity: .55; }
 .sm-topo-edge-grp.is-owner:hover .sm-topo-edge.is-owner { opacity: 1; }
+/* V1.8：XFF 转发关系边——客户端经代理访问，本身不是观测到的流量 */
+.sm-topo-edge.is-xff { stroke: #7b61ff; stroke-dasharray: 6 3; opacity: .7; }
+.sm-topo-edge-grp.is-xff:hover .sm-topo-edge.is-xff { opacity: 1; stroke-width: 1.6; }
 .sm-topo-edge.is-hover { stroke: var(--sm-brand-2); }
 .sm-topo-flow { fill: none; stroke: var(--sm-brand-3); stroke-linecap: round; stroke-dasharray: 6 26; opacity: .85; animation: sm-dash 1.4s linear infinite; }
 .sm-topo-edge-grp.is-dim { opacity: .16; }
@@ -716,6 +719,9 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-sm);
 .sm-topo-node.is-anchor .sm-topo-plate { fill: #fff8f8; }
 @keyframes sm-anchor-breathe { 0%, 100% { opacity: .35; } 50% { opacity: .95; } }
 @media (prefers-reduced-motion: reduce) { .sm-topo-anchor-ring { animation: none; opacity: .8; } }
+/* V1.8：只能通过 XFF 还原得知的客户端（位于代理后，被动侧看不到它的直连流量） */
+.sm-topo-xff-ring { fill: none; stroke: #7b61ff; stroke-width: 1; stroke-dasharray: 1 4; opacity: .75; }
+.sm-topo-node.is-xffc .sm-topo-plate { fill: #fbfaff; }
 .sm-topo-node.is-sel .sm-topo-plate { stroke: var(--sm-brand-2); stroke-width: 2; }
 .sm-topo-node.is-sel .sm-topo-sel-ring { opacity: 1; }
 .sm-topo-sel-ring { fill: none; stroke: var(--sm-brand-2); stroke-width: 1.5; opacity: 0; transition: opacity var(--sm-t) var(--sm-ease); stroke-dasharray: 4 3; }

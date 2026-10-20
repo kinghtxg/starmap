@@ -324,6 +324,8 @@
     '.sm-topo-edge{fill:none;stroke:#a9b4c6;stroke-linecap:round;stroke-linejoin:round}' +
     '.sm-topo-edge.is-inactive{stroke:#d4dae2;stroke-dasharray:5 4}' +
     '.sm-topo-edge.is-owner{stroke:#0052d9;stroke-dasharray:2 5;opacity:.55}' +
+    '.sm-topo-edge.is-xff{stroke:#7b61ff;stroke-dasharray:6 3;opacity:.7}' +
+    '.sm-topo-xff-ring{fill:none;stroke:#7b61ff;stroke-width:1;stroke-dasharray:1 4;opacity:.75}' +
     '.sm-topo-plate{fill:#fff;stroke-width:1}' +
     '.sm-topo-glyph{fill:none;stroke:#4b5768;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}' +
     '.sm-topo-glyph .sm-fill{fill:#4b5768;stroke:none}' +
@@ -386,6 +388,7 @@
     var alerts = {};
     var riskFilter = '';
     var tx = 0, ty = 0, k = 1;
+    var lastW = 0; // 上次画布宽度：侧栏开合导致宽度变化时用于保持视觉中心
     var selected = {};
     var hoverId = null;
     var handlers = {};
@@ -451,10 +454,12 @@
         var inactive = e.Active === false;
         // V1.6：归属关联边（按 IP 网段推导，无流量）——虚线细线，不做流光
         var owner = e.Kind === 'owner';
+        // V1.8：XFF 转发关系边——客户端与代理之间，非观测流量
+        var xff = e.Protocol === 'xff';
         var key = 'e' + i;
-        eh += '<g class="sm-topo-edge-grp' + (owner ? ' is-owner' : '') + '" data-edge="' + key + '">' +
-          '<path class="sm-topo-edge' + (owner ? ' is-owner' : (inactive ? ' is-inactive' : '')) + '" d="' + d + '" style="stroke-width:' + (owner ? 1 : w).toFixed(2) + '"/>' +
-          (!owner && !inactive && edges.length <= FLOW_MAX_EDGES && num(e.Bytes) > 0
+        eh += '<g class="sm-topo-edge-grp' + (owner ? ' is-owner' : '') + (xff ? ' is-xff' : '') + '" data-edge="' + key + '">' +
+          '<path class="sm-topo-edge' + (owner ? ' is-owner' : (xff ? ' is-xff' : (inactive ? ' is-inactive' : ''))) + '" d="' + d + '" style="stroke-width:' + (owner || xff ? 1 : w).toFixed(2) + '"/>' +
+          (!owner && !xff && !inactive && edges.length <= FLOW_MAX_EDGES && num(e.Bytes) > 0
             ? '<path class="sm-topo-flow" d="' + d + '" style="stroke-width:' + Math.max(1.2, w * 0.8).toFixed(2) + '"/>' : '') +
           '<path class="sm-topo-edge-hit" d="' + d + '"/>' +
           '</g>';
@@ -493,18 +498,29 @@
         if (label.length > 18) label = label.slice(0, 17) + '…';
         // V1.6：聚合节点显示体量（成员台数）；风险锚点标出"异常"身份
         var anchor = !!n.Anchor;
+        // V1.8：七层转发识别
+        var labels = n.Labels || [];
+        var isProxy = labels.indexOf('xff-proxy') >= 0;
+        var isXffClient = labels.indexOf('xff-client') >= 0;
         var sub;
         if (agg) {
           sub = num(n.Members)
             ? (num(n.Members) + ' 台 · 已聚合')
             : (String(id).indexOf('ext:') === 0 ? '外部网段' : '网段聚合');
-        } else if (anchor) sub = TYPE_LABEL[t.type] + ' · 异常';
-        else sub = TYPE_LABEL[t.type];
+        } else {
+          var tags = [];
+          if (anchor) tags.push('异常');
+          if (isProxy) tags.push('七层转发');
+          if (isXffClient) tags.push('经代理');
+          sub = TYPE_LABEL[t.type] + (tags.length ? ' · ' + tags.join(' · ') : '');
+        }
 
         nh += '<g class="sm-topo-node' + (agg ? ' is-agg' : '') + (anchor ? ' is-anchor' : '') +
+          (isXffClient ? ' is-xffc' : '') +
           (active ? '' : ' is-off') + '" data-id="' + esc(id) + '" transform="translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')">' +
           (agg ? '<rect class="sm-topo-ring" x="-32" y="-32" width="64" height="64" rx="10"/>' : '') +
           (anchor ? '<rect class="sm-topo-anchor-ring" x="-34" y="-34" width="68" height="68" rx="10"/>' : '') +
+          (isXffClient && !anchor ? '<rect class="sm-topo-xff-ring" x="-38" y="-38" width="76" height="76" rx="12"/>' : '') +
           '<rect class="sm-topo-sel-ring" x="-31" y="-31" width="62" height="62" rx="8"/>' +
           '<rect class="sm-topo-plate" x="-26" y="-26" width="52" height="52" rx="6" ' +
           'style="stroke:' + color + ';stroke-width:' + (lvl === 'high' || lvl === 'mid' ? 1.8 : 1.2) + '"/>' +
@@ -557,10 +573,22 @@
 
     function renderLegend() {
       var types = {};
+      var hasAnchor = false, hasAgg = false;
       (data.Nodes || []).forEach(function (n) {
         var t = (geo && geo.info[String(n.ID)]) || { type: 'unknown' };
         types[t.type] = 1;
+        if (n.Anchor) hasAnchor = true;
+        if (isAggNode(n)) hasAgg = true;
       });
+      // 图例按需显示：只列当前图里真实存在的元素，否则条目越加越长，反过来压住图内容
+      var hasBytes = false, hasInactive = false, hasOwner = false, hasXff = false;
+      (data.Edges || []).forEach(function (e) {
+        if (num(e.Bytes) > 0) hasBytes = true;
+        if (e.Active === false) hasInactive = true;
+        if (e.Kind === 'owner') hasOwner = true;
+        if (e.Protocol === 'xff') hasXff = true;
+      });
+
       var h = '<div class="sm-lg-t">设备类型</div>';
       Object.keys(GLYPH).forEach(function (t) {
         if (!types[t]) return;
@@ -572,13 +600,16 @@
         h += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:' + RISK[lv] + '"></span><span>' +
           esc({ high: '高风险', mid: '中风险', low: '低风险', none: '正常' }[lv]) + '</span></div>';
       });
-      h += '<div class="sm-lg-t">链路</div>' +
-        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#a9b4c6;height:3px"></span><span>粗细 = 流量</span></div>' +
-        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 4px,transparent 4px 8px)"></span><span>虚线 = 已老化</span></div>' +
-        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed #8f9aab"></span><span>双环 = 可下钻</span></div>' +
-        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed ' + RISK.high +
-        ';box-shadow:0 0 0 1px rgba(227,77,89,.2)"></span><span>红色虚环 = 异常锚点（不聚合）</span></div>' +
-        '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 2px,transparent 2px 7px);opacity:.6"></span><span>细点线 = 网段归属（非流量）</span></div>';
+
+      var links = '';
+      if (hasBytes) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#a9b4c6;height:3px"></span><span>粗细 = 流量</span></div>';
+      if (hasInactive) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 4px,transparent 4px 8px)"></span><span>虚线 = 已老化</span></div>';
+      if (hasAgg) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed #8f9aab"></span><span>双环 = 可下钻</span></div>';
+      if (hasAnchor) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed ' + RISK.high +
+        ';box-shadow:0 0 0 1px rgba(227,77,89,.2)"></span><span>红色虚环 = 异常锚点（不聚合）</span></div>';
+      if (hasOwner) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 2px,transparent 2px 7px);opacity:.6"></span><span>细点线 = 网段归属</span></div>';
+      if (hasXff) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#7b61ff 0 6px,transparent 6px 9px)"></span><span>紫色虚线 = 经代理转发</span></div>';
+      if (links) h += '<div class="sm-lg-t">链路</div>' + links;
       elLegend.innerHTML = h;
     }
 
@@ -608,6 +639,17 @@
       k = clamp(Math.min(s.w / b.w, s.h / b.h) * 0.92, 0.08, 2.2);
       tx = (s.w - b.w * k) / 2 - b.x * k;
       ty = (s.h - b.h * k) / 2 - b.y * k;
+      lastW = s.w;
+      applyTransform();
+    }
+    // 画布尺寸变化（详情侧栏开合 / 窗口缩放）：保持缩放级别与视觉中心，
+    // 只做平移补偿。否则侧栏一开，图会被挤到左边直接裁掉。
+    function reflow() {
+      var s = size();
+      if (lastW && Math.abs(s.w - lastW) > 1) {
+        tx += (s.w - lastW) / 2;
+      }
+      lastW = s.w;
       applyTransform();
     }
     function zoomAt(cx, cy, factor) {
@@ -999,7 +1041,12 @@
       exportPNG: exportPNG,
       nodeCount: function () { return (data.Nodes || []).length; },
       edgeCount: function () { return (data.Edges || []).length; },
-      resize: function () { applyTransform(); }
+      // 节点在本次布局中被判定出的设备类型（router/switch_/server/pc/cloud/subnet/unknown）
+      typeOf: function (id) {
+        var t = geo && geo.info[String(id)];
+        return (t && t.type) || 'unknown';
+      },
+      resize: function () { reflow(); }
     };
 
     window.addEventListener('resize', function () { updateMiniView(); });

@@ -113,6 +113,8 @@
     },
     ledgerImportText: (csv, batch) => req('POST', '/api/ledger/import', { csv, batch }),
     ledgerClear: () => req('DELETE', '/api/ledger'),
+    // 七层转发识别（V1.8）：代理节点 + 背后真实客户端
+    proxies: () => req('GET', '/api/proxies'),
   };
 
   global.API = API;

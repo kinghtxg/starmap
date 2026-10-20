@@ -135,6 +135,8 @@ func NewRouter(d Deps) *gin.Engine {
 		api.POST("/ledger/import", s.ledgerImport)
 		api.DELETE("/ledger", s.clearLedger)
 		api.GET("/ledger/diff", s.ledgerDiff)
+		// 七层转发识别（V1.8）：代理节点 + 背后真实客户端
+		api.GET("/proxies", s.listProxies)
 		// 探针注册（V1.3：按探针位置归纳拓扑）
 		api.GET("/probes", s.listProbes)
 		api.DELETE("/probes/:id", s.deleteProbe)
@@ -919,6 +921,9 @@ type probeFlow struct {
 	IsLongConn          bool   `json:"is_long_conn"`
 	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms"`
 	Location            string `json:"location"`
+	// 七层转发链（V1.8）：探针自己做 HTTP 解析时可直接上报，优先级高于载荷反解。
+	XFF     []string `json:"xff"`
+	XRealIP string   `json:"x_real_ip"`
 }
 
 // toPackets 将 flow 转成合成上下行报文（长度按字节量折算，保留时间戳）。
@@ -957,6 +962,8 @@ func (f *probeFlow) toPackets(baseTs time.Time) (*parser.PacketInfo, *parser.Pac
 			IsLongConn:          f.IsLongConn,
 			HeartbeatIntervalMs: f.HeartbeatIntervalMs,
 			Location:            f.Location,
+			XFF:                 f.XFF,
+			XRealIP:             f.XRealIP,
 		}
 	}
 	upLen := f.BytesUp
@@ -1719,6 +1726,30 @@ func (s *Server) ledgerDiff(c *gin.Context) {
 	res.Summary.LedgerTotal = len(entries)
 	res.Summary.HostTotal = len(hosts)
 	c.JSON(http.StatusOK, res)
+}
+
+// ---------- 七层转发识别（V1.8） ----------
+
+// listProxies 返回已识别的七层转发节点（nginx/HAProxy/SLB/API 网关）及其背后真实客户端。
+// 这些客户端被动侧看不到直连流量，只能靠 X-Forwarded-For 还原——不识别就等于不存在。
+func (s *Server) listProxies(c *gin.Context) {
+	if s.d.Engine == nil {
+		c.JSON(http.StatusOK, []any{})
+		return
+	}
+	proxies := s.d.Engine.Proxies()
+	if proxies == nil {
+		proxies = []topology.ProxyInfo{}
+	}
+	totalClients := 0
+	for _, p := range proxies {
+		totalClients += p.Clients
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"proxies": proxies,
+		"total":   len(proxies),
+		"clients": totalClients,
+	})
 }
 
 func (s *Server) listAssets(c *gin.Context) {
