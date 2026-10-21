@@ -286,6 +286,43 @@ func TestUnknownAPIReturnsSPA(t *testing.T) {
 	}
 }
 
+// TestConfigSessionLimitsTakeEffect 会话表容量参数改完要立即生效（不用重启）。
+func TestConfigSessionLimitsTakeEffect(t *testing.T) {
+	h := seedHosts(t, "10.80.0.1", "10.80.0.2")
+
+	w := doReq(t, h, "PUT", "/api/config", map[string]any{
+		"session_max_count":       5000,
+		"session_idle_seconds":    120,
+		"session_max_age_seconds": 3600,
+	}, nil)
+	if w.Code != 200 {
+		t.Fatalf("PUT /api/config = %d: %s", w.Code, w.Body.String())
+	}
+	var cfg map[string]any
+	json.Unmarshal(w.Body.Bytes(), &cfg)
+	if cfg["session_max_count"].(float64) != 5000 {
+		t.Fatalf("配置回显未生效: %v", cfg["session_max_count"])
+	}
+
+	// 聚合器应立刻采用新上限
+	w = doReq(t, h, "GET", "/api/stats", nil, nil)
+	var st map[string]any
+	json.Unmarshal(w.Body.Bytes(), &st)
+	if got := st["SessionTable"].(map[string]any)["MaxSessions"].(float64); got != 5000 {
+		t.Fatalf("会话表上限未生效，仍为 %v", got)
+	}
+
+	// 非法值（0 / 负数）应被忽略，不能把上限清零
+	if w = doReq(t, h, "PUT", "/api/config", map[string]any{"session_max_count": 0}, nil); w.Code != 200 {
+		t.Fatalf("非法值不应报错，实际 %d", w.Code)
+	}
+	w = doReq(t, h, "GET", "/api/stats", nil, nil)
+	json.Unmarshal(w.Body.Bytes(), &st)
+	if got := st["SessionTable"].(map[string]any)["MaxSessions"].(float64); got != 5000 {
+		t.Fatalf("0 值不应覆盖已有上限，实际 %v", got)
+	}
+}
+
 // TestProbeOversizeRejected 超大上报体必须被挡在 413，而不是把内存打满。
 func TestProbeOversizeRejected(t *testing.T) {
 	h, _ := newTestRouter(t, testCfg())
