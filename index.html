@@ -324,12 +324,17 @@ bash scripts/e2e.sh</pre>
     <div class="section-head">
       <span class="eyebrow">Screenshots</span>
       <h2 class="sec-title">标准网管拓扑 · 原生桌面质感</h2>
+      <p class="sec-lead">界面与自家「刻本」同一套设计令牌：浅色画布、克制的描边与阴影、动效 120ms。零外网依赖，图标全部内联 SVG。</p>
     </div>
     <div class="shots">
       <figure><img src="screenshots/topology.png" alt="拓扑总览"><figcaption>拓扑总览 —— 分层布局、设备图标、风险三色描边、minimap、下钻</figcaption></figure>
       <figure><img src="screenshots/assets.png" alt="主机资产"><figcaption>主机资产 —— 账外资产发现与归档登记</figcaption></figure>
-      <figure><img src="screenshots/events.png" alt="事件工作台"><figcaption>事件工作台 —— 风险特征打标与复核闭环</figcaption></figure>
+      <figure><img src="screenshots/events.png" alt="事件工作台"><figcaption>风险事件 —— 特征打标与复核闭环（只打标签，不定性）</figcaption></figure>
       <figure><img src="screenshots/ingest.png" alt="数据接入"><figcaption>数据接入 —— PCAP 导入 / 抓包 / 探针 / 主动探测</figcaption></figure>
+      <figure><img src="screenshots/ledger.png" alt="台账对照"><figcaption>台账对照 —— 在册在网 / 台账外设备 / 僵尸 / IP 不符 三方对照</figcaption></figure>
+      <figure><img src="screenshots/topology-xff.png" alt="XFF 还原"><figcaption>七层转发还原 —— 代理背后的真实客户端不再隐身（经代理虚线）</figcaption></figure>
+      <figure><img src="screenshots/topology-drill.png" alt="下钻"><figcaption>网段下钻 —— 保留网段内链路，补出上下文节点</figcaption></figure>
+      <figure><img src="screenshots/login.png" alt="登录"><figcaption>可选门卫 —— 本地账号或 OIDC 单点登录，默认关闭</figcaption></figure>
     </div>
   </div>
 </section>
@@ -356,6 +361,8 @@ bash scripts/e2e.sh</pre>
       <h2 class="sec-title">项目动态</h2>
     </div>
     <div class="news">
+      <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.1.0"><div class="date">2026-10-21</div><div class="t">1.1.0 发布：可观测性、三级门禁与全新界面</div><div class="d">结构化日志 + Prometheus 指标 + viewer/operator/admin 三级写操作门禁；全站 UI 对齐「刻本」设计语言，拓扑新增「代理转发」设备类型。</div></a>
+      <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.0.0"><div class="date">2026-10-21</div><div class="t">1.0.0 定版：从"功能能跑"到"能长期在线跑"</div><div class="d">会话表回收与增量下发、配置持久化修复、运维超时加固；CI 9 个 job 全绿，govulncheck 0 可达漏洞。</div></a>
       <a class="item" href="#"><div class="date">2026-10-15</div><div class="t">StarMap 开源发布：内网资产测绘与账外资产发现引擎</div><div class="d">V1.2 版本发布，覆盖流量测绘、账外资产发现、端口记录、风险打标完整闭环。</div></a>
       <a class="item" href="#"><div class="date">2026-10-14</div><div class="t">V1.0 产品审查完成，P0 整改全部落地</div><div class="d">并发安全、拓扑持久化、安全默认配置等发布阻断项全部修复。</div></a>
     </div>
