@@ -138,6 +138,10 @@ go test -race ./...                                # 需要 cgo（gcc）
 go test ./... -coverpkg=./internal/... -coverprofile=coverage.out
 go test ./internal/parser/ -run '^$' -fuzz=FuzzExtractForwarded -fuzztime=60s
 go test ./internal/topology/ -bench=. -benchmem -run '^$'
+
+# 前端（发布前手动闸门，需 Playwright + msedge）
+python scripts/ui-smoke.py      # 真浏览器跑导航 / 下钻 / 登录 / 角色门禁
+python scripts/shot.py          # 采集 README 截图（顺带收集控制台错误）
 make ci                                            # lint + race + coverage 一条命令
 
 # 生成合成 PCAP 测试数据（5 类场景 → testdata/out/）
