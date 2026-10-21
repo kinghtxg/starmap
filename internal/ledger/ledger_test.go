@@ -16,6 +16,60 @@ const sampleCSV = "\ufeffIP地址, MAC地址, 主机名, 操作系统, 归属单
 	"\n" +
 	"10.0.0.11, , dup, , , , , 重复行\n"
 
+// TestParseCSVStatsConsistent 统计口径必须守恒：数据行数 = 有效 + 跳过。
+//
+// 这个用例来自 fuzz 抓到的真实问题：空行被计入 Rows 却不计入 Valid/Skipped，
+// 前端「共 N 行 / 成功 M / 跳过 K」三个数字对不上，用户会以为导入丢数据了。
+// 行类型覆盖：有效 / IP 非法 / 重复 / 空行 / 列数不齐 / 只有 IP。
+func TestParseCSVStatsConsistent(t *testing.T) {
+	cases := []struct {
+		name string
+		csv  string
+		rows int
+		ok   int
+		skip int
+	}{
+		{
+			name: "含空行",
+			csv:  "ip,mac\n10.0.0.1,aa:bb:cc:dd:ee:01\n\n10.0.0.2,aa:bb:cc:dd:ee:02\n",
+			rows: 2, ok: 2, skip: 0,
+		},
+		{
+			name: "连续空行",
+			csv:  "ip,mac\n\n\n\n10.0.0.1,\n\n",
+			rows: 1, ok: 1, skip: 0,
+		},
+		{
+			name: "非法IP+重复+空行混合",
+			csv:  "ip,mac\n10.0.0.1,\nnot-an-ip,\n\n10.0.0.1,\n10.0.0.3,\n",
+			rows: 4, ok: 2, skip: 2,
+		},
+		{
+			name: "空行在表头与数据之间",
+			csv:  "ip\n\n10.0.0.1\n",
+			rows: 1, ok: 1, skip: 0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			entries, st, err := ParseCSV(strings.NewReader(c.csv), "t")
+			if err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+			if st.Rows != c.rows || st.Valid != c.ok || st.Skipped != c.skip {
+				t.Fatalf("统计不符：rows=%d valid=%d skipped=%d，期望 %d/%d/%d",
+					st.Rows, st.Valid, st.Skipped, c.rows, c.ok, c.skip)
+			}
+			if st.Valid+st.Skipped != st.Rows {
+				t.Fatalf("守恒被破坏：valid(%d)+skipped(%d) != rows(%d)", st.Valid, st.Skipped, st.Rows)
+			}
+			if len(entries) != st.Valid {
+				t.Fatalf("条目数(%d) 应等于 valid(%d)", len(entries), st.Valid)
+			}
+		})
+	}
+}
+
 func TestParseCSVHeaderTolerance(t *testing.T) {
 	entries, st, err := ParseCSV(strings.NewReader(sampleCSV), "台账.xlsx.csv")
 	if err != nil {

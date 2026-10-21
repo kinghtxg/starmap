@@ -141,10 +141,12 @@ func ParseCSV(r io.Reader, batch string) ([]model.LedgerEntry, ParseStats, error
 			st.Skipped++
 			continue
 		}
-		st.Rows++
 		if isBlankRow(rec) {
+			// 空行不是数据行：不计入 Rows，否则 Rows ≠ Valid + Skipped，
+			// 前端展示的"共 N 行、成功 M、跳过 K"会出现对不上的第三个数字。
 			continue
 		}
+		st.Rows++
 		ip := strings.TrimSpace(cell(rec, ipCol))
 		if net.ParseIP(ip) == nil {
 			st.Skipped++

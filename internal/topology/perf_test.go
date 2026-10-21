@@ -119,9 +119,14 @@ func BenchmarkAllNodes10k(b *testing.B) {
 // TestSnapshotScaleBudget 规模预算守卫：1 万节点规模下，单次全量快照必须远快于
 // 2 秒的同步周期，否则同步循环会自我堆积（跑不完一轮就该跑下一轮了）。
 // 阈值取 300ms，是实测值的 10 倍以上余量 —— 只拦数量级恶化，不拦正常抖动。
+//
+// -race 下速度会掉 5~10 倍，耗时断言必然误报，因此跳过（见 raceEnabled）。
 func TestSnapshotScaleBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("规模预算检查在 -short 下跳过")
+	}
+	if raceEnabled {
+		t.Skip("竞态检测模式（-race）下耗时不具参考性，跳过预算断言")
 	}
 	e := buildLargeTopology(t, 10000)
 	if got := len(e.AllNodes()); got < 9000 {
@@ -148,6 +153,9 @@ func TestSnapshotScaleBudget(t *testing.T) {
 func TestProxiesScaleBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("规模预算检查在 -short 下跳过")
+	}
+	if raceEnabled {
+		t.Skip("竞态检测模式（-race）下耗时不具参考性，跳过预算断言")
 	}
 	e := New(benchCfg())
 	now := time.Now()
