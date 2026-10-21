@@ -743,6 +743,18 @@ func (e *Engine) MatchDomain(ip string) string {
 	return e.matchDomainLocked(ip)
 }
 
+// Counts 返回节点/边总数，供指标导出使用。
+//
+// 为什么不直接数 Snapshot().Nodes：Snapshot 会复制每个节点结构体、生成聚合虚拟节点、
+// 组装边列表，1 万节点要几十毫秒；而 /metrics 是周期性抓取（默认 15s），
+// 每次抓取都做一次全量拷贝纯属浪费。这里只读两个 map 的长度，O(1)。
+// 代价是数字含被聚合隐藏的成员节点——正是"实际管了多少台"想要的语义。
+func (e *Engine) Counts() (nodes, edges int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.nodes), len(e.edges)
+}
+
 // GatewayMAC 返回节点的首跳网关 MAC（无则空串）。
 func (e *Engine) GatewayMAC(nodeID int64) string {
 	e.mu.RLock()

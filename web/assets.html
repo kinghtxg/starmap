@@ -5,21 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>主机资产 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">主机资产</h1>
-        <p class="sm-sub">网络资产管理 · 台账对照（账实差异）· 账外资产发现 · 端口记录（流量 + 主动扫描双来源）</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">主机资产</h1>
+          <p class="sm-sub">网络资产管理 · 台账对照（账实差异）· 账外资产发现 · 端口记录（流量 + 主动扫描双来源）</p>
+        </div>
+          <div class="sm-toolbar">
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-grid sm-grid-4 sm-anim" id="statsBar"></div>
@@ -63,7 +68,7 @@
           </div>
           <div class="sm-toolbar">
             <div class="sm-search"><input class="sm-input is-sm" id="pIp" placeholder="按 IP 过滤" data-ico="search"></div>
-            <button class="sm-btn is-primary" data-act="scan" data-ico="target">主动扫描</button>
+            <button class="sm-btn is-primary" data-role="operator" data-act="scan" data-ico="target">主动扫描</button>
           </div>
         </div>
         <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
@@ -98,6 +103,7 @@
       </section>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>
@@ -182,9 +188,9 @@ function renderAssets() {
     var hn = a.hostname ? '<div style="font-size:12px">' + UI.esc(a.hostname) + '</div>' : '';
     var ops = a.status === 'archived'
       ? '<button class="sm-btn is-text is-sm" data-act="edit" data-key="' + UI.escAttr(a.node_key) + '">编辑</button>' +
-        '<button class="sm-btn is-text is-sm is-danger" data-act="del" data-key="' + UI.escAttr(a.node_key) + '">删除</button>'
+        '<button class="sm-btn is-text is-sm is-danger" data-role="admin" data-act="del" data-key="' + UI.escAttr(a.node_key) + '">删除</button>'
       : '<button class="sm-btn is-text is-sm is-primary" data-act="archive" data-key="' + UI.escAttr(a.node_key) + '" data-ip="' + UI.escAttr((a.ips && a.ips[0]) || '') + '">归档登记</button>' +
-        '<button class="sm-btn is-text is-sm is-danger" data-act="del" data-key="' + UI.escAttr(a.node_key) + '">删除</button>';
+        '<button class="sm-btn is-text is-sm is-danger" data-role="admin" data-act="del" data-key="' + UI.escAttr(a.node_key) + '">删除</button>';
     return '<tr>' +
       '<td>' + ips + '</td>' +
       '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(a.mac || '-') + '</span></td>' +

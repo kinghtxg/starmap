@@ -5,28 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>网络域 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">网络域管理</h1>
-        <p class="sm-sub">定义 gov / office / internet / prod 等网络域，多域流量命中将触发「多网域融合」检测</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">网络域管理</h1>
+          <p class="sm-sub">定义 gov / office / internet / prod 等网络域，多域流量命中将触发「多网域融合」检测</p>
+        </div>
+          <div class="sm-toolbar">
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+          <button class="sm-btn is-primary" data-act="create" data-ico="plus">新增网络域</button>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
-        <button class="sm-btn is-primary" data-act="create" data-ico="plus">新增网络域</button>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-anim" style="margin-bottom:12px" id="sumLine"></div>
       <div class="sm-grid sm-grid-auto sm-anim" style="--sm-d:60ms" id="list"></div>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>
@@ -77,7 +83,7 @@ function render() {
       '</div>' +
       '<div class="sm-toolbar">' +
       '<button class="sm-btn is-text is-sm" data-act="edit" data-id="' + UI.escAttr(d.ID) + '" data-ico="edit">编辑</button>' +
-      '<button class="sm-btn is-text is-sm is-danger" data-act="del" data-id="' + UI.escAttr(d.ID) + '" data-ico="trash">删除</button>' +
+      '<button class="sm-btn is-text is-sm is-danger" data-act="del" data-role="admin" data-id="' + UI.escAttr(d.ID) + '" data-ico="trash">删除</button>' +
       '</div></div>' +
       '<div class="sm-card-bd">' +
       '<div class="sm-label" style="margin-bottom:8px">CIDR 列表（' + ((d.CIDRs || []).length) + '）</div>' +

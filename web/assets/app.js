@@ -43,13 +43,17 @@
     warn: 'M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
     inbox: 'M3 12h5l1.5 3h5L16 12h5M3 12l2.5-7h13L21 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z',
     asset: 'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm2 4h2v2H7V7zm4 0h2v2h-2V7zM7 12h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z',
-    port: 'M12 4a8 8 0 0 0-8 8v1M4 13v2m0 0v3a1 1 0 0 0 1 1h1m0 0h12m0 0h1a1 1 0 0 0 1-1v-3m-2 0v-2a8 8 0 0 0-8-8'
+    port: 'M12 4a8 8 0 0 0-8 8v1M4 13v2m0 0v3a1 1 0 0 0 1 1h1m0 0h12m0 0h1a1 1 0 0 0 1-1v-3m-2 0v-2a8 8 0 0 0-8-8',
+    help: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zm-2.2-11.3a2.2 2.2 0 1 1 3.3 1.9c-.7.4-1.1 1-1.1 1.8v.3M12 17h.01',
+    logout: 'M15 17l5-5-5-5M20 12H9M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h6',
+    brand: '<circle cx="12" cy="5.5" r="2.2"/><circle cx="5.5" cy="17" r="2.2"/><circle cx="18.5" cy="17" r="2.2"/><path d="M10.6 7.4 7 15.1M13.4 7.4 17 15.1M7.7 17h8.6"/>'
   };
 
   function ico(name, cls) {
     var d = ICONS[name] || ICONS.info;
+    var inner = d.charAt(0) === '<' ? d : '<path d="' + d + '"/>';
     return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-      'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + d + '"/></svg>';
+      'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + inner + '</svg>';
   }
 
   /* ---------- 转义 ---------- */
@@ -443,24 +447,142 @@
     return p || 'index.html';
   }
 
+  /* ---------- 身份与角色 ---------- */
+  // 角色取自后端 /api/auth/me。未启用认证时后端恒返回 admin（K1：零配置可用）。
+  // data-role 只做界面收敛，真正的拦截在服务端路由上——前端藏起来的按钮，
+  // 用 curl 直接打接口照样会被 403。
+  var ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+  var ROLE_LABEL = { viewer: '只读', operator: '运维', admin: '管理' };
+  var ME = { authenticated: false, mode: 'none', subject: '', display_name: '本机管理员', role: 'admin' };
+
+  function can(role) {
+    var need = ROLE_RANK[role] || 0;
+    var have = ROLE_RANK[ME.role] || 0;
+    return have >= need;
+  }
+
+  function applyRoleGate() {
+    // 把角色写到 <html data-sm-role>，由 CSS 做视觉收敛。
+    //
+    // 为什么用 CSS 而不是 JS 遍历隐藏：表格行、右键菜单、抽屉都是**渲染后才有**的节点，
+    // JS 只在启动时扫一遍的话，后插入的"删除"按钮照样会露出来。
+    // 挂在根节点上的属性选择器对动态节点天然生效，不需要每次渲染完再扫一遍。
+    document.documentElement.setAttribute('data-sm-role', ME.role || 'admin');
+    // 兼容显式声明 data-role 的节点（老页面/第三方片段）
+    Array.prototype.forEach.call(document.querySelectorAll('[data-role]'), function (el) {
+      if (!can(el.getAttribute('data-role'))) el.classList.add('sm-hide');
+    });
+  }
+
+  /* ---------- 顶栏（刻本式：logo + 全局搜索 + 身份） ---------- */
+  function renderTopbar() {
+    var host = document.getElementById('smTopbar');
+    if (!host) return;
+    var html =
+      '<a class="sm-brand" href="index.html" title="StarMap 星图 · 返回拓扑总览">' +
+      '<span class="sm-brand-mark">' + ico('brand') + '</span>' +
+      '<span class="sm-brand-name">星图</span>' +
+      '<span class="sm-brand-en">StarMap</span>' +
+      '</a>' +
+      '<span class="sm-topbar-sep"></span>' +
+      '<div class="sm-gsearch">' + ico('search') +
+      '<input id="smGlobalSearch" type="search" autocomplete="off" placeholder="搜索 IP / MAC / 主机名 / 归属人" aria-label="全局搜索">' +
+      '</div>' +
+      '<div class="sm-topbar-r" id="smTopbarR">' +
+      '<a class="sm-iconbtn" href="about.html" title="关于 StarMap">' + ico('help') + '</a>' +
+      '</div>';
+    host.innerHTML = html;
+
+    var input = document.getElementById('smGlobalSearch');
+    if (input) {
+      input.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        var q = String(input.value || '').trim();
+        // 全局搜索落到资产库（设备是唯一能按 IP / MAC / 归属人统一检索的实体）
+        location.href = 'assets.html' + (q ? '?q=' + encodeURIComponent(q) : '');
+      });
+    }
+    renderUserChip();
+  }
+
+  function renderUserChip() {
+    var host = document.getElementById('smTopbarR');
+    if (!host) return;
+    var old = document.getElementById('smUserChip');
+    if (old) old.remove();
+    var name = ME.display_name || ME.subject || '本机管理员';
+    var initial = String(name).replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').slice(0, 1) || 'A';
+    var chip = document.createElement('div');
+    chip.className = 'sm-userchip';
+    chip.id = 'smUserChip';
+    chip.title = (ME.authenticated ? '已登录：' + (ME.subject || name) : '未启用账号系统（本机模式）') +
+      ' · 角色：' + (ROLE_LABEL[ME.role] || ME.role);
+    chip.innerHTML = '<span class="sm-avatar">' + esc(initial) + '</span>' +
+      '<span class="sm-ellipsis" style="max-width:120px">' + esc(name) + '</span>' +
+      '<span class="sm-role">' + esc(ROLE_LABEL[ME.role] || ME.role) + '</span>' +
+      (ME.authenticated ? ico('logout') : '');
+    if (ME.authenticated) {
+      chip.style.cursor = 'pointer';
+      chip.addEventListener('click', function () {
+        fetch('api/auth/logout', { method: 'POST', credentials: 'same-origin' })
+          .then(function () { location.href = 'login'; })
+          .catch(function () { location.href = 'login'; });
+      });
+    }
+    host.appendChild(chip);
+  }
+
+  function loadMe() {
+    fetch('api/auth/me', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d) return;
+        ME = d;
+        if (!ME.role) ME.role = 'admin';
+        renderUserChip();
+        applyRoleGate();
+      })
+      .catch(function () { /* 未启用认证或接口不可达：保持 admin 默认，不阻断页面 */ });
+  }
+
+  /* ---------- 侧栏（刻本式浅色导航） ---------- */
   function renderSider() {
     var host = document.getElementById('smSider');
     if (!host) return;
     var page = currentPage();
-    var html =
-      '<div class="sm-sider-brand">' +
-      '<div class="sm-sider-logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" ' +
-      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></div>' +
-      '<div><div class="sm-sider-name">StarMap 星图</div><div class="sm-sider-ver">内网拓扑引擎 V1.1</div></div></div>' +
-      '<nav class="sm-sider-nav">';
+    var html = '<nav class="sm-sider-nav">';
     var g = '';
     NAV.forEach(function (n) {
       if (n.group !== g) { g = n.group; html += '<div class="sm-sider-group">' + esc(g) + '</div>'; }
       html += '<a class="sm-navitem' + (n.href === page ? ' is-active' : '') + '" href="' + n.href + '">' +
         ico(n.icon) + '<span>' + esc(n.label) + '</span></a>';
     });
-    html += '</nav><div class="sm-sider-foot">极客星空实验室<br/>Apache-2.0 · 内网离线部署</div>';
+    html += '</nav><div class="sm-sider-foot">极客星空安全实验室<br/>Apache-2.0 · 内网离线部署</div>';
     host.innerHTML = html;
+  }
+
+  /* ---------- 页脚（刻本式版权条） ---------- */
+  function renderFooter() {
+    var main = document.querySelector('.sm-main');
+    if (!main || main.querySelector('.sm-footer')) return;
+    var f = document.createElement('footer');
+    f.className = 'sm-footer';
+    f.innerHTML =
+      '<div class="sm-footer-links">' +
+      '<span>© 2026 极客星空安全实验室</span>' +
+      '<a href="about.html">关于</a>' +
+      '<a href="about.html#privacy">隐私</a>' +
+      '<a href="logs.html">审计</a>' +
+      '<span class="sm-footer-ver" id="smFooterVer">StarMap</span>' +
+      '</div>' +
+      '<div>内网资产测绘与账外资产发现引擎</div>';
+    main.appendChild(f);
+    // 版本号只有一个来源（后端 /api/health），不在每个 HTML 里各写一遍——
+    // 写死副本的必然结局是某次发版后有一个页面显示旧版本号。
+    fetch('api/health').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      var el = document.getElementById('smFooterVer');
+      if (el && d && d.version) el.textContent = 'StarMap v' + d.version;
+    }).catch(function () {});
   }
 
   /* ---------- 启动 ---------- */
@@ -475,7 +597,9 @@
     loadingHTML: loadingHTML, skeletonRows: skeletonRows, emptyHTML: emptyHTML, errorHTML: errorHTML,
     pagerHTML: pagerHTML, countTo: countTo, busy: busy, copy: copy,
     on: on, off: off,
-    renderSider: renderSider, NAV: NAV,
+    renderSider: renderSider, renderTopbar: renderTopbar, renderFooter: renderFooter,
+    loadMe: loadMe, applyRoleGate: applyRoleGate, can: can,
+    me: function () { return ME; }, nav: NAV, NAV: NAV,
     reducedMotion: REDUCED
   };
 
@@ -490,7 +614,11 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    renderTopbar();
     renderSider();
+    renderFooter();
+    applyRoleGate(); // 先按默认 admin 放过，再等 /api/auth/me 回来收紧
+    loadMe();
     decorateIcons();
     // 全局：ESC 关闭浮层
     document.addEventListener('keydown', function (e) {

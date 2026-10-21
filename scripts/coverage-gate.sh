@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PROFILE="${1:-coverage.out}"
-MIN_TOTAL="${2:-65}"
+MIN_TOTAL="${2:-69}"
 
 if [[ ! -f "$PROFILE" ]]; then
   echo "找不到覆盖率文件: $PROFILE" >&2
@@ -40,6 +40,9 @@ CORE_TARGETS=(
   "starmap/internal/review:75"
   "starmap/internal/store:60"
   "starmap/internal/api:55"
+  "starmap/internal/auth:75"
+  "starmap/internal/logging:70"
+  "starmap/internal/metrics:85"
 )
 
 for target in "${CORE_TARGETS[@]}"; do

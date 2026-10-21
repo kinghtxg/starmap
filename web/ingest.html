@@ -5,22 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>数据接入 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">数据接入</h1>
-        <p class="sm-sub">PCAP 离线导入 · 实时抓包 · 主动探测 · 远端探针上报</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">运维</span>
+          <h1 class="sm-h1">数据接入</h1>
+          <p class="sm-sub">PCAP 离线导入 · 实时抓包 · 主动探测 · 远端探针上报</p>
+        </div>
+          <div class="sm-toolbar">
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新状态</button>
+          <a class="sm-btn is-primary" href="index.html" data-ico="topo">查看拓扑</a>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新状态</button>
-        <a class="sm-btn is-primary" href="index.html" data-ico="topo">查看拓扑</a>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-stack">
@@ -53,8 +58,8 @@
               <div class="sm-t-3">多网卡 gopacket 实时采集，需后端配置 capture_interfaces</div>
             </div>
             <div class="sm-toolbar">
-              <button class="sm-btn" data-act="cap-start" data-ico="play">开始抓包</button>
-              <button class="sm-btn is-danger" data-act="cap-stop" data-ico="stop">停止抓包</button>
+              <button class="sm-btn" data-role="operator" data-act="cap-start" data-ico="play">开始抓包</button>
+              <button class="sm-btn is-danger" data-role="operator" data-act="cap-stop" data-ico="stop">停止抓包</button>
             </div>
           </div>
           <div class="sm-card-bd">
@@ -68,7 +73,7 @@
                 <option value="traceroute">Traceroute</option>
               </select>
               <input class="sm-input is-sm sm-flex-1" id="pbTarget" placeholder="目标，如 192.168.1.0/24" style="min-width:200px">
-              <button class="sm-btn is-primary" data-act="probe" data-ico="target">触发探测</button>
+              <button class="sm-btn is-primary" data-role="operator" data-act="probe" data-ico="target">触发探测</button>
             </div>
             <div id="probeResult" style="margin-top:10px"></div>
           </div>
@@ -113,6 +118,7 @@
       </div>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>

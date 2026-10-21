@@ -5,34 +5,39 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>拓扑总览 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">拓扑总览</h1>
-        <p class="sm-sub">自生长拓扑 · 异常锚点不聚合（红虚环）· 双击网段下钻 · 右键快捷操作</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">拓扑总览</h1>
+          <p class="sm-sub">自生长拓扑 · 异常锚点不聚合（红虚环）· 双击网段下钻 · 右键快捷操作</p>
+        </div>
+          <div class="sm-toolbar">
+          <button class="sm-btn is-warn sm-hide" id="btnBack" data-act="back">返回上级</button>
+          <select class="sm-select is-sm sm-w-auto" id="fRisk" aria-label="风险筛选">
+            <option value="">全部风险</option>
+            <option value="high">仅高风险</option>
+            <option value="mid">仅中风险</option>
+            <option value="low">仅低风险</option>
+            <option value="none">仅正常</option>
+          </select>
+          <span class="sm-toolbar-sep"></span>
+          <button class="sm-btn" id="btnRelayout" data-act="relayout" data-ico="layout">重新布局</button>
+          <button class="sm-btn" id="btnRefresh" data-act="refresh" data-ico="refresh">刷新数据</button>
+          <button class="sm-btn" id="btnSubnets" data-ico="grid">网段清单</button>
+          <button class="sm-btn" data-act="png" data-ico="download">导出 PNG</button>
+          <button class="sm-btn" data-act="svg" data-ico="download">导出 SVG</button>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <button class="sm-btn is-warn sm-hide" id="btnBack" data-act="back">返回上级</button>
-        <select class="sm-select is-sm sm-w-auto" id="fRisk" aria-label="风险筛选">
-          <option value="">全部风险</option>
-          <option value="high">仅高风险</option>
-          <option value="mid">仅中风险</option>
-          <option value="low">仅低风险</option>
-          <option value="none">仅正常</option>
-        </select>
-        <span class="sm-toolbar-sep"></span>
-        <button class="sm-btn" id="btnRelayout" data-act="relayout" data-ico="layout">重新布局</button>
-        <button class="sm-btn" id="btnRefresh" data-act="refresh" data-ico="refresh">刷新数据</button>
-        <button class="sm-btn" id="btnSubnets" data-ico="grid">网段清单</button>
-        <button class="sm-btn" data-act="png" data-ico="download">导出 PNG</button>
-        <button class="sm-btn" data-act="svg" data-ico="download">导出 SVG</button>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-grid sm-grid-4 sm-anim" id="statsBar"></div>
@@ -54,6 +59,7 @@
       </div>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>
@@ -241,6 +247,9 @@ function bindTopo() {
 function nodeType(n) {
   if (String(n.ID).indexOf('ext:') === 0) return 'cloud';
   if (isAggNode(n)) return 'subnet';
+  // 带 xff-proxy 标签的节点是七层转发设备。按连接度数推断时它常被判成"终端"，
+  // 详情里写「终端」会把人往"普通主机被代理"的反方向带，这里优先按标签定型。
+  if ((n.Labels || []).indexOf('xff-proxy') >= 0) return 'proxy';
   // 普通节点的设备类型来自拓扑布局判定（按连接度数推断），不再一律显示"未知设备"
   if (topo) return topo.typeOf(String(n.ID));
   return 'unknown';

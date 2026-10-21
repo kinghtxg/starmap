@@ -54,6 +54,36 @@ type idClaims struct {
 	Name              string          `json:"name"`
 	PreferredUsername string          `json:"preferred_username"`
 	Email             string          `json:"email"`
+	// 角色声明：覆盖 OIDC / APSSO / Keycloak / Azure AD 最常见的两种承载方式。
+	// 只认这两种是刻意的——再往上加各种厂商私有字段（realm_access.roles 等）
+	// 会把身份源适配问题变成 StarMap 的维护负担。上游只要能映射成 roles 或 groups 即可。
+	Roles  []string `json:"roles"`
+	Groups []string `json:"groups"`
+}
+
+// roleFromClaims 从身份源声明中解析出 StarMap 角色。
+//
+// 取值顺序：roles 里第一个能识别的 → groups 里第一个能识别的 → 兜底 viewer。
+// **兜底取最小权限**：身份源没配角色时，宁可只读也不默认给写权限。
+// 兼容常见写法（管理员/只读等中文与大小写变体），避免为了一个大小写去改身份源配置。
+func roleFromClaims(c idClaims) string {
+	for _, list := range [][]string{c.Roles, c.Groups} {
+		for _, raw := range list {
+			if r := NormalizeRole(raw); r != "" {
+				return r
+			}
+			// 常见别名：AD/Keycloak 里多带前缀或中文
+			switch strings.ToLower(strings.TrimSpace(raw)) {
+			case "administrator", "starmap-admin", "管理员", "系统管理员":
+				return RoleAdmin
+			case "editor", "writer", "starmap-operator", "操作员", "运维":
+				return RoleOperator
+			case "reader", "readonly", "read-only", "starmap-viewer", "只读", "观察员":
+				return RoleViewer
+			}
+		}
+	}
+	return RoleViewer
 }
 
 func (c idClaims) display() string {

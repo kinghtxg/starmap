@@ -50,9 +50,13 @@ const (
 // LocalUser 本地账号配置（mode=local）。
 // PasswordBcrypt 为 bcrypt 散列；Password 为明文，仅在加载时散列化一次，
 // 用于一键部署场景（脚本无法自行生成 bcrypt），启动时打印 WARN。
+//
+// Role 决定该账号能做什么（viewer < operator < admin，见 roles.go）。
+// 留空时按 operator 处理并打启动告警——既不让人装完就用不了，也不默认给最高权限。
 type LocalUser struct {
 	Username       string `json:"username" yaml:"username"`
 	DisplayName    string `json:"display_name" yaml:"display_name"`
+	Role           string `json:"role" yaml:"role"`
 	PasswordBcrypt string `json:"-" yaml:"password_bcrypt"`
 	Password       string `json:"-" yaml:"password"`
 }
@@ -100,6 +104,67 @@ func Default() Config {
 			TimeoutSeconds: DefaultTimeoutSec,
 		},
 	}
+}
+
+// Merge 把文件里显式写出的字段合并进 base 配置。
+//
+// 为什么需要它：Config 是结构体，config.Load 里那套「零值 = 未设置」的判断对 struct 失效
+// ——只要照搬就必然出现「要么整段覆盖把默认值（会话 TTL、Cookie 名、OIDC scope）清空，
+// 要么干脆不覆盖导致 auth.mode: local 写了等于没写」。
+// 这两种都发生过，所以这里逐字段判空：只有文件里真给了值才改。
+func Merge(base, file Config) Config {
+	out := base
+	if v := strings.TrimSpace(file.Mode); v != "" {
+		out.Mode = v
+	}
+	if file.SessionSecret != "" {
+		out.SessionSecret = file.SessionSecret
+	}
+	if file.SessionTTLSeconds > 0 {
+		out.SessionTTLSeconds = file.SessionTTLSeconds
+	}
+	if file.CookieName != "" {
+		out.CookieName = file.CookieName
+	}
+	// 布尔项没有"未设置"语义：文件写了 true 才生效，false 保持默认（默认也是 false）。
+	if file.CookieSecure {
+		out.CookieSecure = true
+	}
+	if file.CookieDomain != "" {
+		out.CookieDomain = file.CookieDomain
+	}
+	if file.PublicPaths != nil {
+		out.PublicPaths = file.PublicPaths
+	}
+	if len(file.LocalUsers) > 0 {
+		out.LocalUsers = file.LocalUsers
+	}
+	// OIDC：逐字段合并，避免只配 issuer 时把默认 provider 名/scopes 清掉
+	if file.OIDC.Issuer != "" {
+		out.OIDC.Issuer = file.OIDC.Issuer
+	}
+	if file.OIDC.ClientID != "" {
+		out.OIDC.ClientID = file.OIDC.ClientID
+	}
+	if file.OIDC.ClientSecret != "" {
+		out.OIDC.ClientSecret = file.OIDC.ClientSecret
+	}
+	if file.OIDC.RedirectURL != "" {
+		out.OIDC.RedirectURL = file.OIDC.RedirectURL
+	}
+	if len(file.OIDC.Scopes) > 0 {
+		out.OIDC.Scopes = file.OIDC.Scopes
+	}
+	if file.OIDC.ProviderName != "" {
+		out.OIDC.ProviderName = file.OIDC.ProviderName
+	}
+	if file.OIDC.SkipTLSVerify {
+		out.OIDC.SkipTLSVerify = true
+	}
+	if file.OIDC.TimeoutSeconds > 0 {
+		out.OIDC.TimeoutSeconds = file.OIDC.TimeoutSeconds
+	}
+	return out
 }
 
 // Enabled 返回是否启用了认证（mode != none）。

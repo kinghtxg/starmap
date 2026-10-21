@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -23,6 +23,8 @@ import (
 	"starmap/internal/config"
 	"starmap/internal/detect"
 	"starmap/internal/ingest"
+	"starmap/internal/logging"
+	"starmap/internal/metrics"
 	"starmap/internal/model"
 	"starmap/internal/parser"
 	"starmap/internal/probe"
@@ -31,6 +33,17 @@ import (
 	"starmap/internal/topology"
 	"starmap/internal/version"
 )
+
+// die 配置尚未读出来时（logger 还没建好）的致命错误出口。
+// 不用 log.Fatalf：避免一个项目里同时存在两种日志格式。
+func die(msg string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", msg, err)
+	} else {
+		fmt.Fprintln(os.Stderr, msg)
+	}
+	os.Exit(1)
+}
 
 // 默认预置网络域（ACCEPTANCE 8.1）
 var defaultDomains = []model.NetDomain{
@@ -56,17 +69,30 @@ func main() {
 	// 1. 配置
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		die("加载配置失败", err)
 	}
-	// 1.1 校验可选账号系统 / APSSO 配置（默认 none，永远合法）
+	// 1.1 结构化日志：必须在任何业务动作之前，否则早期日志是另一种格式
+	logging.Setup(logging.Options{
+		Level:  cfg.LogLevel,
+		Format: logging.Format(cfg.LogFormat),
+	})
+	slog.Info("StarMap 启动",
+		"version", version.Full(),
+		"config", *cfgPath,
+		"log_level", cfg.LogLevel,
+		"log_format", cfg.LogFormat,
+	)
+	// 1.2 校验可选账号系统 / APSSO 配置（默认 none，永远合法）
 	if err := cfg.Auth.Validate(); err != nil {
-		log.Fatalf("认证配置非法: %v", err)
+		slog.Error("认证配置非法", logging.Err(err))
+		os.Exit(1)
 	}
 
 	// 2. 存储
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("初始化数据库失败: %v", err)
+		slog.Error("初始化数据库失败", logging.Err(err), "db", cfg.DBPath)
+		os.Exit(1)
 	}
 	defer st.Close()
 
@@ -82,7 +108,7 @@ func main() {
 	if ds, err := st.ListDomains(); err == nil && len(ds) == 0 {
 		for _, d := range defaultDomains {
 			if _, err := st.CreateDomain(&d); err != nil {
-				log.Printf("预置网络域 %s 失败: %v", d.Name, err)
+				slog.Warn("预置网络域失败", "domain", d.Name, logging.Err(err))
 			}
 		}
 	}
@@ -95,7 +121,8 @@ func main() {
 	// 3.1 恢复持久化拓扑（P0-2）：ListNodes/ListEdges 载入内存并按原 ID 重建索引，
 	// 保证历史事件的 node_id 与白名单 node 维度在重启后仍指向同一个节点。
 	if err := engine.AttachStore(st); err != nil {
-		log.Fatalf("恢复拓扑失败: %v", err)
+		slog.Error("恢复持久化拓扑失败", logging.Err(err))
+		os.Exit(1)
 	}
 	agg := parser.NewAggregator(cfg.LongConnSeconds, cfg.HeartbeatMaxBytes)
 	// 会话表容量治理（V1.0）：被动抓包是持续输入，必须给会话表设上限与存活期。
@@ -138,7 +165,7 @@ func main() {
 				if cfg.AuditRetentionDays > 0 {
 					cutoff := time.Now().AddDate(0, 0, -cfg.AuditRetentionDays)
 					if n, err := st.DeleteAuditLogsBefore(cutoff); err == nil && n > 0 {
-						log.Printf("[audit] 清理 %d 条超期审计日志", n)
+						slog.Info("清理超期审计日志", "deleted", n, "retention_days", cfg.AuditRetentionDays)
 					}
 				}
 			}
@@ -198,8 +225,9 @@ func main() {
 		go func() {
 			t := time.NewTicker(interval)
 			defer t.Stop()
-			log.Printf("[auto-discovery] 已启用：每 %v 做 %s 扫描（follow_discovered=%v, max=%d）",
-				interval, method, cfg.AutoDiscoveryFollowDiscovered, maxCIDRs)
+			slog.Info("自动发现已启用",
+				"interval", interval.String(), "method", method,
+				"follow_discovered", cfg.AutoDiscoveryFollowDiscovered, "max_cidrs", maxCIDRs)
 			for {
 				select {
 				case <-ctx.Done():
@@ -209,12 +237,12 @@ func main() {
 					for _, cidr := range targets {
 						res, err := scanner.Trigger(method, cidr)
 						if err != nil {
-							log.Printf("[auto-discovery] %s %s 失败: %v", method, cidr, err)
+							slog.Warn("自动发现扫描失败", "method", method, "cidr", cidr, logging.Err(err))
 							continue
 						}
 						if res != nil && len(res.Hosts) > 0 {
-							log.Printf("[auto-discovery] %s %s 发现 %d 台主机",
-								method, cidr, len(res.Hosts))
+							slog.Info("自动发现扫描完成",
+								"method", method, "cidr", cidr, "hosts", len(res.Hosts))
 						}
 					}
 				}
@@ -226,18 +254,57 @@ func main() {
 	// 启动时自动抓包（配置开启时）
 	if cfg.CaptureEnabled && len(cfg.CaptureInterfaces) > 0 {
 		if src, err := ingest.StartCapture(cfg.CaptureInterfaces, cfg.CaptureBPF); err != nil {
-			log.Printf("[capture] 启动失败: %v", err)
+			slog.Error("抓包启动失败", "interfaces", cfg.CaptureInterfaces, logging.Err(err))
 		} else {
 			go func() {
 				for p := range src {
 					agg.Ingest(p)
 				}
 			}()
-			log.Printf("[capture] 已启动: %v", cfg.CaptureInterfaces)
+			slog.Info("抓包已启动", "interfaces", cfg.CaptureInterfaces, "bpf", cfg.CaptureBPF)
 		}
 	}
 
 	// 6. API 服务
+	// 6.1 指标集合：状态类全部用 GaugeFunc 现读现算，不依赖任何"记得推送"的埋点。
+	//     两个 DB 统计走轻量查询（默认 15s 抓一次，代价可忽略）。
+	var met *metrics.Metrics
+	if cfg.MetricsEnabled {
+		met = metrics.New(metrics.Providers{
+			TopologyNodes: func() int {
+				n, _ := engine.Counts()
+				return n
+			},
+			TopologyEdges: func() int {
+				_, e := engine.Counts()
+				return e
+			},
+			SessionsActive: func() int { return agg.Stats().Active },
+			SessionsDropped: func() int64 {
+				return agg.Stats().Dropped
+			},
+			SessionsEvicted: func() int64 {
+				return agg.Stats().Evicted
+			},
+			EventsPending: func() int {
+				evs, err := st.ListEvents(model.EventStatusPending, "")
+				if err != nil {
+					return 0
+				}
+				return len(evs)
+			},
+			AssetsUnmanaged: func() int {
+				as, err := st.ListAssets(model.AssetUnarchived)
+				if err != nil {
+					return 0
+				}
+				return len(as)
+			},
+		})
+		slog.Info("指标导出已启用", "path", "/metrics",
+			"auth", map[bool]string{true: "X-Metrics-Token", false: "admin 会话"}[cfg.MetricsToken != ""])
+	}
+
 	srv := api.NewRouter(api.Deps{
 		Store:      st,
 		Engine:     engine,
@@ -255,6 +322,7 @@ func main() {
 			return st.SetConfigKV("system_config", string(b))
 		},
 		Version: version.String(),
+		Metrics: met,
 	})
 
 	httpSrv := &http.Server{
@@ -270,29 +338,36 @@ func main() {
 		MaxHeaderBytes:    1 << 20, // 1MB，默认 1MB 但显式写死便于审计
 	}
 	go func() {
-		log.Printf("StarMap 星图 %s 就绪 | listen=%s db=%s capture=%v probe=%v",
-			version.Full(), cfg.ListenAddr, cfg.DBPath, cfg.CaptureEnabled, cfg.ProbeEnabled)
+		slog.Info("StarMap 就绪",
+			"version", version.Full(),
+			"listen", cfg.ListenAddr,
+			"db", cfg.DBPath,
+			"capture", cfg.CaptureEnabled,
+			"probe", cfg.ProbeEnabled,
+			"metrics", cfg.MetricsEnabled,
+		)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP 服务失败: %v", err)
+			slog.Error("HTTP 服务异常退出", logging.Err(err))
+			os.Exit(1)
 		}
 	}()
 
 	// 7. 优雅退出
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("正在优雅退出...")
+	sig := <-quit
+	slog.Info("收到退出信号，开始优雅退出", "signal", sig.String())
 	cancel()
 	shCtx, shCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shCancel()
 	_ = httpSrv.Shutdown(shCtx)
 	det.Stop()
 	tickerWG.Wait() // 等会话泵退出，再补最后一轮落盘
-	persistPendingSessions(agg, st)
+	n := persistPendingSessions(agg, st)
 	if err := engine.Flush(); err != nil {
-		log.Printf("[topology] 退出前拓扑落盘失败: %v", err)
+		slog.Error("退出前拓扑落盘失败", logging.Err(err))
 	}
-	log.Println("已退出")
+	slog.Info("已退出", "flushed_sessions", n)
 }
 
 // persistPendingSessions 退出前把「还没落过库」的会话补写一遍，返回写入条数。
@@ -343,7 +418,7 @@ func cleanupOfflineAssets(st *store.Store, eng *topology.Engine, cfg model.Syste
 		removed++
 	}
 	if removed > 0 {
-		log.Printf("[assets] 清理 %d 台离线账外资产", removed)
+		slog.Info("清理离线账外资产", "removed", removed, "offline_hours", cfg.UnarchivedOfflineHours)
 	}
 }
 
@@ -435,6 +510,20 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	cfg.CaptureEnabled = saved.CaptureEnabled
 	cfg.AutoDiscoveryEnabled = saved.AutoDiscoveryEnabled
 	cfg.AutoDiscoveryFollowDiscovered = saved.AutoDiscoveryFollowDiscovered
+	// 可观测性（V1.0）
+	//
+	// 只恢复"后台可改"的三项。metrics_enabled 故意不恢复：
+	// 它决定 /metrics 路由与 Registry 是否创建，属于**启动期**开关，运行时改了也不生效，
+	// 恢复它只会造成"上次点过关，这次看着是关的但实际在跑"的错觉——以配置文件为准。
+	if saved.LogLevel != "" {
+		cfg.LogLevel = saved.LogLevel
+	}
+	if saved.LogFormat != "" {
+		cfg.LogFormat = saved.LogFormat
+	}
+	if saved.MetricsToken != "" {
+		cfg.MetricsToken = saved.MetricsToken
+	}
 }
 
 // ---------- 自动发现：扫描目标计算（V1.5 新网段自动识别） ----------
@@ -460,7 +549,7 @@ func buildScanTargets(cfg model.SystemConfig, eng *topology.Engine, maxN int, kn
 		out = append(out, cidr)
 		if !known[cidr] {
 			known[cidr] = true
-			log.Printf("[auto-discovery] 发现新网段 %s（已纳入扫描）", cidr)
+			slog.Info("发现新网段，已纳入扫描", "cidr", cidr)
 		}
 	}
 
@@ -473,7 +562,7 @@ func buildScanTargets(cfg model.SystemConfig, eng *topology.Engine, maxN int, kn
 		}
 	}
 	if len(out) >= maxN {
-		log.Printf("[auto-discovery] 扫描目标已达单轮上限 %d，其余网段本轮跳过", maxN)
+		slog.Warn("扫描目标已达单轮上限，其余网段本轮跳过", "max_cidrs", maxN)
 	}
 	return out
 }

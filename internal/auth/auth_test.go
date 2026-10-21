@@ -66,7 +66,7 @@ func TestSessionCookieRoundTrip(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	if err := rt.issue(c, "alice", "Alice", ModeLocal); err != nil {
+	if err := rt.issue(c, "alice", "Alice", RoleAdmin, ModeLocal); err != nil {
 		t.Fatal(err)
 	}
 	raw := w.Header().Get("Set-Cookie")
@@ -92,7 +92,7 @@ func TestSessionTamperedCookieRejected(t *testing.T) {
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
-	_ = rt.issue(c, "alice", "Alice", ModeLocal)
+	_ = rt.issue(c, "alice", "Alice", RoleAdmin, ModeLocal)
 	good := (&http.Response{Header: w.Header()}).Cookies()[0]
 	bad := &http.Cookie{Name: good.Name, Value: good.Value + "x"}
 	r := httptest.NewRequest(http.MethodGet, "/", nil)

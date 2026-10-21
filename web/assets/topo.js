@@ -51,6 +51,12 @@
       '<rect x="4.2" y="15.6" width="15.6" height="5" rx="1"/>' +
       '<circle class="sm-fill" cx="7.4" cy="5.9" r=".8"/><circle class="sm-fill" cx="7.4" cy="12" r=".8"/><circle class="sm-fill" cx="7.4" cy="18.1" r=".8"/>' +
       '<path d="M10.6 5.9h6M10.6 12h6M10.6 18.1h6"/>',
+    // 代理转发：一进多出，与"终端"的视觉区分开
+    proxy:
+      '<rect x="2.4" y="9.2" width="7.6" height="5.6" rx="1.2"/>' +
+      '<rect x="14" y="2.6" width="7.6" height="5.6" rx="1.2"/>' +
+      '<rect x="14" y="15.8" width="7.6" height="5.6" rx="1.2"/>' +
+      '<path d="M10 12h2.4v-6.6H14M12.4 12v6.6H14"/>',
     pc:
       '<rect x="2.8" y="4.2" width="18.4" height="12" rx="1.3"/>' +
       '<path d="M9.2 19.6h5.6M12 16.2v3.4"/>',
@@ -68,7 +74,7 @@
   };
   var TYPE_LABEL = {
     router: '路由器', switch_: '交换机', firewall: '防火墙', server: '服务器',
-    pc: '终端', cloud: '外部网络', subnet: '网段聚合', unknown: '未知设备'
+    pc: '终端', proxy: '代理转发', cloud: '外部网络', subnet: '网段聚合', unknown: '未知设备'
   };
   var LAYER_LABEL = ['外部网络', '核心层', '汇聚层', '接入层', '终端层'];
 
@@ -510,9 +516,10 @@
         } else {
           var tags = [];
           if (anchor) tags.push('异常');
-          if (isProxy) tags.push('七层转发');
           if (isXffClient) tags.push('经代理');
-          sub = TYPE_LABEL[t.type] + (tags.length ? ' · ' + tags.join(' · ') : '');
+          // 转发设备直接以「代理转发」定型，不再叠一个"七层转发"标签自我重复
+          var base = isProxy ? '代理转发' : TYPE_LABEL[t.type];
+          sub = base + (tags.length ? ' · ' + tags.join(' · ') : '');
         }
 
         nh += '<g class="sm-topo-node' + (agg ? ' is-agg' : '') + (anchor ? ' is-anchor' : '') +
@@ -524,7 +531,7 @@
           '<rect class="sm-topo-sel-ring" x="-31" y="-31" width="62" height="62" rx="8"/>' +
           '<rect class="sm-topo-plate" x="-26" y="-26" width="52" height="52" rx="6" ' +
           'style="stroke:' + color + ';stroke-width:' + (lvl === 'high' || lvl === 'mid' ? 1.8 : 1.2) + '"/>' +
-          '<g class="sm-topo-glyph" transform="translate(-13.2,-13.2) scale(1.1)">' + (GLYPH[t.type] || GLYPH.unknown) + '</g>' +
+          '<g class="sm-topo-glyph" transform="translate(-13.2,-13.2) scale(1.1)">' + (isProxy ? GLYPH.proxy : (GLYPH[t.type] || GLYPH.unknown)) + '</g>' +
           '<circle class="sm-topo-status" cx="17" cy="17" r="3.6" style="stroke:' + (active ? '#00a870' : '#b6bfcc') + ';fill:' + (active ? '#00a870' : '#d4dae2') + '"/>' +
           (alerts[id] ? '<g class="sm-topo-badge" transform="translate(20,-20)">' +
             '<circle class="sm-topo-badge-bg' + (lvl === 'high' ? '' : ' sm-topo-badge-warn') + '" r="8.5"/>' +
@@ -577,6 +584,8 @@
       (data.Nodes || []).forEach(function (n) {
         var t = (geo && geo.info[String(n.ID)]) || { type: 'unknown' };
         types[t.type] = 1;
+        // 与画布一致：xff-proxy 节点按代理转发画，图例也得列出来，否则图标没有图注
+        if ((n.Labels || []).indexOf('xff-proxy') >= 0) types.proxy = 1;
         if (n.Anchor) hasAnchor = true;
         if (isAggNode(n)) hasAgg = true;
       });

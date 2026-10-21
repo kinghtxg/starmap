@@ -41,6 +41,11 @@ func Default() model.SystemConfig {
 		NmapPath:             "",        // 默认 "nmap"，空则运行时按 "nmap" 探测
 		ScanPorts:            "1-65535", // 主动扫描默认全端口
 		ScanRate:             "T4",      // 扫描速率
+		// 可观测性（V1.0）
+		LogLevel:       "info", // debug|info|warn|error
+		LogFormat:      "text", // text 便于人工排查；生产建议 json（便于日志平台采集）
+		MetricsEnabled: true,   // /metrics 默认开启，但默认只放行 admin 会话或抓取令牌
+		MetricsToken:   "",
 		// 自动发现（V1.4）：默认关闭，政务网等隔离环境需显式开启后才主动发包
 		AutoDiscoveryEnabled: false,
 		AutoDiscoverySec:     1800, // 30 分钟
@@ -68,6 +73,11 @@ func Load(path string) (model.SystemConfig, error) {
 	if err := yaml.Unmarshal(data, &fileCfg); err != nil {
 		return cfg, fmt.Errorf("解析配置文件失败: %w", err)
 	}
+	// 默认值为 true 的开关无法用零值判断"是否显式配置过"，
+	// 因此额外解析一份 key 集合：只有文件里真写了 metrics_enabled: false 才关掉它。
+	var keys map[string]any
+	_ = yaml.Unmarshal(data, &keys)
+	_, hasMetricsEnabled := keys["metrics_enabled"]
 	// 合并：仅覆盖显式设置的字段（零值字段保留默认）
 	if fileCfg.CaptureInterfaces != nil {
 		cfg.CaptureInterfaces = fileCfg.CaptureInterfaces
@@ -108,6 +118,19 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.NmapPath != "" {
 		cfg.NmapPath = fileCfg.NmapPath
+	}
+	// 可观测性（V1.0）
+	if fileCfg.LogLevel != "" {
+		cfg.LogLevel = fileCfg.LogLevel
+	}
+	if fileCfg.LogFormat != "" {
+		cfg.LogFormat = fileCfg.LogFormat
+	}
+	if hasMetricsEnabled {
+		cfg.MetricsEnabled = fileCfg.MetricsEnabled
+	}
+	if fileCfg.MetricsToken != "" {
+		cfg.MetricsToken = fileCfg.MetricsToken
 	}
 	if fileCfg.ScanPorts != "" {
 		cfg.ScanPorts = fileCfg.ScanPorts
@@ -165,5 +188,10 @@ func Load(path string) (model.SystemConfig, error) {
 	// 布尔开关直接采用文件值（默认均为 false）
 	cfg.ProbeEnabled = fileCfg.ProbeEnabled
 	cfg.CaptureEnabled = fileCfg.CaptureEnabled
+	// 可选账号系统 / APSSO（K2）：结构体字段靠 auth.Merge 逐项判空合并。
+	//
+	// 这一行曾经缺失，后果是「在 config.yaml 里写 auth.mode: local 完全没用，
+	// 服务照旧以 mode=none 裸奔，而且没有任何报错」——静默失效的开关比没有开关更危险。
+	cfg.Auth = auth.Merge(cfg.Auth, fileCfg.Auth)
 	return cfg, nil
 }

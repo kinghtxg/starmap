@@ -3,131 +3,119 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 <meta name="robots" content="noindex,nofollow">
 <title>登录 · StarMap 星图</title>
 <style>
-/* StarMap 登录页 · 全内联，零外部资源（内网部署） */
+/* StarMap 登录页 · 全内联，零外部资源（内网部署）
+   设计基准：刻本（book.kinghtxg.com）同一套令牌 —— 浅色画布 + 白卡片 + #3370ff 主色 */
 :root{
-  --brand:#0052D9;            /* 主色：厂商级标准蓝 */
-  --brand-hover:#0043B3;
-  --brand-active:#003C9E;
-  --brand-weak:rgba(0,82,217,.08);
-  --brand-ring:rgba(0,82,217,.16);
-  --ink:#1D2129;              /* 主文本 */
-  --ink-2:#4E5969;            /* 次文本 */
-  --ink-3:#86909C;            /* 辅助/占位 */
-  --line:#DCDEE3;             /* 分隔线 */
-  --line-2:#E5E6EB;
-  --surface:#FFFFFF;
-  --canvas:#F2F3F5;
-  --danger:#D54941;
-  --danger-weak:#FCE8E6;
-  --dark:#0F172A;             /* 品牌侧深色，与产品主色板一致 */
-  --accent:#38BDF8;
-  --radius:8px;
-  --ease:cubic-bezier(.22,.61,.36,1);
+  --brand:#3370ff;            /* 主色：与刻本 --accent 一致 */
+  --brand-hover:#2860e0;
+  --brand-active:#2456c9;
+  --brand-weak:rgba(51,112,255,.08);
+  --brand-ring:rgba(51,112,255,.18);
+  --ink:#1f2329;              /* 主文本 */
+  --ink-2:#646a73;            /* 次文本 */
+  --ink-3:#8f959e;            /* 辅助/占位 */
+  --line:#d0d2d5;             /* 输入框描边 */
+  --line-2:#e5e6e8;           /* 分隔线 / 卡片描边 */
+  --surface:#ffffff;
+  --canvas:#f6f7fa;
+  --danger:#e64545;
+  --danger-weak:#fdf0f0;
+  --radius:6px;
+  --radius-lg:10px;
+  --shadow:0 1px 2px rgba(31,35,41,.06);
+  --shadow-lg:0 8px 24px rgba(31,35,41,.12), 0 20px 48px rgba(31,35,41,.08);
+  --ease:cubic-bezier(.2,0,0,1);
 }
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
   margin:0;
-  font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",Arial,sans-serif;
-  font-size:14px;line-height:1.5;color:var(--ink);
+  font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:14px;line-height:1.55;color:var(--ink);
   background:var(--canvas);
   -webkit-font-smoothing:antialiased;
   display:flex;align-items:center;justify-content:center;
   padding:24px;
-  opacity:0;animation:pageIn .5s var(--ease) forwards;
+  opacity:0;animation:pageIn .4s var(--ease) forwards;
 }
 @keyframes pageIn{from{opacity:0}to{opacity:1}}
 
-/* ---------- 布局 ---------- */
+/* ---------- 布局：单卡片居中（刻本口径） ---------- */
 .shell{
-  width:100%;max-width:960px;min-height:560px;
-  display:grid;grid-template-columns:1.05fr 1fr;
-  background:var(--surface);border:1px solid var(--line-2);border-radius:14px;
-  overflow:hidden;box-shadow:0 2px 6px rgba(15,23,42,.04),0 18px 48px rgba(15,23,42,.10);
-  opacity:0;transform:translateY(14px) scale(.994);
-  animation:cardIn .58s .06s var(--ease) forwards;
+  width:100%;max-width:392px;
+  display:block;
+  background:var(--surface);
+  border:1px solid var(--line-2);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-lg);
+  overflow:hidden;
+  opacity:0;transform:translateY(10px);
+  animation:cardIn .46s .04s var(--ease) forwards;
 }
 @keyframes cardIn{to{opacity:1;transform:none}}
-@media (max-width:860px){
-  .shell{grid-template-columns:1fr;max-width:420px;min-height:0}
-  .brand{display:none}
-}
+.brand{display:none}   /* 旧版深色品牌区已移除，品牌信息收进卡片头部 */
 
-/* ---------- 左侧品牌区 ---------- */
-.brand{
-  position:relative;background:var(--dark);color:#E2E8F0;
-  padding:44px 40px;display:flex;flex-direction:column;justify-content:space-between;overflow:hidden;
+/* ---------- 卡片头部 ---------- */
+.cardhd{
+  display:flex;align-items:center;gap:10px;
+  padding:22px 26px 0;
 }
-.brand canvas{position:absolute;inset:0;width:100%;height:100%;opacity:.55;pointer-events:none}
-.brand::after{
-  content:"";position:absolute;inset:auto -30% -40% -30%;height:60%;
-  background:radial-gradient(60% 100% at 50% 100%,rgba(56,189,248,.20),transparent 70%);
-  pointer-events:none;animation:glow 9s ease-in-out infinite alternate;
+.cardhd .mark{
+  width:30px;height:30px;border-radius:8px;flex:none;
+  display:grid;place-items:center;background:var(--brand);color:#fff;
+  box-shadow:0 1px 3px rgba(51,112,255,.35);
 }
-@keyframes glow{from{opacity:.55}to{opacity:1}}
-.brand > *{position:relative;z-index:1}
-.logo{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:600;letter-spacing:.2px}
-.logo .mark{
-  width:28px;height:28px;border-radius:7px;display:grid;place-items:center;
-  background:linear-gradient(150deg,rgba(56,189,248,.22),rgba(56,189,248,.05));
-  border:1px solid rgba(56,189,248,.35);
-}
-.brand h1{margin:0 0 10px;font-size:22px;font-weight:600;letter-spacing:.3px;color:#F8FAFC}
-.brand p{margin:0;color:#94A3B8;font-size:13px;line-height:1.8;max-width:33em}
-.brand .meta{margin-top:26px;display:flex;flex-direction:column;gap:8px}
-.brand .meta span{
-  display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#64748B;
-}
-.brand .meta i{width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.85}
-.footnote{font-size:12px;color:#475569;border-top:1px solid rgba(148,163,184,.18);padding-top:14px}
+.cardhd .name{font-size:16px;font-weight:700;letter-spacing:.01em}
+.cardhd .en{font-size:10px;color:var(--ink-3);letter-spacing:.1em;text-transform:uppercase;margin-top:1px}
 
-/* ---------- 右侧表单区 ---------- */
-.pane{padding:44px 40px;display:flex;flex-direction:column}
-.pane-inner{width:100%;max-width:300px;margin:auto}
-h2{margin:0 0 6px;font-size:20px;font-weight:600;letter-spacing:.2px}
-.sub{margin:0 0 26px;font-size:13px;color:var(--ink-3)}
+/* ---------- 表单区 ---------- */
+.pane{padding:18px 26px 24px;display:flex;flex-direction:column}
+.pane-inner{width:100%}
+h2{margin:0 0 5px;font-size:20px;font-weight:600;letter-spacing:-.01em}
+.sub{margin:0 0 20px;font-size:13px;color:var(--ink-3)}
 
 .stage{position:relative}
-.panel{transition:opacity .26s var(--ease),transform .26s var(--ease)}
+.panel{transition:opacity .2s var(--ease),transform .2s var(--ease)}
 .panel[hidden]{display:none}
-.panel.enter{animation:panelIn .34s var(--ease) both}
-@keyframes panelIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.panel.enter{animation:panelIn .3s var(--ease) both}
+@keyframes panelIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-.field{margin-bottom:16px}
-.field > label{display:block;font-size:13px;color:var(--ink-2);margin-bottom:6px}
+.field{margin-bottom:14px}
+.field > label{display:block;font-size:12px;color:var(--ink-2);margin-bottom:6px;font-weight:500}
 .control{position:relative}
 input[type=text],input[type=password]{
-  width:100%;height:40px;padding:0 38px 0 12px;font:inherit;font-size:14px;color:var(--ink);
+  width:100%;height:38px;padding:0 38px 0 11px;font:inherit;font-size:14px;color:var(--ink);
   background:#fff;border:1px solid var(--line);border-radius:var(--radius);
-  outline:none;transition:border-color .16s var(--ease),box-shadow .16s var(--ease),background .16s var(--ease);
+  outline:none;transition:border-color .12s var(--ease),box-shadow .12s var(--ease);
 }
-input::placeholder{color:var(--ink-3)}
-input:hover{border-color:#C3C6CE}
-input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-ring);background:#fff}
+input::placeholder{color:#b4b9bf}
+input:hover{border-color:#b9bdc4}
+input:focus{border-color:var(--brand);box-shadow:0 0 0 3px var(--brand-ring)}
 input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
 .toggle{
-  position:absolute;right:6px;top:50%;transform:translateY(-50%);
+  position:absolute;right:5px;top:50%;transform:translateY(-50%);
   width:28px;height:28px;border:0;background:transparent;color:var(--ink-3);
-  border-radius:6px;cursor:pointer;display:grid;place-items:center;
-  transition:color .16s var(--ease),background .16s var(--ease);
+  border-radius:var(--radius);cursor:pointer;display:grid;place-items:center;
+  transition:color .12s var(--ease),background .12s var(--ease);
 }
 .toggle:hover{color:var(--ink-2);background:var(--brand-weak)}
-.toggle:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
+.toggle:focus-visible{outline:none;box-shadow:var(--brand-ring) 0 0 0 3px}
 
 .btn{
-  width:100%;height:40px;margin-top:4px;border:0;border-radius:var(--radius);
+  width:100%;height:38px;margin-top:6px;border:1px solid var(--brand);border-radius:var(--radius);
   font:inherit;font-size:14px;font-weight:500;color:#fff;cursor:pointer;
   background:var(--brand);
   display:inline-flex;align-items:center;justify-content:center;gap:8px;
-  transition:background .16s var(--ease),transform .12s var(--ease),box-shadow .16s var(--ease);
+  transition:background .12s var(--ease),transform .12s var(--ease),box-shadow .12s var(--ease);
 }
-.btn:hover{background:var(--brand-hover);box-shadow:0 4px 12px rgba(0,82,217,.22)}
+.btn:hover{background:var(--brand-hover);border-color:var(--brand-hover);box-shadow:0 2px 8px rgba(51,112,255,.28)}
 .btn:active{background:var(--brand-active);transform:translateY(1px)}
-.btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
-.btn[disabled]{opacity:.7;cursor:progress;box-shadow:none}
+.btn:focus-visible{outline:none;box-shadow:0 0 0 3px var(--brand-ring)}
+.btn[disabled]{opacity:.75;cursor:progress;box-shadow:none}
 .btn.ghost{
   background:#fff;color:var(--brand);border:1px solid var(--line);
 }
@@ -141,7 +129,7 @@ input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 .alert{
-  min-height:20px;margin:0 0 12px;font-size:13px;color:var(--danger);
+  min-height:20px;margin:0 0 10px;font-size:13px;color:var(--danger);
   opacity:0;transform:translateY(-2px);transition:opacity .2s var(--ease),transform .2s var(--ease);
 }
 .alert.show{opacity:1;transform:none}
@@ -153,18 +141,25 @@ input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
 .alert.info{color:var(--ink-2)}
 
 .divider{
-  display:flex;align-items:center;gap:10px;margin:20px 0 14px;
+  display:flex;align-items:center;gap:10px;margin:18px 0 12px;
   color:var(--ink-3);font-size:12px;
 }
 .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line-2)}
-.hint{font-size:12px;color:var(--ink-3);line-height:1.8;margin:14px 0 0}
+.hint{font-size:12px;color:var(--ink-3);line-height:1.8;margin:12px 0 0}
 .hint a{color:var(--brand);text-decoration:none}
 .hint a:hover{text-decoration:underline}
 .badge{
-  display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;margin-bottom:14px;
+  display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;margin-bottom:12px;
   border-radius:4px;background:var(--brand-weak);color:var(--brand);font-size:12px;
 }
-.tips{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-2);font-size:12px;color:var(--ink-3);line-height:1.8}
+.tips{margin-top:16px;padding-top:14px;border-top:1px solid var(--line-2);font-size:12px;color:var(--ink-3);line-height:1.8}
+.cardft{
+  margin-top:18px;padding-top:12px;border-top:1px solid var(--line-2);
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  font-size:11px;color:var(--ink-3);flex-wrap:wrap;
+}
+.cardft a{color:var(--ink-3);text-decoration:none}
+.cardft a:hover{color:var(--brand)}
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
@@ -172,35 +167,21 @@ input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
 </head>
 <body>
 <main class="shell">
-  <!-- 左：品牌区 -->
-  <section class="brand">
-    <canvas id="bg" aria-hidden="true"></canvas>
-    <div>
-      <div class="logo">
-        <span class="mark" aria-hidden="true">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="2.4" fill="#38BDF8"/>
-            <circle cx="2.6" cy="3.4" r="1.3" fill="#7DD3FC" opacity=".85"/>
-            <circle cx="13.4" cy="4.2" r="1.1" fill="#7DD3FC" opacity=".7"/>
-            <circle cx="3.2" cy="12.6" r="1.1" fill="#7DD3FC" opacity=".7"/>
-            <path d="M8 8 2.6 3.4M8 8l5.4-3.8M8 8 3.2 12.6" stroke="#38BDF8" stroke-width=".9" opacity=".55"/>
-          </svg>
-        </span>
-        StarMap 星图
-      </div>
-      <h1 style="margin-top:30px">网内拓扑自动测绘引擎</h1>
-      <p>被动感知网内流量，自动测绘资产拓扑，对可疑行为<strong style="color:#CBD5E1;font-weight:600">只打标签、不定性</strong>。</p>
-      <div class="meta">
-        <span><i></i>PCAP 导入 · 网卡抓包 · 远端探针</span>
-        <span><i></i>五类风险规则 · 复核闭环 · 全量审计</span>
-        <span><i></i>单二进制分发 · 无外网依赖</span>
-      </div>
-    </div>
-    <div class="footnote">© 极客星空实验室 · Apache-2.0<br>请仅在获得授权的网络环境中使用。</div>
-  </section>
-
   <!-- 右：认证区 -->
   <section class="pane">
+    <div class="cardhd">
+      <span class="mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="5.5" r="2.2"/><circle cx="5.5" cy="17" r="2.2"/><circle cx="18.5" cy="17" r="2.2"/>
+          <path d="M10.6 7.4 7 15.1M13.4 7.4 17 15.1M7.7 17h8.6"/>
+        </svg>
+      </span>
+      <div>
+        <div class="name">星图</div>
+        <div class="en">StarMap</div>
+      </div>
+    </div>
     <div class="pane-inner">
       <h2 id="title">登录</h2>
       <p class="sub" id="subtitle">正在读取认证配置…</p>
@@ -259,7 +240,12 @@ input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
         </div>
       </div>
 
-      <div class="tips" id="tips">登录仅用于访问控制与审计留痕，<br>不影响任何检测、拓扑与风险判定。</div>
+      <div class="tips" id="tips">登录仅用于访问控制与审计留痕，不影响任何检测、拓扑与风险判定。</div>
+
+      <div class="cardft">
+        <span>© 2026 极客星空安全实验室</span>
+        <span id="ver">StarMap</span>
+      </div>
     </div>
   </section>
 </main>
@@ -449,6 +435,13 @@ input:disabled{background:var(--canvas);color:var(--ink-3);cursor:not-allowed}
     });
   })();
 })();
+
+/* 版本号唯一来源是 /api/health，登录页也拉一次——
+   写死副本必然在下次发版后显示旧版本（这里就曾显示 v1.0）。 */
+fetch('/api/health').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+  var el = document.getElementById('ver');
+  if (el && d && d.version) el.textContent = 'StarMap v' + d.version;
+}).catch(function () {});
 </script>
 </body>
 </html>

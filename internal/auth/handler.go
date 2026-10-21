@@ -30,9 +30,20 @@ func RegisterRoutes(r gin.IRouter, cfg Config) {
 
 func registerRoutes(r gin.IRouter, rt *runtime) {
 	if !rt.cfg.Enabled() {
-		// K1：未启用时只暴露一个只读的模式查询端点，行为与 V1.0 一致。
+		// K1：未启用时只暴露两个只读端点，行为与 V1.0 一致。
 		r.GET("/api/auth/config", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"mode": ModeNone, "enabled": false})
+		})
+		// /api/auth/me 由本包独占（不要在 api 包里再注册一次，Gin 会对同一路径 panic）。
+		// 未启用认证时恒为 admin：K1「零配置可用」的语义——本机就是最高权限。
+		r.GET("/api/auth/me", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{
+				"authenticated": false,
+				"mode":          ModeNone,
+				"subject":       "",
+				"display_name":  "本机管理员",
+				"role":          RoleAdmin,
+			})
 		})
 		return
 	}
@@ -113,11 +124,14 @@ func localLogin(rt *runtime) gin.HandlerFunc {
 		if name == "" {
 			name = u.Username
 		}
-		if err := rt.issue(c, u.Username, name, ModeLocal); err != nil {
+		role := resolveLocalRole(u)
+		if err := rt.issue(c, u.Username, name, role, ModeLocal); err != nil {
 			failJSON(c, http.StatusInternalServerError, "会话签发失败")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"ok": true, "subject": u.Username, "display_name": name})
+		c.JSON(http.StatusOK, gin.H{
+			"ok": true, "subject": u.Username, "display_name": name, "role": role,
+		})
 	}
 }
 
@@ -208,7 +222,8 @@ func oidcCallback(rt *runtime) gin.HandlerFunc {
 			errorPage(c, http.StatusServiceUnavailable, "身份校验失败", err.Error())
 			return
 		}
-		if err := rt.issue(c, claims.Sub, claims.display(), ModeOIDC); err != nil {
+		role := roleFromClaims(claims)
+		if err := rt.issue(c, claims.Sub, claims.display(), role, ModeOIDC); err != nil {
 			errorPage(c, http.StatusInternalServerError, "会话签发失败", err.Error())
 			return
 		}
@@ -241,6 +256,7 @@ func me(rt *runtime) gin.HandlerFunc {
 			"mode":          rt.cfg.Mode,
 			"subject":       claims.Sub,
 			"display_name":  claims.Name,
+			"role":          claims.Role,
 			"via":           claims.Via,
 		})
 	}
@@ -288,14 +304,31 @@ func failJSON(c *gin.Context, code int, msg string) {
 }
 
 // errorPage 面向浏览器的错误页（内网环境，无外部资源）。
+// 视觉与刻本口径的登录页一致：浅色画布 + 白卡片 + 蓝色主按钮，不做深色另类风格。
 func errorPage(c *gin.Context, code int, title, detail string) {
-	body := fmt.Sprintf(`<!doctype html><meta charset="utf-8"><title>%s</title>
-<style>body{background:#0F172A;color:#E2E8F0;font-family:system-ui,"Segoe UI","Microsoft YaHei",sans-serif;
-display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-.box{background:#1E293B;border:1px solid rgba(56,189,248,.25);border-radius:14px;padding:32px 36px;max-width:440px}
-h1{font-size:18px;margin:0 0 12px;color:#F87171}p{margin:0 0 18px;color:#94A3B8;font-size:13px;line-height:1.7}
-a{color:#38BDF8;text-decoration:none;font-size:14px}</style>
-<div class="box"><h1>%s</h1><p>%s</p><a href="/login">返回登录页</a></div>`,
+	body := fmt.Sprintf(`<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>%s · 星图</title>
+<style>
+:root{--accent:#3370ff;--canvas:#f6f7fa;--panel:#fff;--border:#e5e6e8;--text:#1f2329;--text-2:#646a73;--danger:#e64545;
+--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+background:var(--canvas);color:var(--text);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased}
+.box{width:100%%;max-width:440px;background:var(--panel);border:1px solid var(--border);border-radius:10px;
+padding:32px;box-shadow:0 4px 16px rgba(31,35,41,.06)}
+.mark{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+.mark i{width:32px;height:32px;border-radius:8px;background:var(--accent);display:flex;align-items:center;
+justify-content:center;color:#fff;font-style:normal;font-size:15px;font-weight:600}
+.mark span{font-size:15px;font-weight:600}
+h1{font-size:20px;line-height:1.4;margin:0 0 8px;font-weight:600;color:var(--danger)}
+p{margin:0 0 24px;color:var(--text-2);font-size:13px;line-height:1.8;word-break:break-word}
+a{display:inline-flex;align-items:center;height:34px;padding:0 16px;border-radius:6px;background:var(--accent);
+color:#fff;text-decoration:none;font-size:13px;transition:background .12s}
+a:hover{background:#2860e0}
+</style>
+<div class="box"><div class="mark"><i>星</i><span>星图 StarMap</span></div>
+<h1>%s</h1><p>%s</p><a href="/login">返回登录页</a></div>`,
 		html.EscapeString(title), html.EscapeString(title), html.EscapeString(detail))
 	c.Data(code, "text/html; charset=utf-8", []byte(body))
 }

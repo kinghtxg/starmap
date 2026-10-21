@@ -5,22 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>审计日志 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">审计日志</h1>
-        <p class="sm-sub">GET /api/audit · 事件复核、白名单变更、配置变更等全部操作留痕</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">运维</span>
+          <h1 class="sm-h1">审计日志</h1>
+          <p class="sm-sub">GET /api/audit · 事件复核、白名单变更、配置变更等全部操作留痕</p>
+        </div>
+          <div class="sm-toolbar">
+          <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="关键字过滤…" data-ico="search"></div>
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <div class="sm-search"><input class="sm-input is-sm" id="kw" placeholder="关键字过滤…" data-ico="search"></div>
-        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-card sm-anim" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
@@ -38,6 +43,7 @@
       </div>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>

@@ -5,38 +5,43 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>风险事件 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">风险事件</h1>
-        <p class="sm-sub">确认风险 → 归档 · 判定误报 → 自动加白 · 暂缓处置</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">风险事件</h1>
+          <p class="sm-sub">确认风险 → 归档 · 判定误报 → 自动加白 · 暂缓处置</p>
+        </div>
+          <div class="sm-toolbar">
+          <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索标题 / 节点" data-ico="search"></div>
+          <select class="sm-select is-sm sm-w-auto" id="fStatus" aria-label="状态">
+            <option value="">全部状态</option>
+            <option value="pending" selected>待处置</option>
+            <option value="confirmed">已确认</option>
+            <option value="false_positive">误报</option>
+            <option value="deferred">已暂缓</option>
+          </select>
+          <select class="sm-select is-sm sm-w-auto" id="fType" aria-label="类型">
+            <option value="">全部类型</option>
+            <option value="frp">FRP 隧道</option>
+            <option value="clash">Clash/V2Ray</option>
+            <option value="reverse_proxy">反向代理</option>
+            <option value="unknown_egress">未知出口</option>
+            <option value="multi_net">多网域融合</option>
+          </select>
+          <button class="sm-btn is-primary" data-act="query" data-ico="search">查询</button>
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <div class="sm-search"><input class="sm-input is-sm" id="fKw" placeholder="搜索标题 / 节点" data-ico="search"></div>
-        <select class="sm-select is-sm sm-w-auto" id="fStatus" aria-label="状态">
-          <option value="">全部状态</option>
-          <option value="pending" selected>待处置</option>
-          <option value="confirmed">已确认</option>
-          <option value="false_positive">误报</option>
-          <option value="deferred">已暂缓</option>
-        </select>
-        <select class="sm-select is-sm sm-w-auto" id="fType" aria-label="类型">
-          <option value="">全部类型</option>
-          <option value="frp">FRP 隧道</option>
-          <option value="clash">Clash/V2Ray</option>
-          <option value="reverse_proxy">反向代理</option>
-          <option value="unknown_egress">未知出口</option>
-          <option value="multi_net">多网域融合</option>
-        </select>
-        <button class="sm-btn is-primary" data-act="query" data-ico="search">查询</button>
-        <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-card sm-anim" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
@@ -54,6 +59,7 @@
       </div>
     </div>
   </main>
+  </div>
 </div>
 
 <!-- 详情抽屉：操作按钮统一置于底部 -->
@@ -197,9 +203,9 @@ function openDrawer(id) {
   document.getElementById('drawerFt').innerHTML =
     '<input class="sm-input is-sm sm-w-auto" id="rvReviewer" placeholder="操作人" style="min-width:100px">' +
     '<input class="sm-input is-sm" id="rvNote" placeholder="处置备注（必填）" style="flex:1">' +
-    '<button class="sm-btn is-danger" data-act="review" data-v="confirm">确认归档</button>' +
-    '<button class="sm-btn is-warn" data-act="review" data-v="false_positive">误报加白</button>' +
-    '<button class="sm-btn" data-act="review" data-v="defer">暂缓</button>';
+    '<button class="sm-btn is-danger" data-role="operator" data-act="review" data-v="confirm">确认归档</button>' +
+    '<button class="sm-btn is-warn" data-role="operator" data-act="review" data-v="false_positive">误报加白</button>' +
+    '<button class="sm-btn" data-role="operator" data-act="review" data-v="defer">暂缓</button>';
 
   UI.openDrawer('drawer');
 }

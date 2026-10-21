@@ -235,6 +235,15 @@ type SystemConfig struct {
 	SessionIdleSeconds int64 `json:"session_idle_seconds" yaml:"session_idle_seconds"`
 	// SessionMaxAgeSeconds 单会话最长存活（默认 21600 秒 = 6 小时），防不关闭的长连接撑爆。
 	SessionMaxAgeSeconds int64 `json:"session_max_age_seconds" yaml:"session_max_age_seconds"`
+	// 可观测性（V1.0）。
+	// LogLevel debug|info|warn|error（默认 info）；LogFormat text|json（默认 text）。
+	LogLevel  string `json:"log_level" yaml:"log_level"`
+	LogFormat string `json:"log_format" yaml:"log_format"`
+	// MetricsEnabled 是否暴露 /metrics（Prometheus 抓取口，默认开启）。
+	MetricsEnabled bool `json:"metrics_enabled" yaml:"metrics_enabled"`
+	// MetricsToken 抓取令牌；为空时 /metrics 仅允许 admin 会话访问。
+	// 标注 json:"-" 表示不回显明文（只回显是否已设置）。
+	MetricsToken string `json:"-" yaml:"metrics_token"`
 	// nmap 可执行文件路径（主动端口扫描，默认 "nmap"）。留空或不可用则禁用。
 	NmapPath string `json:"-" yaml:"nmap_path"`
 	// 主动端口扫描的端口范围（nmap -p 参数），默认 "1-65535"（全端口）。后台可配。

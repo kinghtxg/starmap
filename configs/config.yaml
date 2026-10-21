@@ -27,3 +27,9 @@ auto_discovery_cidrs: []      # 目标网段，如 ["10.10.1.0/24","172.16.5.0/2
 auto_discovery_follow_discovered: false
 auto_discovery_exclude_cidrs: ["169.254.0.0/16"]  # 排除网段（不扫）
 auto_discovery_max_cidrs: 64                       # 单轮最多扫描网段数（防扫描面失控）
+
+# ---- 可观测性（V1.0）----
+log_level: "info"             # debug | info | warn | error
+log_format: "text"            # text 便于人工排查；生产建议 json（日志平台直采）
+metrics_enabled: true         # 暴露 /metrics（Prometheus 抓取口）
+metrics_token: ""             # 留空则 /metrics 仅允许 admin 会话访问

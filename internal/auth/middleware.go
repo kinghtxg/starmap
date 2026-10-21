@@ -40,9 +40,12 @@ func (r *runtime) middleware() gin.HandlerFunc {
 			r.deny(c)
 			return
 		}
-		// K2：只写入身份，不写入任何角色/权限。
+		// 写入身份与角色。角色来自签名过的会话载荷，客户端无法伪造。
 		c.Set(CtxSubject, claims.Sub)
 		c.Set(CtxDisplayName, claims.Name)
+		if claims.Role != "" {
+			c.Set(CtxRole, claims.Role)
+		}
 		c.Next()
 	}
 }

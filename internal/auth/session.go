@@ -16,6 +16,7 @@ import (
 type sessionClaims struct {
 	Sub  string `json:"sub"`  // 身份唯一标识（OIDC 为 sub，本地为 username）
 	Name string `json:"name"` // 展示名（审计日志 Actor 可读化）
+	Role string `json:"role"` // 角色（viewer/operator/admin），见 roles.go
 	Via  string `json:"via"`  // local | oidc
 	Sid  string `json:"sid"`  // 会话 ID，用于服务端吊销
 	Iat  int64  `json:"iat"`
@@ -73,13 +74,17 @@ func (r *runtime) verify(value string) (sessionClaims, bool) {
 }
 
 // issue 签发会话并写入 Cookie（HttpOnly + SameSite=Lax）。
-func (r *runtime) issue(c *gin.Context, sub, name, via string) error {
+//
+// 角色随会话一起签名进 Cookie：这样权限判定不需要每次请求回查配置或身份源，
+// 且 Cookie 被篡改会因 HMAC 校验失败而整体失效——角色无法被客户端伪造提升。
+func (r *runtime) issue(c *gin.Context, sub, name, role, via string) error {
 	ttl := time.Duration(r.cfg.SessionTTLSeconds) * time.Second
 	now := time.Now()
 	sid := randomHex(16)
 	claims := sessionClaims{
 		Sub:  sub,
 		Name: name,
+		Role: NormalizeRole(role),
 		Via:  via,
 		Sid:  sid,
 		Iat:  now.Unix(),

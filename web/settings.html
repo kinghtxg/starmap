@@ -5,27 +5,33 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>系统配置 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">系统配置</h1>
-        <p class="sm-sub">GET /api/config · PUT /api/config · 保存后立即联动拓扑引擎与检测引擎</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">运维</span>
+          <h1 class="sm-h1">系统配置</h1>
+          <p class="sm-sub">GET /api/config · PUT /api/config · 保存后立即联动拓扑引擎与检测引擎</p>
+        </div>
+          <div class="sm-toolbar">
+          <button class="sm-btn" data-act="reload" data-ico="refresh">重新加载</button>
+          <button class="sm-btn is-primary" data-role="admin" data-act="save" data-ico="check">保存配置</button>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <button class="sm-btn" data-act="reload" data-ico="refresh">重新加载</button>
-        <button class="sm-btn is-primary" data-act="save" data-ico="check">保存配置</button>
-      </div>
-    </header>
 
     <div class="sm-content">
       <div class="sm-stack sm-anim" id="form"></div>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>

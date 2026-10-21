@@ -23,6 +23,8 @@ import (
 	"starmap/internal/detect"
 	"starmap/internal/ingest"
 	"starmap/internal/ledger"
+	"starmap/internal/logging"
+	"starmap/internal/metrics"
 	"starmap/internal/model"
 	"starmap/internal/parser"
 	"starmap/internal/probe"
@@ -49,7 +51,12 @@ type Deps struct {
 	PacketCh chan *parser.PacketInfo
 	// PersistConfig PUT /api/config 持久化钩子
 	PersistConfig func(model.SystemConfig) error
-	Version       string
+	// Metrics 指标集合（nil 表示不暴露 /metrics）
+	Metrics *metrics.Metrics
+	// Middleware 附加中间件：在认证之后、业务路由之前执行。
+	// 用途：外部插件注入（如自定义审计/租户识别），以及测试里模拟"已认证且角色为 X"。
+	Middleware []gin.HandlerFunc
+	Version    string
 }
 
 // Server HTTP 服务
@@ -89,58 +96,91 @@ func NewRouter(d Deps) *gin.Engine {
 	if s.d.Version == "" {
 		s.d.Version = version.String()
 	}
-	r.Use(gin.Recovery(), s.corsMiddleware())
+	// 访问日志 + request_id 必须最外层：Recovery 在它内层，panic 被兜住后
+	// 这里仍能拿到 500 状态并打出完整日志（若顺序反过来，panic 会跳过本层收尾逻辑）。
+	r.Use(logging.Middleware())
+	r.Use(gin.Recovery())
+	if s.d.Metrics != nil {
+		r.Use(s.d.Metrics.Middleware())
+	}
+	r.Use(s.corsMiddleware())
 	// 可选账号系统 / APSSO SSO 门卫（默认 mode=none，不启用时零行为差异，见 docs/AUTH-APSSO.md）
 	r.Use(auth.Middleware(d.Cfg.Auth))
+	// 附加中间件必须在路由注册之前挂载：RequireRole 是绑在路由上的，
+	// 晚于它挂载中间件就来不及把角色写进上下文。
+	for _, mw := range d.Middleware {
+		if mw != nil {
+			r.Use(mw)
+		}
+	}
 	auth.RegisterRoutes(r, d.Cfg.Auth)
 
 	api := r.Group("/api")
+	// 权限分层：写死在路由表上，看一眼就知道谁能调什么。
+	// 未启用认证（mode=none）时 auth.Role 恒为 admin，所有分组等价放行（K1 零配置可用）。
+	ro := api.Group("", auth.RequireRole(auth.RoleViewer))
+	rw := api.Group("", auth.RequireRole(auth.RoleOperator))
+	adm := api.Group("", auth.RequireRole(auth.RoleAdmin))
 	{
+		// ---- 只读：巡检/审计账号即可访问 ----
 		api.GET("/health", s.health)
-		api.GET("/topology", s.topologySnapshot)
-		api.GET("/topology/subnet/*cidr", s.subnetSnapshot)
-		// 网段清单（V1.4）：全部已发现内网 /24 网段及统计
-		api.GET("/subnets", s.listSubnets)
-		api.GET("/nodes/:id", s.nodeDetail)
-		api.GET("/events", s.listEvents)
-		api.POST("/events/:id/review", s.reviewEvent)
-		api.GET("/whitelist", s.listWhitelist)
-		api.POST("/whitelist", s.createWhitelist)
-		api.PUT("/whitelist/:id", s.updateWhitelist)
-		api.DELETE("/whitelist/:id", s.deleteWhitelist)
-		api.GET("/domains", s.listDomains)
-		api.POST("/domains", s.createDomain)
-		api.PUT("/domains/:id", s.updateDomain)
-		api.DELETE("/domains/:id", s.deleteDomain)
-		api.POST("/ingest/pcap", s.ingestPCAP)
-		api.POST("/ingest/probe", s.ingestProbe)
-		api.GET("/config", s.getConfig)
-		api.PUT("/config", s.putConfig)
-		api.GET("/audit", s.listAudit)
-		api.GET("/stats", s.stats)
-		api.POST("/probe/trigger", s.triggerProbe)
-		api.POST("/capture/start", s.captureStart)
-		api.POST("/capture/stop", s.captureStop)
-		api.GET("/capture/status", s.captureStatus)
-		// 主机资产库 + 端口记录（V1.2）
-		api.GET("/assets", s.listAssets)
-		api.GET("/assets/stats", s.assetStats)
-		api.POST("/assets/archive", s.archiveAsset)
-		api.PUT("/assets/:key", s.updateAsset)
-		api.DELETE("/assets/:key", s.deleteAsset)
-		api.GET("/ports", s.listPorts)
-		api.POST("/ports/scan", s.scanPorts)
-		api.GET("/ports/scan/:id", s.scanPortsStatus)
-		// 资产台账对照（V1.7）：台账（应该有什么）vs 拓扑观测（实际有什么）
-		api.GET("/ledger", s.listLedger)
-		api.POST("/ledger/import", s.ledgerImport)
-		api.DELETE("/ledger", s.clearLedger)
-		api.GET("/ledger/diff", s.ledgerDiff)
-		// 七层转发识别（V1.8）：代理节点 + 背后真实客户端
-		api.GET("/proxies", s.listProxies)
-		// 探针注册（V1.3：按探针位置归纳拓扑）
-		api.GET("/probes", s.listProbes)
-		api.DELETE("/probes/:id", s.deleteProbe)
+		ro.GET("/topology", s.topologySnapshot)
+		ro.GET("/topology/subnet/*cidr", s.subnetSnapshot)
+		ro.GET("/subnets", s.listSubnets)
+		ro.GET("/nodes/:id", s.nodeDetail)
+		ro.GET("/events", s.listEvents)
+		ro.GET("/whitelist", s.listWhitelist)
+		ro.GET("/domains", s.listDomains)
+		ro.GET("/config", s.getConfig)
+		ro.GET("/audit", s.listAudit)
+		ro.GET("/stats", s.stats)
+		ro.GET("/capture/status", s.captureStatus)
+		ro.GET("/assets", s.listAssets)
+		ro.GET("/assets/stats", s.assetStats)
+		ro.GET("/ports", s.listPorts)
+		ro.GET("/ports/scan/:id", s.scanPortsStatus)
+		ro.GET("/ledger", s.listLedger)
+		ro.GET("/ledger/diff", s.ledgerDiff)
+		ro.GET("/proxies", s.listProxies)
+		ro.GET("/probes", s.listProbes)
+		// 注意：/api/auth/me 由 internal/auth 独占注册（未启用认证时也返回 admin），
+		// 这里绝不能再注册一次——Gin 对同一 method+path 重复注册会直接 panic。
+
+		// ---- 操作：日常运维动作 ----
+		rw.POST("/events/:id/review", s.reviewEvent)
+		rw.POST("/whitelist", s.createWhitelist)
+		rw.PUT("/whitelist/:id", s.updateWhitelist)
+		rw.POST("/domains", s.createDomain)
+		rw.PUT("/domains/:id", s.updateDomain)
+		rw.POST("/ingest/pcap", s.ingestPCAP)
+		rw.POST("/ingest/probe", s.ingestProbe)
+		rw.POST("/probe/trigger", s.triggerProbe)
+		rw.POST("/capture/start", s.captureStart)
+		rw.POST("/capture/stop", s.captureStop)
+		rw.POST("/assets/archive", s.archiveAsset)
+		rw.PUT("/assets/:key", s.updateAsset)
+		rw.POST("/ports/scan", s.scanPorts)
+		rw.POST("/ledger/import", s.ledgerImport)
+
+		// ---- 管理：改配置、删数据 ----
+		adm.PUT("/config", s.putConfig)
+		adm.DELETE("/whitelist/:id", s.deleteWhitelist)
+		adm.DELETE("/domains/:id", s.deleteDomain)
+		adm.DELETE("/assets/:key", s.deleteAsset)
+		adm.DELETE("/ledger", s.clearLedger)
+		adm.DELETE("/probes/:id", s.deleteProbe)
+	}
+
+	// 指标导出：Prometheus 抓取口。鉴权策略见 metricsGuard。
+	if s.d.Metrics != nil {
+		r.GET("/metrics", s.metricsGuard(), gin.WrapH(s.d.Metrics.Handler()))
+	} else {
+		// 未启用时必须显式 404，不能落到 SPA 兜底返回 HTML——
+		// Prometheus 拿到 200 text/html 会报"解析失败"，排查方向全错；
+		// 404 才是"这个部署没开指标"的准确表达。
+		r.GET("/metrics", func(c *gin.Context) {
+			fail(c, http.StatusNotFound, "指标导出未启用（metrics_enabled=false）")
+		})
 	}
 
 	// 静态资源（embed.FS 单二进制分发）
@@ -208,6 +248,43 @@ func secureEqual(a, b string) bool {
 func fail(c *gin.Context, code int, msg string) {
 	c.JSON(code, gin.H{"error": msg})
 }
+
+// ---------- 指标导出 ----------
+
+// metricsGuard /metrics 的鉴权。
+//
+// 三种放行方式，按优先级：
+//  1. 配置了 metrics_token → 必须带 X-Metrics-Token（常量时间比较）——
+//     Prometheus 侧在 scrape_config 里加一个 header 即可，不依赖 Cookie；
+//  2. 已认证且具备 admin 角色 → 放行（人工排查时直接浏览器打开）；
+//  3. 未启用认证且来自回环地址 → 放行（本机 curl 调试）。
+//
+// 之所以不默认全开：/metrics 会暴露节点数、会话数、事件数等内网规模信息，
+// 在政务网这类环境里本身就是敏感数据。
+func (s *Server) metricsGuard() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := ""
+		if s.d.Cfg != nil {
+			token = strings.TrimSpace(s.d.Cfg.MetricsToken)
+		}
+		if token != "" {
+			if secureEqual(c.GetHeader("X-Metrics-Token"), token) {
+				c.Next()
+				return
+			}
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		if auth.HasRole(c, auth.RoleAdmin) {
+			c.Next()
+			return
+		}
+		c.AbortWithStatus(http.StatusForbidden)
+	}
+}
+
+// 身份查询见 internal/auth 的 /api/auth/me（未启用认证时返回 admin）。
+// 这里不再单独实现 whoami：同一个事实只有一个来源，避免两处返回不一致。
 
 // ---------- 健康/统计 ----------
 
@@ -1175,10 +1252,13 @@ func (s *Server) triggerProbe(c *gin.Context) {
 // getConfig 输出当前配置（含前端别名键）。
 func (s *Server) getConfig(c *gin.Context) {
 	cfg := s.d.Cfg
-	c.JSON(http.StatusOK, configToMap(cfg))
+	c.JSON(http.StatusOK, s.configToMap(cfg))
 }
 
-func configToMap(cfg *model.SystemConfig) gin.H {
+// configToMap 输出当前配置（含前端别名键）。
+// metrics_enabled 额外与「进程内是否真的挂了指标集合」做与运算：
+// 只报配置值会让前端显示"已开启"但 /metrics 实际 404。
+func (s *Server) configToMap(cfg *model.SystemConfig) gin.H {
 	return gin.H{
 		"probe_enabled":                cfg.ProbeEnabled,
 		"capture_enabled":              cfg.CaptureEnabled,
@@ -1217,6 +1297,11 @@ func configToMap(cfg *model.SystemConfig) gin.H {
 		"session_max_count":       cfg.SessionMaxCount,
 		"session_idle_seconds":    cfg.SessionIdleSeconds,
 		"session_max_age_seconds": cfg.SessionMaxAgeSeconds,
+		// 可观测性（V1.0）
+		"log_level":         cfg.LogLevel,
+		"log_format":        cfg.LogFormat,
+		"metrics_enabled":   cfg.MetricsEnabled && s.d.Metrics != nil,
+		"metrics_token_set": cfg.MetricsToken != "", // 同样不回显明文
 	}
 }
 
@@ -1397,6 +1482,20 @@ func (s *Server) putConfig(c *gin.Context) {
 	if s.d.Aggregator != nil {
 		s.d.Aggregator.SetLimits(cfg.SessionMaxCount, cfg.SessionIdleSeconds, cfg.SessionMaxAgeSeconds)
 	}
+	// 可观测性（V1.0）：日志级别改完立即生效（LevelVar），不需要重启。
+	// 日志格式与 /metrics 开关涉及 Handler / 路由注册，只能落盘等下次启动——
+	// 这里显式不处理，前端提交后回显仍是旧值，避免"看着改了其实没变"。
+	if v, ok := strFrom(m, "log_level"); ok && v != "" {
+		cfg.LogLevel = v
+		logging.SetLevel(v)
+	}
+	if v, ok := strFrom(m, "log_format"); ok && v != "" {
+		cfg.LogFormat = v
+	}
+	if v, ok := strFrom(m, "metrics_token"); ok && v != "" {
+		// 与 probe_token 同策略：空串忽略，避免前端留空把已设令牌清掉。
+		cfg.MetricsToken = v
+	}
 
 	// 联动拓扑引擎与检测器
 	s.d.Engine.UpdateConfig(*cfg)
@@ -1408,7 +1507,7 @@ func (s *Server) putConfig(c *gin.Context) {
 		}
 	}
 	s.d.Reviewer.Audit(s.actor(c), "config_update", "system_config", "")
-	c.JSON(http.StatusOK, configToMap(cfg))
+	c.JSON(http.StatusOK, s.configToMap(cfg))
 }
 
 // ---------- 审计 ----------

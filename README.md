@@ -6,12 +6,12 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.0.0**（[发布说明与上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.1.0**（[发布说明与上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-69.2%25-yellowgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-70.6%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
@@ -38,7 +38,7 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 - **被动优先**：以流量发现为主（PCAP 导入 / 网卡抓包 / 远端探针上报），主动探测为辅。
 - **只打标签，不定性**：对可疑行为仅产出特征标签（如"疑似 FRP 隧道特征"），不判定"违规/违法"，不告警外发，不联动封禁。
 - **单二进制，离线可用**：纯 Go + SQLite（免 CGO），前端资源 `embed` 内嵌，无任何 CDN/外网依赖，内网一键部署。
-- **不建权限体系**：不内置 RBAC；可外接 OIDC 身份源（如 APSSO）做可选的访问门卫，默认关闭。
+- **不自建账号与权限体系**：无用户表、无权限管理界面、无资源级 ACL。可外接 OIDC 身份源（如 APSSO）做可选门卫，默认关闭；门卫只做 `viewer`/`operator`/`admin` 三级**写操作**收敛，读数据对所有角色一致开放。
 
 ## 功能特性
 
@@ -72,11 +72,27 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 - **网络域管理**：预置 gov/office/internet/prod 四域，CIDR 最长前缀匹配。
 - **全量审计**：所有操作留痕（操作人 / 动作 / 对象），默认保留 90 天。
 - **主动探测**：ARP / ICMP / Traceroute 跨平台（Linux + Windows），默认关闭。
-- **可选认证**：本地账号或 OIDC 单点登录（APSSO），`auth.mode = none|local|oidc`，默认 `none`。
+- **可选门卫**：本地账号或 OIDC 单点登录（APSSO），`auth.mode = none|local|oidc`，默认 `none`；
+  三级角色 `viewer < operator < admin` 只收敛写操作，读数据对所有角色一致。
+
+### 运维可观测（1.1.0）
+
+- **结构化日志**：标准库 `slog`，`text`/`json` 两种格式，`request_id` 贯穿访问日志与业务日志；
+  默认级别可在「系统配置」里改，**立即生效**（不必重启）。
+- **Prometheus 指标**：`/metrics` 导出 17 项指标（摄入包数、会话回收、检测轮次与耗时、
+  拓扑节点/边总数、探针上报、HTTP 请求量与延迟直方图）。标签用路由模板而非原始 URL，防止标签爆炸。
+  访问控制三档：`metrics_token` 直取 / `admin` 会话 / 其余 403，未启用时显式 404。
+- **RBAC 三级**：角色来自外部身份源的 `roles`/`groups` 声明或配置文件，随会话 HMAC 签名下发；
+  前端用 CSS 属性选择器收敛写操作入口，后端是唯一判定点——改 DOM 放出按钮也会被 403 拦下。
 
 ### 界面
 
-自研设计系统（腾讯云规范风格、原生桌面质感、统一动效），标准网管拓扑图（设备图标 / 分层布局 / 正交折线 / 图例 / minimap / 右键菜单 / 导出 PNG·SVG / 双击下钻），操作按钮全站统一置于顶部工具栏。
+设计基准与自家项目「刻本」同一套令牌（主色 `#3370ff`、画布 `#f6f7fa`、圆角 6/10、极克制的三档阴影），
+56px 全局顶栏（品牌 + 全局搜索 + 身份胶囊）+ 浅色侧栏 + 页头 pill 标签的结构；
+零外网依赖（图标全内联 SVG，无 CDN 字体）。
+
+拓扑图为标准网管风格：设备图标 / 分层布局 / 正交折线 / 图例 / minimap / 右键菜单 / 导出 PNG·SVG / 双击下钻，
+操作按钮全站统一置于页头右侧。
 
 ## 架构
 
@@ -106,7 +122,7 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 ```bash
 # 构建（纯 Go，无需 CGO；版本号由 ldflags 注入）
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-s -w -X starmap/internal/version.Version=1.0.0" \
+  -ldflags "-s -w -X starmap/internal/version.Version=1.1.0" \
   -o starmap ./cmd/starmap
 
 # 查版本
@@ -186,28 +202,36 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 
 ## 截图
 
-导入 `testdata/out/` 合成 PCAP 后的真实运行截图：
+以下截图由 `scripts/shot.py` 在本机真实运行的服务上采集（数据来源：`testdata/out/` 的 5 个合成 PCAP
++ `testdata/simprobe.go` 模拟的政务网探针上报 + `testdata/ledger-sample.csv` 台账），
+UI 设计基准与「刻本」同一套令牌。
 
-| 拓扑总览 | 主机资产 | 事件工作台 |
+| 拓扑总览 | 主机资产 | 风险事件 |
 |---|---|---|
 | ![topology](docs/screenshots/topology.png) | ![assets](docs/screenshots/assets.png) | ![events](docs/screenshots/events.png) |
 
-| 数据接入 | 网络域 | 审计日志 |
+| 网络域 | 白名单 | 数据接入 |
 |---|---|---|
-| ![ingest](docs/screenshots/ingest.png) | ![domains](docs/screenshots/domains.png) | ![logs](docs/screenshots/logs.png) |
+| ![domains](docs/screenshots/domains.png) | ![whitelist](docs/screenshots/whitelist.png) | ![ingest](docs/screenshots/ingest.png) |
+
+| 系统配置 | 审计日志 | 登录（可选门卫） |
+|---|---|---|
+| ![settings](docs/screenshots/settings.png) | ![logs](docs/screenshots/logs.png) | ![login](docs/screenshots/login.png) |
 
 **下钻到某个 /24**：网段内主机间链路完整保留，并把其它聚合网段 / 外部 `/24` 补为上下文节点。
-图中 `10.10.1.50` 是模拟的"一机两网"设备（红虚环 = 风险锚点），同时连着本网段与 `172.16.5.0/24`（左侧细点线为归属边）：
+图中 `10.10.1.50` 是模拟的"一机两网"设备（红虚环 = 风险锚点，不参与聚合），
+同时连着本网段与 `172.16.5.0/24`（细点线为归属边）：
 
 ![drilldown](docs/screenshots/topology-drill.png)
 
-**台账对照**：导入 `testdata/ledger-sample.csv` 后的账实差异（模拟数据：9 条台账 vs 13 台实测主机）。
-台账外的 6 台里，前 3 台正好是模拟的违规设备——高风险自动排在最前面：
+**台账对照**：导入 `testdata/ledger-sample.csv` 后的账实差异——9 条台账 vs 25 台实测主机：
+在册在网 6 台、**台账外 18 台**、僵尸记录 2 条、IP 不符 1 条。台账外设备按风险排序，违规设备排在最前：
 
 ![ledger](docs/screenshots/ledger.png)
 
 **七层转发还原**：`10.10.1.101` 是模拟的 nginx 反代，后端只看到它。解析 XFF 后，
-背后 3 台客户端（`10.10.3.10-12`）被还原成节点，并与代理连紫色虚线；右侧详情列出全部客户端：
+背后 3 台客户端（`10.10.3.10-12`）被还原为独立节点，并以紫色虚线连到代理；
+右侧详情同时列出"通信对端（经代理）"与"经 X-Forwarded-For 还原的客户端"：
 
 ![xff](docs/screenshots/topology-xff.png)
 

@@ -5,22 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>关于 · StarMap 星图</title>
 <link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 </head>
 <body>
 <div class="sm-app">
-  <aside class="sm-sider" id="smSider"></aside>
+  <header class="sm-topbar" id="smTopbar"></header>
 
-  <main class="sm-main">
-    <header class="sm-topbar">
-      <div class="sm-topbar-l">
-        <h1 class="sm-h1">关于</h1>
-        <p class="sm-sub">网内拓扑自动测绘引擎 · 内网离线部署版本</p>
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">运维</span>
+          <h1 class="sm-h1">关于</h1>
+          <p class="sm-sub">网内拓扑自动测绘引擎 · 内网离线部署版本</p>
+        </div>
+          <div class="sm-toolbar">
+          <a class="sm-btn" href="ingest.html" data-ico="ingest">数据接入</a>
+          <a class="sm-btn is-primary" href="index.html" data-ico="topo">进入拓扑总览</a>
+        </div>
       </div>
-      <div class="sm-toolbar">
-        <a class="sm-btn" href="ingest.html" data-ico="ingest">数据接入</a>
-        <a class="sm-btn is-primary" href="index.html" data-ico="topo">进入拓扑总览</a>
-      </div>
-    </header>
 
     <div class="sm-content">
       <!-- Hero -->
@@ -33,7 +38,7 @@
             </div>
             <div>
               <div style="font-size:24px;font-weight:800;letter-spacing:.12em;color:var(--sm-brand-2);line-height:1.2">StarMap 星图</div>
-              <div class="sm-t-3" style="font-size:12px;margin-top:2px">网内拓扑自动测绘引擎 · V1.1</div>
+              <div class="sm-t-3" style="font-size:12px;margin-top:2px">内网资产测绘与账外资产发现引擎</div>
             </div>
           </div>
           <div class="sm-t-2" style="margin-top:12px;font-size:13px">被动测绘 · 拓扑生长 · 风险识别 · 复核闭环 · 审计留痕</div>
@@ -79,7 +84,7 @@
           <div class="sm-card-hd"><h2>项目信息</h2></div>
           <div class="sm-card-bd">
             <div class="sm-stack-sm" style="font-size:13px">
-              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">版本</span><span class="sm-mono" id="ver">V1.1</span></div>
+              <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">版本</span><span class="sm-mono" id="ver">1.1.0</span></div>
               <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">归属</span><span>极客星空实验室</span></div>
               <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">许可证</span><span style="color:var(--sm-brand-2);font-weight:600">Apache-2.0</span></div>
               <div class="sm-row" style="justify-content:space-between"><span class="sm-t-3">部署形态</span><span>内网离线 · 单二进制</span></div>
@@ -91,6 +96,7 @@
       </div>
     </div>
   </main>
+  </div>
 </div>
 
 <script src="assets/api.js"></script>
