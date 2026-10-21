@@ -4,6 +4,9 @@
 # 这类"只在 CI 上炸"的问题。
 * text=auto
 
+# .gitattributes 自身必须是 LF，否则规则行尾带 \r 会被整体忽略
+.gitattributes text eol=lf
+
 *.sh        text eol=lf
 *.py        text eol=lf
 Makefile    text eol=lf
