@@ -6,9 +6,13 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+**当前版本 1.0.0**（[发布说明与上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+
+[![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
+[![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
+[![Coverage](https://img.shields.io/badge/coverage-68.5%25-yellowgreen)]()
+[![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
 
@@ -92,20 +96,33 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
                 └────────────────────────────────────────────────────────────────┘
 ```
 
-技术栈：**Go 1.22+ · Gin · gopacket · modernc.org/sqlite（免 CGO）· 原生 HTML/CSS/JS（零构建、零 CDN）**。
+技术栈：**Go 1.26.10+ · Gin · gopacket · modernc.org/sqlite（免 CGO）· 原生 HTML/CSS/JS（零构建、零 CDN）**。
+
+> Go 版本下限不是随手写的：低版本的标准库与 `x/net` 存在可被触达的已知漏洞，
+> 当前 `govulncheck` 为 0 可达漏洞，CI 已把该项设为阻断。
 
 ## 快速开始
 
 ```bash
-# 构建（纯 Go，无需 CGO）
-CGO_ENABLED=0 go build -o starmap ./cmd/starmap
+# 构建（纯 Go，无需 CGO；版本号由 ldflags 注入）
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X starmap/internal/version.Version=1.0.0" \
+  -o starmap ./cmd/starmap
+
+# 查版本
+./starmap -version
 
 # 运行
 ./starmap -config configs/config.yaml
 # 打开 http://127.0.0.1:8080
 
-# 测试
+# 测试 / 竞态 / 覆盖率 / 模糊 / 性能（Linux、macOS 可用 make）
 go test ./...
+go test -race ./...                                # 需要 cgo（gcc）
+go test ./... -coverpkg=./internal/... -coverprofile=coverage.out
+go test ./internal/parser/ -run '^$' -fuzz=FuzzExtractForwarded -fuzztime=60s
+go test ./internal/topology/ -bench=. -benchmem -run '^$'
+make ci                                            # lint + race + coverage 一条命令
 
 # 生成合成 PCAP 测试数据（5 类场景 → testdata/out/）
 go run testdata/gen_pcap.go
@@ -205,10 +222,23 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 
 ## 文档
 
+- [docs/RELEASE-1.0.md](docs/RELEASE-1.0.md) — **发布说明 + 上线就绪度评估 + 已知边界（部署前必读）**
 - [SPEC](SPEC.md) — 需求与数据模型规格
-- [CHANGELOG](CHANGELOG.md) — 版本变更
+- [ACCEPTANCE](ACCEPTANCE.md) — 验收清单
+- [CHANGELOG](CHANGELOG.md) — 版本变更（含每处修复的动机）
 - [docs/AUTH-APSSO.md](docs/AUTH-APSSO.md) — 账号系统与 APSSO SSO 接入指南
 - [docs/PM-DATA-INGEST-V2-DESIGN.md](docs/PM-DATA-INGEST-V2-DESIGN.md) — 数据接入 v2 产品设计
+
+### 容量与运维要点
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `session_max_count` | 200000 | 会话表硬上限；`/api/stats` 的 `Dropped>0` 说明打满 |
+| `session_idle_seconds` | 300 | 会话静默多久回收；调太小会让慢速长连接反复上下线 |
+| `session_max_age_seconds` | 21600 | 单会话最长存活，防不关闭的连接撑爆 |
+| `aggregate_threshold` | 20 | 单个 /24 超过该主机数则聚合显示；大图调大 |
+
+舒适规模：**1 万节点 / 3 万边**（全量快照约 43ms）。超过后建议调大聚合阈值或改用网段下钻分区查看。
 
 ## 许可证
 

@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.26.10"
+  # 覆盖率门槛（全仓合并口径，见 scripts/coverage-gate.sh）
+  MIN_COVERAGE: "65"
+
+jobs:
+  # ---------- 静态检查 ----------
+  lint:
+    name: Lint (gofmt / vet / staticcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt（格式必须统一，否则 review 噪音太大）
+        run: |
+          out=$(gofmt -l cmd internal test testdata 2>/dev/null || true)
+          if [ -n "$out" ]; then
+            echo "以下文件未格式化："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2024.1.1 || true
+          "$(go env GOPATH)/bin/staticcheck" ./... || {
+            echo "::warning::staticcheck 发现问题（当前为警告，后续版本转阻断）"
+          }
+
+      # 依赖与标准库漏洞扫描（1.0.0 起阻断：当前为 0，出现新告警应视为发布阻断项）
+      - name: govulncheck（可达漏洞扫描）
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # ---------- 单元测试（含竞态检测） ----------
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # 竞态检测需要 cgo；Windows/macOS runner 自带编译器，Linux 直接可用。
+      - name: go test -race（并发正确性）
+        run: go test -race -count=1 ./...
+        env:
+          CGO_ENABLED: "1"
+
+      - name: 短模式快速验证（跨平台一致性）
+        if: matrix.os != 'ubuntu-latest'
+        run: go test -short -count=1 ./...
+
+  # ---------- 覆盖率门禁 + 模糊测试 ----------
+  coverage:
+    name: Coverage & Fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 生成合并覆盖率
+        run: |
+          go test -count=1 ./... \
+            -coverpkg=./internal/...,./cmd/... \
+            -coverprofile=coverage.out
+          go tool cover -func=coverage.out | tail -1
+
+      - name: 覆盖率门槛
+        run: bash scripts/coverage-gate.sh coverage.out "$MIN_COVERAGE"
+
+      - name: 上传覆盖率
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+      # 模糊测试：解析器跑在报文路径上，任何 panic 都会断掉整条流水线。
+      # CI 里只跑短时冒烟（本地可 -fuzztime=10m 深挖），防止回归即可。
+      - name: Fuzz 冒烟（XFF 解析）
+        run: go test ./internal/parser/ -run '^$' -fuzz=FuzzExtractForwarded -fuzztime=30s
+
+      - name: Fuzz 冒烟（台账 CSV）
+        run: go test ./internal/ledger/ -run '^$' -fuzz=FuzzParseCSV -fuzztime=30s
+
+  # ---------- 跨平台构建 ----------
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 构建单二进制
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X starmap/internal/version.Version=${{ github.ref_name }} -X starmap/internal/version.Commit=${{ github.sha }}" \
+            -o dist/starmap-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/starmap
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: starmap-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/

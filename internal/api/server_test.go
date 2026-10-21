@@ -43,7 +43,7 @@ func newTestRouter(t *testing.T, cfg model.SystemConfig) (http.Handler, *store.S
 	eng := topology.New(cfg)
 	agg := parser.NewAggregator(cfg.LongConnSeconds, cfg.HeartbeatMaxBytes)
 	det := detect.New(st, eng, cfg)
-	det.SessionsFunc = agg.Finalize
+	det.SessionsFunc = agg.Sessions
 	det.LearningPeriod = 0
 	rvw := review.New(st, eng)
 	scanner := probe.New(eng)

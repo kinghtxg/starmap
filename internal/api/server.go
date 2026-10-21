@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"starmap/internal/review"
 	"starmap/internal/store"
 	"starmap/internal/topology"
+	"starmap/internal/version"
 	"starmap/web"
 )
 
@@ -60,7 +62,6 @@ type Server struct {
 	capIfaces      []string
 	capPackets     int64 // 抓包来源累计报文
 	packetsTotal   int64 // 全部来源累计报文
-	savedSessions  map[string]bool
 	ingestInFlight int32
 
 	// 端口扫描任务（V1.2）
@@ -84,9 +85,9 @@ type scanTask struct {
 func NewRouter(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	s := &Server{d: d, savedSessions: map[string]bool{}, scanTasks: map[string]*scanTask{}}
+	s := &Server{d: d, scanTasks: map[string]*scanTask{}}
 	if s.d.Version == "" {
-		s.d.Version = "V1.0"
+		s.d.Version = version.String()
 	}
 	r.Use(gin.Recovery(), s.corsMiddleware())
 	// 可选账号系统 / APSSO SSO 门卫（默认 mode=none，不启用时零行为差异，见 docs/AUTH-APSSO.md）
@@ -147,9 +148,6 @@ func NewRouter(d Deps) *gin.Engine {
 	return r
 }
 
-// Handler 返回 http.Handler（测试用）。
-func (s *Server) Handler() http.Handler { return nil }
-
 // ---------- middleware ----------
 
 func (s *Server) corsMiddleware() gin.HandlerFunc {
@@ -188,10 +186,7 @@ func allowedOrigin(origin string, allow []string) bool {
 	return false
 }
 
-// authPlaceholder 已废弃：认证由 internal/auth.Middleware 承担（默认 mode=none）。
-func authPlaceholder() gin.HandlerFunc {
-	return func(c *gin.Context) { c.Next() }
-}
+// authPlaceholder 已删除：认证由 internal/auth.Middleware 承担（默认 mode=none）。
 
 // actor P0-4：审计日志 Actor 由硬编码 "api" 改为可追溯来源。
 // 已启用账号系统时取登录身份，否则取客户端 IP。
@@ -202,27 +197,14 @@ func (s *Server) actor(c *gin.Context) string {
 	return c.ClientIP()
 }
 
-// probeTokenMiddleware §10.7：配置 probe_token 则校验（header X-Probe-Token 或 JSON token 字段）。
-func (s *Server) probeTokenMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		want := ""
-		if s.d.Cfg != nil {
-			want = s.d.Cfg.ProbeToken
-		}
-		if want != "" {
-			got := c.GetHeader("X-Probe-Token")
-			if got == "" {
-				got = c.Query("token")
-			}
-			if got != want {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "探针 token 校验失败"})
-				return
-			}
-		}
-		c.Next()
-	}
+// secureEqual 常量时间字符串比较，用于 token 校验（避免逐字节比较泄漏前缀长度）。
+func secureEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// probeTokenMiddleware 已废弃：探针 token 支持 header / query / body 三种来源，
+// 由 ingestProbe 内部统一校验（middleware 读不到 JSON body）。
+// token 校验失败时用 secureEqual 常量时间比较。
 func fail(c *gin.Context, code int, msg string) {
 	c.JSON(code, gin.H{"error": msg})
 }
@@ -254,9 +236,9 @@ func (s *Server) stats(c *gin.Context) {
 		"Available":  ingest.CaptureAvailable(),
 	}
 	s.mu.Unlock()
-	sessions := 0
+	var aggSt parser.AggregatorStats
 	if s.d.Aggregator != nil {
-		sessions = len(s.d.Aggregator.Sessions())
+		aggSt = s.d.Aggregator.Stats()
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"NodeCount":     snap.Stats.NodeCount,
@@ -266,10 +248,18 @@ func (s *Server) stats(c *gin.Context) {
 		"TotalBytes":    snap.Stats.TotalBytes,
 		"EventCount":    len(events),
 		"PendingEvents": pending,
-		"SessionCount":  sessions,
+		"SessionCount":  aggSt.Active,
 		"PacketCount":   atomic.LoadInt64(&s.packetsTotal),
 		"Capture":       capSt,
 		"GeneratedAt":   time.Now().UTC(),
+		// 会话表容量治理指标（V1.0）：Dropped>0 说明上限打满、有数据被丢弃，
+		// 此时应调大 session_max_count 或缩短 session_idle_seconds。
+		"SessionTable": gin.H{
+			"Active":      aggSt.Active,
+			"MaxSessions": aggSt.MaxSessions,
+			"Dropped":     aggSt.Dropped,
+			"Evicted":     aggSt.Evicted,
+		},
 	})
 }
 
@@ -786,8 +776,16 @@ func (s *Server) deleteDomain(c *gin.Context) {
 // token 校验（§10.7）：配置 probe_token 时接受 header X-Probe-Token / query token / body token。
 // flows 会转换为合成报文汇入统一 Aggregator → Engine 流水线（与抓包/PCAP 一致）。
 func (s *Server) ingestProbe(c *gin.Context) {
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 64<<20))
+	// 显式限长：探针上报是未经认证的入口（未配 probe_token 时），
+	// 必须给出确定的读取上限，避免超大 body 把内存打满。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<20)
+	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			fail(c, http.StatusRequestEntityTooLarge, "上报体积超过 64MB 上限")
+			return
+		}
 		fail(c, http.StatusBadRequest, "读取请求体失败")
 		return
 	}
@@ -820,7 +818,7 @@ func (s *Server) ingestProbe(c *gin.Context) {
 		if got == "" {
 			got = report.Token
 		}
-		if got != want {
+		if !secureEqual(got, want) {
 			fail(c, http.StatusUnauthorized, "探针 token 校验失败")
 			return
 		}
@@ -1040,21 +1038,17 @@ func (s *Server) syncTopology() int {
 	if s.d.Aggregator == nil {
 		return 0
 	}
-	sessions := s.d.Aggregator.Finalize()
-	for i := range sessions {
-		ses := &sessions[i]
-		s.d.Engine.Ingest(ses)
-		key := ses.FiveTuple.Key()
-		s.mu.Lock()
-		known := s.savedSessions[key]
-		if !known {
-			s.savedSessions[key] = true
-		}
-		s.mu.Unlock()
-		if !known && s.d.Store != nil {
-			_, _ = s.d.Store.SaveSession(ses)
+	res := s.d.Aggregator.DrainNow()
+	for i := range res.Entries {
+		e := &res.Entries[i]
+		s.d.Engine.Ingest(&e.Session)
+		// 首次抽出才落库：去重判定已收敛在聚合器内部（V1.0），
+		// 外层不再维护 savedSessions 这张只会越长越大的表。
+		if e.First && s.d.Store != nil {
+			_, _ = s.d.Store.SaveSession(&e.Session)
 		}
 	}
+	sessions := res.Sessions()
 	// 流量角度：提取内网主机端口（V1.2）
 	s.extractPortsFromSessions(sessions)
 	// 节点 → 资产同步（账外资产自动登记，V1.2）
@@ -1219,6 +1213,10 @@ func configToMap(cfg *model.SystemConfig) gin.H {
 		"auto_discovery_follow_discovered": cfg.AutoDiscoveryFollowDiscovered,
 		"auto_discovery_exclude_cidrs":     cfg.AutoDiscoveryExcludeCIDRs,
 		"auto_discovery_max_cidrs":         cfg.AutoDiscoveryMaxCIDRs,
+		// 会话表容量治理（V1.0）
+		"session_max_count":       cfg.SessionMaxCount,
+		"session_idle_seconds":    cfg.SessionIdleSeconds,
+		"session_max_age_seconds": cfg.SessionMaxAgeSeconds,
 	}
 }
 
@@ -1385,6 +1383,19 @@ func (s *Server) putConfig(c *gin.Context) {
 		if len(list) > 0 {
 			cfg.AutoDiscoveryExcludeCIDRs = list
 		}
+	}
+	// 会话表容量治理（V1.0）：改完立即生效，无需重启
+	if v, ok := numFrom(m, "session_max_count"); ok && v > 0 {
+		cfg.SessionMaxCount = int(v)
+	}
+	if v, ok := numFrom(m, "session_idle_seconds"); ok && v > 0 {
+		cfg.SessionIdleSeconds = int64(v)
+	}
+	if v, ok := numFrom(m, "session_max_age_seconds"); ok && v > 0 {
+		cfg.SessionMaxAgeSeconds = int64(v)
+	}
+	if s.d.Aggregator != nil {
+		s.d.Aggregator.SetLimits(cfg.SessionMaxCount, cfg.SessionIdleSeconds, cfg.SessionMaxAgeSeconds)
 	}
 
 	// 联动拓扑引擎与检测器

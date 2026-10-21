@@ -1,5 +1,7 @@
-// StarMap 星图 V1.0 入口：装配 config → store → engine → detector → review → api，
+// StarMap 星图入口：装配 config → store → engine → detector → review → api，
 // 抓包/PCAP导入/探针三路 PacketSource 汇入 Aggregator → Engine；优雅退出。
+//
+// 版本号见 internal/version（定版 1.0 起不再在代码里写死 V1.x）。
 package main
 
 import (
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +29,7 @@ import (
 	"starmap/internal/review"
 	"starmap/internal/store"
 	"starmap/internal/topology"
+	"starmap/internal/version"
 )
 
 // 默认预置网络域（ACCEPTANCE 8.1）
@@ -38,7 +42,16 @@ var defaultDomains = []model.NetDomain{
 
 func main() {
 	cfgPath := flag.String("config", "configs/config.yaml", "配置文件路径")
+	showVersion := flag.Bool("version", false, "打印版本信息后退出")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("StarMap 星图 %s\n", version.Full())
+		if version.BuildTime != "" {
+			fmt.Printf("构建时间: %s\n", version.BuildTime)
+		}
+		return
+	}
 
 	// 1. 配置
 	cfg, err := config.Load(*cfgPath)
@@ -85,10 +98,14 @@ func main() {
 		log.Fatalf("恢复拓扑失败: %v", err)
 	}
 	agg := parser.NewAggregator(cfg.LongConnSeconds, cfg.HeartbeatMaxBytes)
+	// 会话表容量治理（V1.0）：被动抓包是持续输入，必须给会话表设上限与存活期。
+	agg.SetLimits(cfg.SessionMaxCount, cfg.SessionIdleSeconds, cfg.SessionMaxAgeSeconds)
 
 	// 4. 检测调度器 + 复核 + 探测器
 	det := detect.New(st, engine, cfg)
-	det.SessionsFunc = agg.Finalize
+	// 检测规则要的是「全表视图」（FRP 比对、多网融合、反代域名计数都要跨会话统计），
+	// 因此这里必须接 Sessions（只读快照），不能接 Finalize（增量语义）。
+	det.SessionsFunc = agg.Sessions
 	rvw := review.New(st, engine)
 	scanner := probe.New(engine)
 	scanner.SetEnabled(cfg.ProbeEnabled)
@@ -141,7 +158,11 @@ func main() {
 		}
 	}()
 	// 周期性：会话 → 拓扑 → 检测
+	// 用一个 WaitGroup 保证退出时这条泵已经停下，避免退出落盘与它并发抽取同一批会话。
+	var tickerWG sync.WaitGroup
+	tickerWG.Add(1)
 	go func() {
+		defer tickerWG.Done()
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 		for {
@@ -149,9 +170,9 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				for _, ses := range agg.Finalize() {
-					s := ses
-					engine.Ingest(&s)
+				for _, e := range agg.DrainNow().Entries {
+					ses := e.Session
+					engine.Ingest(&ses)
 				}
 			}
 		}
@@ -233,13 +254,24 @@ func main() {
 			}
 			return st.SetConfigKV("system_config", string(b))
 		},
-		Version: "V1.2",
+		Version: version.String(),
 	})
 
-	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: srv}
+	httpSrv := &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: srv,
+		// V1.0 定版：补齐超时与头部上限。
+		// 没有 ReadHeaderTimeout 的服务在内网也能被 Slowloris 拖死（占满连接不结束握手），
+		// 这是所有"能上线"的 Go 服务的必填项。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,  // PCAP 上传走请求体，给足时间
+		WriteTimeout:      120 * time.Second, // 拓扑大图序列化可能偏慢
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB，默认 1MB 但显式写死便于审计
+	}
 	go func() {
-		log.Printf("StarMap 星图 V1.0 就绪 | listen=%s db=%s capture=%v probe=%v",
-			cfg.ListenAddr, cfg.DBPath, cfg.CaptureEnabled, cfg.ProbeEnabled)
+		log.Printf("StarMap 星图 %s 就绪 | listen=%s db=%s capture=%v probe=%v",
+			version.Full(), cfg.ListenAddr, cfg.DBPath, cfg.CaptureEnabled, cfg.ProbeEnabled)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("HTTP 服务失败: %v", err)
 		}
@@ -255,15 +287,33 @@ func main() {
 	defer shCancel()
 	_ = httpSrv.Shutdown(shCtx)
 	det.Stop()
-	// 退出前落盘全部会话 + 拓扑
-	for _, ses := range agg.Finalize() {
-		s := ses
-		_, _ = st.SaveSession(&s)
-	}
+	tickerWG.Wait() // 等会话泵退出，再补最后一轮落盘
+	persistPendingSessions(agg, st)
 	if err := engine.Flush(); err != nil {
 		log.Printf("[topology] 退出前拓扑落盘失败: %v", err)
 	}
 	log.Println("已退出")
+}
+
+// persistPendingSessions 退出前把「还没落过库」的会话补写一遍，返回写入条数。
+//
+// 只写 First=true 的会话：会话在周期同步里已经被写过一次，退出时整表重插会产生重复行
+// （历史实现就踩过这个坑 —— 每次优雅退出，sessions 表就翻一倍）。
+func persistPendingSessions(agg *parser.Aggregator, st *store.Store) int {
+	if agg == nil || st == nil {
+		return 0
+	}
+	saved := 0
+	for _, e := range agg.DrainNow().Entries {
+		if !e.First {
+			continue
+		}
+		ses := e.Session
+		if _, err := st.SaveSession(&ses); err == nil {
+			saved++
+		}
+	}
+	return saved
 }
 
 // cleanupOfflineAssets 账外资产离线清理（V1.2）：
@@ -298,6 +348,11 @@ func cleanupOfflineAssets(st *store.Store, eng *topology.Engine, cfg model.Syste
 }
 
 // mergeRuntimeConfig 运行时保存的配置覆盖文件配置。
+//
+// 约定：**凡是通过 PUT /api/config 能被改的字段，这里都必须恢复**。
+// 否则会出现「后台改完 → 运行正常 → 重启后又变回去」这种最难查的问题。
+// 数值字段一律按「>0 才覆盖」处理，保住"零值 = 未设置"的语义；
+// bool 字段没有"未设置"语义，所以显式覆盖。
 func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	if saved.AgingSeconds > 0 {
 		cfg.AgingSeconds = saved.AgingSeconds
@@ -335,8 +390,51 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	if saved.AuditRetentionDays > 0 {
 		cfg.AuditRetentionDays = saved.AuditRetentionDays
 	}
+	// 主机资产库（V1.2）
+	if saved.UnarchivedOfflineHours > 0 {
+		cfg.UnarchivedOfflineHours = saved.UnarchivedOfflineHours
+	}
+	if saved.ArchiveOfflineSeconds > 0 {
+		cfg.ArchiveOfflineSeconds = saved.ArchiveOfflineSeconds
+	}
+	// 主动扫描（V1.2）
+	if saved.ScanPorts != "" {
+		cfg.ScanPorts = saved.ScanPorts
+	}
+	if saved.ScanRate != "" {
+		cfg.ScanRate = saved.ScanRate
+	}
+	// 自动发现（V1.4 / V1.5）
+	if saved.AutoDiscoverySec > 0 {
+		cfg.AutoDiscoverySec = saved.AutoDiscoverySec
+	}
+	if saved.AutoDiscoveryCIDRs != nil {
+		cfg.AutoDiscoveryCIDRs = saved.AutoDiscoveryCIDRs
+	}
+	if saved.AutoDiscoveryMethod != "" {
+		cfg.AutoDiscoveryMethod = saved.AutoDiscoveryMethod
+	}
+	if saved.AutoDiscoveryExcludeCIDRs != nil {
+		cfg.AutoDiscoveryExcludeCIDRs = saved.AutoDiscoveryExcludeCIDRs
+	}
+	if saved.AutoDiscoveryMaxCIDRs > 0 {
+		cfg.AutoDiscoveryMaxCIDRs = saved.AutoDiscoveryMaxCIDRs
+	}
+	// 会话表容量治理（V1.0）
+	if saved.SessionMaxCount > 0 {
+		cfg.SessionMaxCount = saved.SessionMaxCount
+	}
+	if saved.SessionIdleSeconds > 0 {
+		cfg.SessionIdleSeconds = saved.SessionIdleSeconds
+	}
+	if saved.SessionMaxAgeSeconds > 0 {
+		cfg.SessionMaxAgeSeconds = saved.SessionMaxAgeSeconds
+	}
+	// 开关项
 	cfg.ProbeEnabled = saved.ProbeEnabled
 	cfg.CaptureEnabled = saved.CaptureEnabled
+	cfg.AutoDiscoveryEnabled = saved.AutoDiscoveryEnabled
+	cfg.AutoDiscoveryFollowDiscovered = saved.AutoDiscoveryFollowDiscovered
 }
 
 // ---------- 自动发现：扫描目标计算（V1.5 新网段自动识别） ----------

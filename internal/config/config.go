@@ -32,11 +32,15 @@ func Default() model.SystemConfig {
 		AuditRetentionDays: 90, // §10.8：审计日志保留 90 天
 		Auth:               auth.Default(),
 		// 主机资产库（V1.2）
-		UnarchivedOfflineHours: 72,        // 未归档主机离线 72h 自动清理
-		ArchiveOfflineSeconds:  600,       // 归档主机 last_seen 超 10min 判离线
-		NmapPath:               "",        // 默认 "nmap"，空则运行时按 "nmap" 探测
-		ScanPorts:              "1-65535", // 主动扫描默认全端口
-		ScanRate:               "T4",      // 扫描速率
+		UnarchivedOfflineHours: 72,  // 未归档主机离线 72h 自动清理
+		ArchiveOfflineSeconds:  600, // 归档主机 last_seen 超 10min 判离线
+		// 会话表容量治理（V1.0）
+		SessionMaxCount:      200000,    // 20 万条会话上限
+		SessionIdleSeconds:   300,       // 静默 5 分钟回收
+		SessionMaxAgeSeconds: 21600,     // 单会话最长 6 小时
+		NmapPath:             "",        // 默认 "nmap"，空则运行时按 "nmap" 探测
+		ScanPorts:            "1-65535", // 主动扫描默认全端口
+		ScanRate:             "T4",      // 扫描速率
 		// 自动发现（V1.4）：默认关闭，政务网等隔离环境需显式开启后才主动发包
 		AutoDiscoveryEnabled: false,
 		AutoDiscoverySec:     1800, // 30 分钟
@@ -91,6 +95,16 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.ArchiveOfflineSeconds != 0 {
 		cfg.ArchiveOfflineSeconds = fileCfg.ArchiveOfflineSeconds
+	}
+	// 会话表容量治理（V1.0）
+	if fileCfg.SessionMaxCount != 0 {
+		cfg.SessionMaxCount = fileCfg.SessionMaxCount
+	}
+	if fileCfg.SessionIdleSeconds != 0 {
+		cfg.SessionIdleSeconds = fileCfg.SessionIdleSeconds
+	}
+	if fileCfg.SessionMaxAgeSeconds != 0 {
+		cfg.SessionMaxAgeSeconds = fileCfg.SessionMaxAgeSeconds
 	}
 	if fileCfg.NmapPath != "" {
 		cfg.NmapPath = fileCfg.NmapPath

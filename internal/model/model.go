@@ -1,4 +1,4 @@
-// Package model 定义 StarMap 星图 V1.0 的全部核心数据结构。
+// Package model 定义 StarMap 星图的全部核心数据结构。
 // JSON tag 即 REST API 字段，见 SPEC §3。
 package model
 
@@ -85,8 +85,13 @@ type TopoStats struct {
 
 // TopoSnapshot GET /api/topology 的返回体
 type TopoSnapshot struct {
-	Nodes       []Node    `json:"nodes"`
-	Edges       []Edge    `json:"edges"`
+	Nodes []Node `json:"nodes"`
+	// Edges 仅在下钻视图（Engine.SubnetSnapshot）中填充：树形下钻是一次性打包
+	// "节点 + 段内链路"，前端拿到就能直接画。
+	// 全量视图（Engine.Snapshot）刻意不填这个字段 —— 全量边由 SnapshotEdgePairs()
+	// 单独产出并单独下发，因为可见边要做聚合映射、归属边合成、转发边合成，
+	// 与节点快照不是同一套计算。读到空 Edges 属预期，不要当成"图里没有边"。
+	Edges       []Edge    `json:"edges,omitempty"`
 	Stats       TopoStats `json:"stats"`
 	GeneratedAt time.Time `json:"generated_at"`
 }
@@ -223,6 +228,13 @@ type SystemConfig struct {
 	UnarchivedOfflineHours int `json:"unarchived_offline_hours" yaml:"unarchived_offline_hours"`
 	// 归档主机离线判定阈值（秒，默认 600）。last_seen 超该值即标记 offline。
 	ArchiveOfflineSeconds int64 `json:"archive_offline_seconds" yaml:"archive_offline_seconds"`
+	// 会话表容量治理（V1.0）：被动抓包是持续输入，会话表若无上限会在数小时内吃光内存。
+	// SessionMaxCount 硬上限（默认 200000），超限先回收过期会话，仍超限则丢弃新会话并计数。
+	SessionMaxCount int `json:"session_max_count" yaml:"session_max_count"`
+	// SessionIdleSeconds 会话静默回收阈值（默认 300 秒）。
+	SessionIdleSeconds int64 `json:"session_idle_seconds" yaml:"session_idle_seconds"`
+	// SessionMaxAgeSeconds 单会话最长存活（默认 21600 秒 = 6 小时），防不关闭的长连接撑爆。
+	SessionMaxAgeSeconds int64 `json:"session_max_age_seconds" yaml:"session_max_age_seconds"`
 	// nmap 可执行文件路径（主动端口扫描，默认 "nmap"）。留空或不可用则禁用。
 	NmapPath string `json:"-" yaml:"nmap_path"`
 	// 主动端口扫描的端口范围（nmap -p 参数），默认 "1-65535"（全端口）。后台可配。

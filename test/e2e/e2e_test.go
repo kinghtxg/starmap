@@ -46,7 +46,7 @@ func newEnv(t *testing.T) *env {
 	eng := topology.New(cfg)
 	agg := parser.NewAggregator(cfg.LongConnSeconds, cfg.HeartbeatMaxBytes)
 	det := detect.New(st, eng, cfg)
-	det.SessionsFunc = agg.Finalize
+	det.SessionsFunc = agg.Sessions
 	rvw := review.New(st, eng)
 	scanner := probe.New(eng)
 	h := api.NewRouter(api.Deps{

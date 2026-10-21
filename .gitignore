@@ -5,3 +5,9 @@ starmap.db-shm
 release/
 .verify/
 *.exe~
+
+coverage.out
+coverage-all.out
+coverage.html
+dist/
+smoketest.db*
