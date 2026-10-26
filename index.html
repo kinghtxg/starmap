@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>StarMap 星图 · 内网资产测绘与账外资产发现引擎</title>
-<meta name="description" content="StarMap 星图 —— 被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备。对可疑行为只打标签、不定性。单二进制、离线部署、Apache-2.0 开源。">
+<meta name="description" content="StarMap 星图 —— 被动感知网内流量，主动盘出监听面：自动测绘资产拓扑、登记主机台账、发现账外设备。内置端口扫描与服务指纹，不依赖 nmap。单二进制、离线部署、Apache-2.0 开源。">
 <meta property="og:title" content="StarMap 星图 · 内网资产测绘与账外资产发现引擎">
 <meta property="og:description" content="让内网的每一台设备，都看得见、对得上账。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='3' fill='none' stroke='%2346d4ff' stroke-width='2'/%3E%3Ccircle cx='6' cy='7' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Ccircle cx='26' cy='7' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Ccircle cx='6' cy='25' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Ccircle cx='26' cy='25' r='2' fill='none' stroke='%2346d4ff' stroke-width='1.6'/%3E%3Cpath d='M8 8l6 6M24 8l-6 6M8 24l6-6M24 24l-6-6' stroke='%2346d4ff' stroke-width='1.6'/%3E%3C/svg%3E">
@@ -176,6 +176,7 @@ footer .links a:hover{color:var(--ink)}
     <div class="nav-links">
       <a href="#why">理念</a>
       <a href="#how">能力</a>
+      <a href="#discover">主动发现</a>
       <a href="#architecture">架构</a>
       <a href="#matrix">能力矩阵</a>
       <a href="#roadmap">路线图</a>
@@ -201,7 +202,7 @@ footer .links a:hover{color:var(--ink)}
   <div class="wrap">
     <div class="hero-tag"><span class="dot"></span>Open Source · Intranet Asset Discovery · Apache-2.0</div>
     <h1>让内网的每一台设备，<br>都<em>看得见、对得上账</em>。</h1>
-    <p class="hero-sub">StarMap 星图被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备。对可疑行为只打标签、不定性——一款部署在内网、持续回答「网络里到底有什么」的资产测绘引擎。</p>
+    <p class="hero-sub">StarMap 星图被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备；1.2 起内置端口扫描与服务指纹，把只在监听、从不通信的设备也盘出来。对可疑行为只打标签、不定性——一款部署在内网、持续回答「网络里到底有什么」的资产测绘引擎。</p>
     <div class="hero-cta">
       <a class="btn btn-primary" href="#quickstart">快速开始 →</a>
       <a class="btn btn-ghost" href="#architecture">查看技术架构</a>
@@ -235,13 +236,29 @@ footer .links a:hover{color:var(--ink)}
     <div class="section-head">
       <span class="eyebrow">How it works</span>
       <h2 class="sec-title">让流量自己「画」出资产地图</h2>
-      <p class="sec-lead">不依赖主动扫描，靠被动流量持续感知。三路数据统一汇入一条流水线，拓扑自动生长，账外设备自然浮现。</p>
+      <p class="sec-lead">主体靠被动流量持续感知：三路数据统一汇入一条流水线，拓扑自动生长，账外设备自然浮现。1.2 起再补一层内置主动发现（见下节），专治「只在监听、从不通信」的盲区。</p>
     </div>
     <div class="grid grid-3 concept">
       <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><h3>被动流量测绘</h3><p>PCAP 导入、网卡抓包、远端探针上报，三路流量统一汇入聚合器，自动生长节点与链路——同 MAC 合并、/24 聚合、边老化、NAT 修复。</p></div>
       <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/><path d="M11 8v6M8 11h6"/></svg></div><h3>账外资产发现</h3><p>自动发现的主机登记为「账外资产」，与人工归档的台账对照，账实不符一目了然。未登记主机离线超时自动清理，台账始终保持新鲜。</p></div>
       <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5l-8-3z"/><path d="m9 12 2 2 4-4"/></svg></div><h3>只打标签，不定性</h3><p>对可疑行为仅产出特征标签（如「疑似 FRP 隧道特征」），不判定违规、不告警外发、不联动封禁、不解密流量。合规边界清晰，可在授权环境放心部署。</p></div>
     </div>
+  </div>
+</section>
+
+<section id="discover" style="background:var(--bg-2)">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Active Discovery</span>
+      <h2 class="sec-title">被动看不见的，主动找出来</h2>
+      <p class="sec-lead">只在自己网段里监听、没有任何会话的设备，在纯流量视角下等于不存在——而那恰恰是账外资产最容易藏身的地方。1.2 起内置端口扫描与服务指纹，<b>不依赖 masscan / nmap</b>：政务网运维机上装不上外部工具是常态，装不上不该等于能力归零。</p>
+    </div>
+    <div class="grid grid-3 concept">
+      <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg></div><h3>内置 TCP 端口扫描</h3><p>纯 Go、纯用户态、无需 root、无任何外部命令。三档端口集：quick 约 108 个内网高价值端口（秒级）、standard 约 1.1 千个、full 1-65535。端口表自持——nmap 的 top-ports 按公网服务频率排序，而内网真正值钱的是 445 / 3389 / 8080 / 3306 这些。</p></div>
+      <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 12h6M12 9v6"/></svg></div><h3>服务指纹</h3><p>把「端口开着」升级成「这个端口上跑的是什么」：HTTP 标题与 Server、TLS 证书 CN/SAN（能把一串 IP 还原成一套业务系统）、SSH/FTP/MySQL 首包 banner、favicon mmh3 硬指纹。70 条规则优先认国产内网设备（泛微 / 致远 / 海康 / H3C / 深信服…），宁可不给结论也不给错误结论。</p></div>
+      <div class="panel"><div class="ic"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h3>能长期挂着</h3><p>先扫端口、只有真开了端口才认指纹，单主机指纹上限 32 个。全局令牌桶默认 800 pps——老交换机被 5000 pps 扫过去会管理面失联；再叠上扫描时间窗口（支持跨夜 22:00-06:00）、失败指数退避、已知主机降频，速率预算留给「从没见过」的地址。</p></div>
+    </div>
+    <p style="margin-top:24px;color:var(--ink-dim);font-size:14px;max-width:820px">默认关闭、独立开关：端口扫描会在目标侧留下大量连接记录，与 ARP/ICMP 探活是两种授权风险，政务网往往只批后者。发现结果直接写入端口记录与资产台账，避免「列表里有、拓扑上看不见」的割裂。</p>
   </div>
 </section>
 
@@ -283,7 +300,8 @@ footer .links a:hover{color:var(--ink)}
       <tr><td><span class="tag">ingest</span></td><td>三路数据接入：PCAP/PCAPNG 导入 · 网卡实时抓包 · 远端探针上报</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">topology</span></td><td>拓扑自动测绘：同 MAC 多 IP 合并 · /24 聚合下钻 · 边老化 · NAT 修复</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">assets</span></td><td>主机资产库：账外资产自动登记 · 归档归属信息 · 离线自动清理</td><td>✅ 可用</td></tr>
-      <tr><td><span class="tag">ports</span></td><td>端口记录：流量自动提取 + nmap 主动全端口扫描（双来源）</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">ports</span></td><td>端口记录：流量自动提取 + 内置扫描 / nmap 主动扫描（双来源），带服务指纹</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">discover</span></td><td>主动发现：内置 TCP 端口扫描（三档）· 服务指纹（HTTP/TLS/banner/favicon）· 时间窗口与限速</td><td>✅ 1.2 起</td></tr>
       <tr><td><span class="tag">detect</span></td><td>风险特征打标：frp / clash / reverse_proxy / unknown_egress / multi_net</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">review</span></td><td>复核闭环：确认 / 误报加白 / 暂缓 · 白名单四维度抑制 · 全量审计</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">auth</span></td><td>可选认证：本地账号或 OIDC 单点登录（默认关闭，不做 RBAC）</td><td>✅ 可用</td></tr>
@@ -332,6 +350,8 @@ bash scripts/e2e.sh</pre>
       <figure><img src="screenshots/events.png" alt="事件工作台"><figcaption>风险事件 —— 特征打标与复核闭环（只打标签，不定性）</figcaption></figure>
       <figure><img src="screenshots/ingest.png" alt="数据接入"><figcaption>数据接入 —— PCAP 导入 / 抓包 / 探针 / 主动探测</figcaption></figure>
       <figure><img src="screenshots/ledger.png" alt="台账对照"><figcaption>台账对照 —— 在册在网 / 台账外设备 / 僵尸 / IP 不符 三方对照</figcaption></figure>
+      <figure><img src="screenshots/ports.png" alt="端口记录"><figcaption>端口记录 —— 流量与扫描双来源，指纹列直接给出产品 / 版本 / 证书</figcaption></figure>
+      <figure><img src="screenshots/discover.png" alt="深度发现"><figcaption>深度发现 —— 内置扫描 + 服务指纹，不装 nmap 也能盘出监听面</figcaption></figure>
       <figure><img src="screenshots/topology-xff.png" alt="XFF 还原"><figcaption>七层转发还原 —— 代理背后的真实客户端不再隐身（经代理虚线）</figcaption></figure>
       <figure><img src="screenshots/topology-drill.png" alt="下钻"><figcaption>网段下钻 —— 保留网段内链路，补出上下文节点</figcaption></figure>
       <figure><img src="screenshots/login.png" alt="登录"><figcaption>可选门卫 —— 本地账号或 OIDC 单点登录，默认关闭</figcaption></figure>
@@ -349,7 +369,8 @@ bash scripts/e2e.sh</pre>
       <div class="item"><div class="phase">V1.0 · DONE</div><div><h3>流量测绘基座</h3><p>三路数据接入、拓扑自动测绘、五类风险打标、复核闭环、审计留痕。</p></div></div>
       <div class="item"><div class="phase">V1.1 · DONE</div><div><h3>可靠性与部署</h3><p>拓扑持久化、并发安全、安全默认配置、UI 重构、标准拓扑图、可选 SSO。</p></div></div>
       <div class="item"><div class="phase">V1.2 · DONE</div><div><h3>资产测绘增强</h3><p>主机资产库（账外资产）、端口记录（流量 + nmap）、探针 TLS 指纹贯通、跨平台主动探测。</p></div></div>
-      <div class="item"><div class="phase">NEXT</div><div><h3>资产指纹与探测增强</h3><p>服务指纹识别、资产变更比对、探针批次回执、流式 PCAP 解析、更多协议支持。</p></div></div>
+      <div class="item"><div class="phase">1.2 · DONE</div><div><h3>主动发现</h3><p>内置 TCP 端口扫描（不依赖 nmap）、服务指纹（70 条规则 / TLS / banner / favicon）、发现编排（窗口 / 退避 / 降频）。</p></div></div>
+      <div class="item"><div class="phase">NEXT</div><div><h3>资产变更与探针治理</h3><p>资产变更比对与基线、探针批次回执、流式 PCAP 解析、更多协议与指纹规则。</p></div></div>
     </div>
   </div>
 </section>
@@ -361,6 +382,7 @@ bash scripts/e2e.sh</pre>
       <h2 class="sec-title">项目动态</h2>
     </div>
     <div class="news">
+      <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.2.0"><div class="date">2026-10-27</div><div class="t">1.2.0 发布：主动发现——内置端口扫描与服务指纹</div><div class="d">纯 Go 内置 TCP 扫描（三档端口集 + 令牌桶限速）+ 70 条指纹规则（HTTP / TLS 证书 / banner / favicon mmh3）+ 发现编排（时间窗口 / 指数退避 / 已知主机降频）。不依赖 masscan / nmap，默认关闭。</div></a>
       <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.1.0"><div class="date">2026-10-21</div><div class="t">1.1.0 发布：可观测性、三级门禁与全新界面</div><div class="d">结构化日志 + Prometheus 指标 + viewer/operator/admin 三级写操作门禁；全站 UI 对齐「刻本」设计语言，拓扑新增「代理转发」设备类型。</div></a>
       <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.0.0"><div class="date">2026-10-21</div><div class="t">1.0.0 定版：从"功能能跑"到"能长期在线跑"</div><div class="d">会话表回收与增量下发、配置持久化修复、运维超时加固；CI 9 个 job 全绿，govulncheck 0 可达漏洞。</div></a>
       <a class="item" href="#"><div class="date">2026-10-15</div><div class="t">StarMap 开源发布：内网资产测绘与账外资产发现引擎</div><div class="d">V1.2 版本发布，覆盖流量测绘、账外资产发现、端口记录、风险打标完整闭环。</div></a>
