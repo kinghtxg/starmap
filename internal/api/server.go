@@ -21,6 +21,7 @@ import (
 
 	"starmap/internal/auth"
 	"starmap/internal/detect"
+	"starmap/internal/discover"
 	"starmap/internal/ingest"
 	"starmap/internal/ledger"
 	"starmap/internal/logging"
@@ -47,6 +48,8 @@ type Deps struct {
 	Scanner    *probe.Scanner
 	Cfg        *model.SystemConfig
 	Aggregator *parser.Aggregator
+	// Discover 主动发现执行器（1.2）；nil 表示不提供主动发现接口。
+	Discover *discover.Runner
 	// PacketCh 探针上报报文通道（ProbeHandler 写入）
 	PacketCh chan *parser.PacketInfo
 	// PersistConfig PUT /api/config 持久化钩子
@@ -75,6 +78,11 @@ type Server struct {
 	scanMu    sync.Mutex
 	scanTasks map[string]*scanTask
 	scanSeq   int64
+
+	// 主动发现任务（1.2）
+	discMu    sync.Mutex
+	discTasks map[string]*discoverTask
+	discSeq   int64
 }
 
 // scanTask 主动端口扫描任务状态。
@@ -92,7 +100,7 @@ type scanTask struct {
 func NewRouter(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	s := &Server{d: d, scanTasks: map[string]*scanTask{}}
+	s := &Server{d: d, scanTasks: map[string]*scanTask{}, discTasks: map[string]*discoverTask{}}
 	if s.d.Version == "" {
 		s.d.Version = version.String()
 	}
@@ -139,6 +147,8 @@ func NewRouter(d Deps) *gin.Engine {
 		ro.GET("/assets/stats", s.assetStats)
 		ro.GET("/ports", s.listPorts)
 		ro.GET("/ports/scan/:id", s.scanPortsStatus)
+		ro.GET("/discover/plan", s.discoverPlan)
+		ro.GET("/discover/status/:id", s.discoverStatus)
 		ro.GET("/ledger", s.listLedger)
 		ro.GET("/ledger/diff", s.ledgerDiff)
 		ro.GET("/proxies", s.listProxies)
@@ -160,6 +170,7 @@ func NewRouter(d Deps) *gin.Engine {
 		rw.POST("/assets/archive", s.archiveAsset)
 		rw.PUT("/assets/:key", s.updateAsset)
 		rw.POST("/ports/scan", s.scanPorts)
+		rw.POST("/discover/run", s.discoverRun)
 		rw.POST("/ledger/import", s.ledgerImport)
 
 		// ---- 管理：改配置、删数据 ----
@@ -1285,6 +1296,17 @@ func (s *Server) configToMap(cfg *model.SystemConfig) gin.H {
 		"archive_offline_seconds":      cfg.ArchiveOfflineSeconds,
 		"scan_ports":                   cfg.ScanPorts,
 		"scan_rate":                    cfg.ScanRate,
+		// 主动发现（1.2）
+		"discover_enabled":          cfg.DiscoverEnabled,
+		"discover_profile":          cfg.DiscoverProfile,
+		"discover_rate_pps":         cfg.DiscoverRatePPS,
+		"discover_concurrency":      cfg.DiscoverConcurrency,
+		"discover_timeout_ms":       cfg.DiscoverTimeoutMS,
+		"discover_fingerprint":      cfg.DiscoverFingerprint,
+		"discover_max_fingerprints": cfg.DiscoverMaxFP,
+		"discover_window":           cfg.DiscoverWindow,
+		"discover_sec":              cfg.DiscoverSec,
+		"discover_cidrs":            cfg.DiscoverCIDRs,
 		// 自动发现（V1.4）
 		"auto_discovery_enabled":           cfg.AutoDiscoveryEnabled,
 		"auto_discovery_sec":               cfg.AutoDiscoverySec,
@@ -1468,6 +1490,58 @@ func (s *Server) putConfig(c *gin.Context) {
 		if len(list) > 0 {
 			cfg.AutoDiscoveryExcludeCIDRs = list
 		}
+	}
+	// 主动发现（1.2）
+	if v, ok := m["discover_enabled"].(bool); ok {
+		cfg.DiscoverEnabled = v
+	}
+	if v, ok := strFrom(m, "discover_profile"); ok && v != "" {
+		cfg.DiscoverProfile = v
+	}
+	if v, ok := numFrom(m, "discover_rate_pps"); ok && v >= 0 {
+		cfg.DiscoverRatePPS = int(v)
+	}
+	if v, ok := numFrom(m, "discover_concurrency"); ok && v > 0 {
+		cfg.DiscoverConcurrency = int(v)
+	}
+	if v, ok := numFrom(m, "discover_timeout_ms"); ok && v > 0 {
+		cfg.DiscoverTimeoutMS = int(v)
+	}
+	if v, ok := m["discover_fingerprint"].(bool); ok {
+		cfg.DiscoverFingerprint = v
+	}
+	if v, ok := numFrom(m, "discover_max_fingerprints"); ok && v > 0 {
+		cfg.DiscoverMaxFP = int(v)
+	}
+	if v, ok := strFrom(m, "discover_window"); ok {
+		// 允许清空（=全天），但填了就必须是合法窗口，否则会在半夜静默不扫描
+		if v == "" {
+			cfg.DiscoverWindow = ""
+		} else if _, werr := probe.ParseWindow(v); werr != nil {
+			fail(c, http.StatusBadRequest, werr.Error())
+			return
+		} else {
+			cfg.DiscoverWindow = v
+		}
+	}
+	if v, ok := numFrom(m, "discover_sec"); ok && v >= 0 {
+		cfg.DiscoverSec = int64(v)
+	}
+	if list, ok := listFrom(m, "discover_cidrs"); ok {
+		// 前端可能是 textarea 按行、也可能是逗号分隔的一行；统一拆开再存
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			for _, c := range strings.Split(item, ",") {
+				if c = strings.TrimSpace(c); c != "" {
+					out = append(out, c)
+				}
+			}
+		}
+		cfg.DiscoverCIDRs = out
+	}
+	// 速率上限立即生效：用户把它从 800 调到 100，不该等重启才变安全
+	if s.d.Scanner != nil && cfg.DiscoverRatePPS >= 0 {
+		s.d.Scanner.SetRate(cfg.DiscoverRatePPS)
 	}
 	// 会话表容量治理（V1.0）：改完立即生效，无需重启
 	if v, ok := numFrom(m, "session_max_count"); ok && v > 0 {
@@ -1987,6 +2061,14 @@ func (s *Server) listPorts(c *gin.Context) {
 		State    string `json:"state"`
 		Source   string `json:"source"`
 		LastSeen string `json:"last_seen"`
+		// 服务指纹（1.2）
+		Product  string   `json:"product,omitempty"`
+		Version  string   `json:"version,omitempty"`
+		Title    string   `json:"title,omitempty"`
+		Banner   string   `json:"banner,omitempty"`
+		TLSCN    string   `json:"tls_cn,omitempty"`
+		TLSNames []string `json:"tls_names,omitempty"`
+		Favicon  string   `json:"favicon_hash,omitempty"`
 	}
 	out := make([]portJSON, 0, len(ports))
 	for _, p := range ports {
@@ -1994,6 +2076,8 @@ func (s *Server) listPorts(c *gin.Context) {
 			ID: p.ID, NodeKey: p.NodeKey, IP: p.IP, Port: p.Port, Proto: p.Proto,
 			Service: p.Service, State: p.State, Source: p.Source,
 			LastSeen: p.LastSeen.UTC().Format(time.RFC3339),
+			Product:  p.Product, Version: p.Version, Title: p.Title, Banner: p.Banner,
+			TLSCN: p.TLSCN, TLSNames: p.TLSNames, Favicon: p.Favicon,
 		})
 	}
 	c.JSON(http.StatusOK, out)

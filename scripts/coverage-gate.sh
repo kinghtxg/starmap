@@ -43,6 +43,9 @@ CORE_TARGETS=(
   "starmap/internal/auth:75"
   "starmap/internal/logging:70"
   "starmap/internal/metrics:85"
+  # 1.2 主动发现：扫描/指纹/编排是这一版的核心逻辑，别让它靠 api 包的平均分掩护
+  "starmap/internal/probe:75"
+  "starmap/internal/discover:75"
 )
 
 for target in "${CORE_TARGETS[@]}"; do

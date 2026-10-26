@@ -8,6 +8,7 @@ package probe
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -53,6 +54,16 @@ type Scanner struct {
 	Engine *topology.Engine
 
 	enabled atomic.Bool
+
+	// 内置 TCP 扫描的限速状态（见 connect.go / ports.go）。
+	// mu 只保护这两个字段：限速器本身有独立的锁，避免热路径上互相等待。
+	mu          sync.Mutex
+	limit       *limiter
+	defaultRate int
+
+	// dial 可注入（测试用）；nil 时走 net.Dialer。
+	dial func(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error)
+
 	// NowFunc 可注入时钟（测试用）
 	NowFunc func() time.Time
 	// lookPath / run 可注入（测试用）
@@ -60,12 +71,18 @@ type Scanner struct {
 	run      func(name string, args ...string) (string, error)
 }
 
+// DefaultRatePPS 内置扫描的默认全局速率上限。
+// 800 pps 是保守值：/24 网段 × 100 端口 ≈ 2.5 万个连接，约 30 秒发完，
+// 对老交换机的管理面冲击可接受；追求速度可以在配置里显式调高。
+const DefaultRatePPS = 800
+
 // New 创建探测器（默认关闭）。
 func New(eng *topology.Engine) *Scanner {
 	return &Scanner{
-		Engine:   eng,
-		NowFunc:  time.Now,
-		lookPath: exec.LookPath,
+		Engine:      eng,
+		NowFunc:     time.Now,
+		defaultRate: DefaultRatePPS,
+		lookPath:    exec.LookPath,
 		run: func(name string, args ...string) (string, error) {
 			out, err := exec.Command(name, args...).CombinedOutput()
 			return string(out), err

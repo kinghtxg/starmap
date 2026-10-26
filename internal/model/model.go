@@ -261,6 +261,22 @@ type SystemConfig struct {
 	AutoDiscoveryFollowDiscovered bool     `json:"auto_discovery_follow_discovered" yaml:"auto_discovery_follow_discovered"`
 	AutoDiscoveryExcludeCIDRs     []string `json:"auto_discovery_exclude_cidrs" yaml:"auto_discovery_exclude_cidrs"` // 排除网段（不扫）
 	AutoDiscoveryMaxCIDRs         int      `json:"auto_discovery_max_cidrs" yaml:"auto_discovery_max_cidrs"`         // 单轮最多扫描网段数（默认 64）
+
+	// 主动发现（1.2）：内置 TCP 端口扫描 + 服务指纹，**不依赖 nmap**。
+	//
+	// 与上面的 auto_discovery_* 的分工：那套只管"主机在不在"（ARP/ICMP 探活，默认关闭），
+	// 这套管"主机上跑的是什么"（端口 + 指纹）。分开两套配置是因为两者的授权风险不同：
+	// 探活只是 ping 一下，端口扫描会在目标侧留下大量连接记录，政务网里往往只批前者。
+	DiscoverEnabled     bool     `json:"discover_enabled" yaml:"discover_enabled"`
+	DiscoverProfile     string   `json:"discover_profile" yaml:"discover_profile"`                   // quick|standard|full（默认 quick）
+	DiscoverRatePPS     int      `json:"discover_rate_pps" yaml:"discover_rate_pps"`                 // 全局速率上限（默认 800）
+	DiscoverConcurrency int      `json:"discover_concurrency" yaml:"discover_concurrency"`           // 单主机并发连接（默认 256）
+	DiscoverTimeoutMS   int      `json:"discover_timeout_ms" yaml:"discover_timeout_ms"`             // 单端口超时毫秒（默认 800）
+	DiscoverFingerprint bool     `json:"discover_fingerprint" yaml:"discover_fingerprint"`           // 是否做服务指纹（默认开启）
+	DiscoverMaxFP       int      `json:"discover_max_fingerprints" yaml:"discover_max_fingerprints"` // 单主机最多指纹端口数（默认 32）
+	DiscoverWindow      string   `json:"discover_window" yaml:"discover_window"`                     // 允许扫描的时间窗口，如 "22:00-06:00"，空=全天
+	DiscoverSec         int64    `json:"discover_sec" yaml:"discover_sec"`                           // 周期扫描间隔秒（0=仅手动触发）
+	DiscoverCIDRs       []string `json:"discover_cidrs" yaml:"discover_cidrs"`                       // 周期扫描的目标网段
 }
 
 // ---------- 主机资产库（V1.2） ----------
@@ -298,7 +314,7 @@ type Asset struct {
 // 端口记录来源
 const (
 	PortSourceTraffic = "traffic" // 从流量会话五元组提取
-	PortSourceProbe   = "probe"   // 主动探测（nmap）
+	PortSourceProbe   = "probe"   // 主动探测（nmap / 内置扫描）
 	PortSourceARP     = "arp"     // ARP 探测（无端口，占位保留）
 )
 
@@ -309,11 +325,21 @@ type PortRecord struct {
 	IP        string    `json:"ip"`
 	Port      int       `json:"port"`
 	Proto     string    `json:"proto"`   // tcp | udp
-	Service   string    `json:"service"` // 服务名（nmap 识别）
+	Service   string    `json:"service"` // 服务名（nmap 识别 / 内置指纹归一化）
 	State     string    `json:"state"`   // open | closed | filtered
 	Source    string    `json:"source"`  // traffic | probe | arp
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
+
+	// 服务指纹（1.2）：主动发现认出的"这个端口上到底是什么"。
+	// 台账里只有 "8080 开放" 无法判断该不该管；"泛微 e-cology / 登录页"才有处置优先级。
+	Product  string   `json:"product,omitempty"`      // 产品名（nginx / 泛微 e-cology / 海康威视 设备）
+	Version  string   `json:"version,omitempty"`      // 版本号
+	Title    string   `json:"title,omitempty"`        // 页面标题
+	Banner   string   `json:"banner,omitempty"`       // 非 HTTP 服务首包（已清洗，限 200 字符）
+	TLSCN    string   `json:"tls_cn,omitempty"`       // TLS 证书 CN
+	TLSNames []string `json:"tls_names,omitempty"`    // TLS 证书 SAN（域名 / IP）
+	Favicon  string   `json:"favicon_hash,omitempty"` // favicon mmh3（跨 IP 关联同一套系统的硬指纹）
 }
 
 // Probe 远端探针注册（V1.3：按探针位置自动归纳拓扑）。

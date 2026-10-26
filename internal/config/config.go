@@ -55,6 +55,19 @@ func Default() model.SystemConfig {
 		AutoDiscoveryFollowDiscovered: false,
 		AutoDiscoveryExcludeCIDRs:     []string{"169.254.0.0/16"},
 		AutoDiscoveryMaxCIDRs:         64,
+		// 主动发现（1.2）：内置 TCP 扫描 + 服务指纹。
+		// 默认关闭（与 auto_discovery 一致：隔离环境必须先明确授权才发包）；
+		// 但一旦开启，默认档位取 quick 而不是 full——先让用户看到 "100 个端口 30 秒出结果"，
+		// 再自己决定要不要上全端口，比默认全端口把内网扫一遍更负责。
+		DiscoverEnabled:     false,
+		DiscoverProfile:     "quick",
+		DiscoverRatePPS:     800,
+		DiscoverConcurrency: 256,
+		DiscoverTimeoutMS:   800,
+		DiscoverFingerprint: true,
+		DiscoverMaxFP:       32,
+		DiscoverWindow:      "",
+		DiscoverSec:         0,
 	}
 }
 
@@ -78,6 +91,7 @@ func Load(path string) (model.SystemConfig, error) {
 	var keys map[string]any
 	_ = yaml.Unmarshal(data, &keys)
 	_, hasMetricsEnabled := keys["metrics_enabled"]
+	_, hasDiscoverFingerprint := keys["discover_fingerprint"]
 	// 合并：仅覆盖显式设置的字段（零值字段保留默认）
 	if fileCfg.CaptureInterfaces != nil {
 		cfg.CaptureInterfaces = fileCfg.CaptureInterfaces
@@ -160,6 +174,38 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.AutoDiscoveryMaxCIDRs != 0 {
 		cfg.AutoDiscoveryMaxCIDRs = fileCfg.AutoDiscoveryMaxCIDRs
+	}
+	// 主动发现（1.2）
+	if fileCfg.DiscoverEnabled {
+		cfg.DiscoverEnabled = true
+	}
+	if fileCfg.DiscoverProfile != "" {
+		cfg.DiscoverProfile = fileCfg.DiscoverProfile
+	}
+	if fileCfg.DiscoverRatePPS != 0 {
+		cfg.DiscoverRatePPS = fileCfg.DiscoverRatePPS
+	}
+	if fileCfg.DiscoverConcurrency != 0 {
+		cfg.DiscoverConcurrency = fileCfg.DiscoverConcurrency
+	}
+	if fileCfg.DiscoverTimeoutMS != 0 {
+		cfg.DiscoverTimeoutMS = fileCfg.DiscoverTimeoutMS
+	}
+	// 默认 true 的开关同样只能靠"文件里有没有这个键"判断（写 false 才真关）
+	if hasDiscoverFingerprint {
+		cfg.DiscoverFingerprint = fileCfg.DiscoverFingerprint
+	}
+	if fileCfg.DiscoverMaxFP != 0 {
+		cfg.DiscoverMaxFP = fileCfg.DiscoverMaxFP
+	}
+	if fileCfg.DiscoverWindow != "" {
+		cfg.DiscoverWindow = fileCfg.DiscoverWindow
+	}
+	if fileCfg.DiscoverSec != 0 {
+		cfg.DiscoverSec = fileCfg.DiscoverSec
+	}
+	if len(fileCfg.DiscoverCIDRs) > 0 {
+		cfg.DiscoverCIDRs = fileCfg.DiscoverCIDRs
 	}
 	if fileCfg.AgingSeconds != 0 {
 		cfg.AgingSeconds = fileCfg.AgingSeconds

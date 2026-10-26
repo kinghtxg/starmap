@@ -68,7 +68,8 @@
           </div>
           <div class="sm-toolbar">
             <div class="sm-search"><input class="sm-input is-sm" id="pIp" placeholder="按 IP 过滤" data-ico="search"></div>
-            <button class="sm-btn is-primary" data-role="operator" data-act="scan" data-ico="target">主动扫描</button>
+            <button class="sm-btn is-primary" data-role="operator" data-act="discover" data-ico="drill">深度发现</button>
+            <button class="sm-btn" data-role="operator" data-act="scan" data-ico="target">nmap 扫描</button>
           </div>
         </div>
         <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
@@ -250,24 +251,45 @@ function renderPorts() {
   document.getElementById('portCnt').textContent = list.length + ' 条';
   var box = document.getElementById('portTable');
   if (!list.length) {
-    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="6">' + UI.emptyHTML('暂无端口记录', '从流量自动提取，或点击「主动扫描」用 nmap 扫描全端口') + '</td></tr></tbody>';
+    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="7">' + UI.emptyHTML('暂无端口记录', '从流量自动提取，或点击「深度发现」做内置扫描（无需 nmap）') + '</td></tr></tbody>';
     document.getElementById('portPager').innerHTML = '';
     return;
   }
   var html = '<thead><tr>' +
     '<th>IP 地址</th><th style="min-width:80px">端口</th><th style="min-width:80px">协议</th>' +
-    '<th>服务</th><th style="min-width:90px">来源</th><th style="min-width:150px">最后发现</th></tr></thead><tbody>';
+    '<th>服务</th><th style="min-width:180px">指纹</th>' +
+    '<th style="min-width:90px">来源</th><th style="min-width:150px">最后发现</th></tr></thead><tbody>';
   html += list.map(function (p) {
     return '<tr>' +
       '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(p.ip) + '</span></td>' +
       '<td><span class="sm-mono" style="font-weight:600">' + p.port + '</span></td>' +
       '<td>' + UI.esc(p.proto.toUpperCase()) + '</td>' +
       '<td>' + (p.service ? '<span class="sm-chip">' + UI.esc(p.service) + '</span>' : '-') + '</td>' +
+      '<td>' + fpHTML(p) + '</td>' +
       '<td><span class="sm-badge">' + UI.esc(SRC_LABEL[p.source] || p.source) + '</span></td>' +
       '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtAgo(p.last_seen)) + '</td></tr>';
   }).join('');
   html += '</tbody>';
   box.innerHTML = html;
+}
+
+// 指纹列：优先产品名（最有判断价值），其次标题 / banner / 证书 CN。
+// 详情走 title 属性，不额外占列宽——端口表本来就宽。
+function fpHTML(p) {
+  var label = '';
+  if (p.product) label = p.product + (p.version ? ' ' + p.version : '');
+  else if (p.title) label = p.title;
+  else if (p.tls_cn) label = '证书 ' + p.tls_cn;
+  else if (p.banner) label = p.banner;
+  if (!label) return '<span class="sm-t-3">-</span>';
+  var tips = [];
+  if (p.title && p.title !== label) tips.push('标题：' + p.title);
+  if (p.tls_cn) tips.push('证书 CN：' + p.tls_cn);
+  if (p.tls_names && p.tls_names.length) tips.push('证书 SAN：' + p.tls_names.join(', '));
+  if (p.banner && p.banner !== label) tips.push('Banner：' + p.banner);
+  if (p.favicon_hash) tips.push('favicon：' + p.favicon_hash);
+  var text = label.length > 34 ? label.slice(0, 34) + '…' : label;
+  return '<span class="sm-chip" title="' + UI.escAttr(tips.join('\n') || label) + '">' + UI.esc(text) + '</span>';
 }
 
 /* ---------- 主动扫描 ---------- */
@@ -314,6 +336,138 @@ function pollScan(id, host, m) {
       }
     }).catch(function (e) { clearInterval(timer); host.innerHTML = UI.errorHTML(e); });
   }, 3000);
+}
+
+/* ---------- 深度发现（1.2：内置端口扫描 + 服务指纹，不依赖 nmap） ---------- */
+var DISC_PROFILES = [
+  { k: 'quick', label: '快速 · 内网高价值端口（约 100 个，秒级）' },
+  { k: 'standard', label: '标准 · 1-1024 + 常见高位端口（约 1.1 千个）' },
+  { k: 'full', label: '全端口 · 1-65535（慢，需谨慎）' }
+];
+
+function discoverModal() {
+  var opts = DISC_PROFILES.map(function (p) {
+    return '<option value="' + p.k + '">' + UI.esc(p.label) + '</option>';
+  }).join('');
+  // 任务只能同时跑一个：轮询期间重复点「开始发现」会再起一轮扫描，
+  // 结果是同一个网段被两倍速率打两遍。结束后按钮改成「关闭」，语义才对得上。
+  var state = { running: false, done: false };
+  UI.modal({
+    title: '深度发现（内置扫描 + 服务指纹）',
+    width: 560,
+    body:
+      '<div class="sm-stack">' +
+      '<div class="sm-alert is-info"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+      '<div class="sm-alert-body">不依赖 nmap，纯内置 TCP 扫描：先扫端口，再对高价值端口认服务（产品 / 版本 / 页面标题 / TLS 证书 / favicon）。扫描按配置的速率上限发包，避免打挂老交换机。</div></div>' +
+      '<div class="sm-field"><label>扫描目标（IP / 网段，多个用逗号分隔）</label>' +
+      '<input class="sm-input" id="dTarget" placeholder="如 192.168.31.0/24,10.1.2.3"></div>' +
+      '<div class="sm-field"><label>端口档位</label>' +
+      '<select class="sm-select" id="dProfile">' + opts + '</select></div>' +
+      '<label class="sm-check"><input type="checkbox" id="dFingerprint" checked>识别服务指纹（推荐开启）</label>' +
+      '<div id="dStatus" style="font-size:12px"></div>' +
+      '</div>',
+    okText: '开始发现',
+    hideCancel: true,
+    onOk: function (m) {
+      if (state.done) { return true; }            // 已经出结果，按钮变「关闭」
+      if (state.running) {                        // 扫描中，别开第二轮
+        UI.toast('正在扫描，请等待本轮结束', 'warn');
+        return false;
+      }
+      var body = m.body;
+      var target = body.querySelector('#dTarget').value.trim();
+      if (!target) { UI.toast('请填写扫描目标', 'err'); return false; }
+      var payload = {
+        target: target,
+        profile: body.querySelector('#dProfile').value,
+        fingerprint: body.querySelector('#dFingerprint').checked
+      };
+      return API.discoverRun(payload).then(function (r) {
+        UI.toast('发现任务已启动（' + r.hosts + ' 个地址）', 'ok');
+        state.running = true;
+        lockInputs(body, true);
+        pollDiscover(r.task_id, body.querySelector('#dStatus'), m, function (ok) {
+          state.running = false;
+          if (!ok) { lockInputs(body, false); return; } // 失败可改目标重试，别把弹窗锁死
+          state.done = true;
+          var btn = m.el.querySelector('[data-act="sm-modal-ok"] .sm-btn-ico');
+          if (btn) { btn.textContent = '关闭'; }
+        });
+        return false; // 保持弹窗，展示进度
+      });
+    }
+  });
+}
+
+// 扫描期间锁住输入：改了目标但按钮还是「开始发现」会让人以为能改档重扫，
+// 实际只会另起一轮任务。
+function lockInputs(body, b) {
+  ['#dTarget', '#dProfile', '#dFingerprint'].forEach(function (sel) {
+    var el = body.querySelector(sel);
+    if (el) { el.disabled = !!b; }
+  });
+}
+
+function pollDiscover(id, host, m, onFinish) {
+  host.innerHTML = UI.loadingHTML('正在扫描…');
+  var finished = false;
+  function stop(ok) {
+    if (finished) { return; }
+    finished = true;
+    if (onFinish) { onFinish(ok); }
+  }
+  var timer = setInterval(function () {
+    API.discoverStatus(id).then(function (t) {
+      if (finished) { clearInterval(timer); return; }
+      var pct = t.total ? Math.round((t.done / t.total) * 100) : 0;
+      if (t.status === 'running') {
+        host.innerHTML = UI.loadingHTML(
+          '扫描中 ' + t.done + '/' + t.total + '（' + pct + '%）· 存活 ' + t.alive +
+          ' · 开放端口 ' + t.open_ports + ' · 指纹 ' + t.fingerprints +
+          (t.current ? ' · 当前 ' + UI.esc(t.current) : ''));
+        return;
+      }
+      clearInterval(timer);
+      stop(t.status !== 'error');
+      if (t.status === 'error') {
+        host.innerHTML = '<div class="sm-alert is-danger"><span class="sm-alert-ico">' + UI.ico('warn') + '</span>' +
+          '<div class="sm-alert-body">' + UI.esc(t.error || '发现失败') + '</div></div>';
+        return;
+      }
+      host.innerHTML = discoverResultHTML(t);
+      UI.toast('发现完成：存活 ' + t.alive + ' 台 · 端口 ' + t.open_ports + ' 个 · 指纹 ' + t.fingerprints + ' 条', 'ok');
+      loadAll();
+    }).catch(function (e) {
+      clearInterval(timer);
+      stop(false);
+      host.innerHTML = UI.errorHTML(e);
+    });
+  }, 2000);
+}
+
+function discoverResultHTML(t) {
+  var head = '<div class="sm-alert is-ok"><span class="sm-alert-ico">' + UI.ico('check') + '</span>' +
+    '<div class="sm-alert-body">扫描完成：' + t.total + ' 个地址 · 存活 ' + t.alive +
+    ' 台 · 开放端口 ' + t.open_ports + ' 个 · 指纹 ' + t.fingerprints + ' 条</div></div>';
+  var hosts = t.hosts || [];
+  if (!hosts.length) {
+    return head + '<div class="sm-t-3" style="font-size:12px;margin-top:8px">没有发现开放的端口。若目标是内网设备，可换用「全端口」档位再试一次。</div>';
+  }
+  var rows = hosts.map(function (h) {
+    var svc = (h.services || []).length
+      ? h.services.map(function (x) { return '<span class="sm-chip" style="margin:1px 2px">' + UI.esc(x) + '</span>'; }).join('')
+      : '<span class="sm-t-3">-</span>';
+    var name = h.product || h.title || (h.tls_cn ? '证书 ' + h.tls_cn : '');
+    return '<tr><td><span class="sm-mono" style="font-size:12px">' + UI.esc(h.ip) + '</span></td>' +
+      '<td><span class="sm-mono">' + (h.ports || []).length + '</span></td>' +
+      '<td>' + svc + '</td>' +
+      '<td class="sm-t-3" style="font-size:12px">' + (name ? UI.esc(name) : '-') + '</td></tr>';
+  }).join('');
+  return head +
+    '<div class="sm-table-wrap" style="margin-top:10px;max-height:280px;overflow:auto">' +
+    '<table class="sm-table"><thead><tr><th>IP</th><th>开放端口</th><th>识别到的服务</th><th>产品 / 标题</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table></div>' +
+    (t.truncated ? '<div class="sm-t-3" style="font-size:12px;margin-top:6px">仅展示前 ' + hosts.length + ' 台活跃主机，完整结果已写入端口记录。</div>' : '');
 }
 
 /* ---------- 台账对照（V1.7） ---------- */
@@ -571,6 +725,7 @@ UI.on('del', function (el) {
     .then(function (ok) { if (ok) API.deleteAsset(key).then(function () { UI.toast('已删除', 'ok'); loadAll(); }); });
 });
 UI.on('scan', scanModal);
+UI.on('discover', discoverModal);
 UI.on('ledger-import', ledgerImportModal);
 UI.on('ledger-refresh', function () { UI.toast('正在重新对照…', 'info'); loadLedger(); });
 UI.on('ledger-template', downloadLedgerTemplate);

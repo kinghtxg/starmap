@@ -10,8 +10,8 @@ on:
 env:
   GO_VERSION: "1.26.10"
   # 覆盖率门槛（全仓合并口径，见 scripts/coverage-gate.sh）
-  # 1.1.0 补齐 auth/logging/metrics 测试后全仓 70.6%，门槛随之上调到 69
-  MIN_COVERAGE: "69"
+  # 1.2.0 新增 probe 扫描/指纹与 discover 编排测试后全仓 73.3%，门槛随之上调到 72
+  MIN_COVERAGE: "72"
 
 jobs:
   # ---------- 静态检查 ----------

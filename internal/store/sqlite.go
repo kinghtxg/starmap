@@ -182,7 +182,33 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("拓扑持久化迁移失败: %w", err)
 	}
+	// 1.2：端口记录扩容服务指纹列（在线加列，老库直接升级，无需手工迁移）
+	if err := migratePortFingerprint(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("端口指纹迁移失败: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// migratePortFingerprint 给 ports 表补指纹列。
+// 用 ADD COLUMN 而不是重建表：端口表是历史累积的观测数据，重建一次等于把所有
+// "首次发现时间"重置为迁移当天，账实对照会全部失真。
+func migratePortFingerprint(db *sql.DB) error {
+	cols := []struct{ name, decl string }{
+		{"product", "TEXT NOT NULL DEFAULT ''"},
+		{"version", "TEXT NOT NULL DEFAULT ''"},
+		{"title", "TEXT NOT NULL DEFAULT ''"},
+		{"banner", "TEXT NOT NULL DEFAULT ''"},
+		{"tls_cn", "TEXT NOT NULL DEFAULT ''"},
+		{"tls_names", "TEXT NOT NULL DEFAULT '[]'"},
+		{"favicon", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, c := range cols {
+		if err := ensureColumn(db, "ports", c.name, c.decl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---------- 拓扑持久化迁移（P0-2） ----------
@@ -1067,24 +1093,54 @@ func (s *Store) DeleteAssetsByKeys(keys []string) (int64, error) {
 
 // ---------- 端口记录（V1.2） ----------
 
-const portColumns = `SELECT id,node_key,ip,port,proto,service,state,source,first_seen,last_seen FROM ports`
+const portColumns = `SELECT id,node_key,ip,port,proto,service,state,source,first_seen,last_seen,
+	product,version,title,banner,tls_cn,tls_names,favicon FROM ports`
 
 func scanPort(row rowScanner) (*model.PortRecord, error) {
 	var p model.PortRecord
-	err := row.Scan(&p.ID, &p.NodeKey, &p.IP, &p.Port, &p.Proto, &p.Service, &p.State, &p.Source, &p.FirstSeen, &p.LastSeen)
+	var tlsNames string
+	err := row.Scan(&p.ID, &p.NodeKey, &p.IP, &p.Port, &p.Proto, &p.Service, &p.State, &p.Source,
+		&p.FirstSeen, &p.LastSeen, &p.Product, &p.Version, &p.Title, &p.Banner, &p.TLSCN, &tlsNames, &p.Favicon)
 	if err != nil {
 		return nil, err
+	}
+	if tlsNames != "" && tlsNames != "[]" {
+		fromJSON(tlsNames, &p.TLSNames)
 	}
 	return &p, nil
 }
 
+// 指纹列只能"有则覆盖"，不能被空值抹掉：
+// 同一个端口会同时被流量提取（无指纹）和主动发现（有指纹）写两次，
+// 若直接 excluded.product 覆盖，一次流量写入就会把辛苦扫到的产品名清空。
+const portUpsertConflict = `ON CONFLICT(node_key,ip,port,proto) DO UPDATE SET
+	service=CASE WHEN excluded.service<>'' THEN excluded.service ELSE ports.service END,
+	state=excluded.state, source=excluded.source, last_seen=excluded.last_seen,
+	product=CASE WHEN excluded.product<>'' THEN excluded.product ELSE ports.product END,
+	version=CASE WHEN excluded.version<>'' THEN excluded.version ELSE ports.version END,
+	title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE ports.title END,
+	banner=CASE WHEN excluded.banner<>'' THEN excluded.banner ELSE ports.banner END,
+	tls_cn=CASE WHEN excluded.tls_cn<>'' THEN excluded.tls_cn ELSE ports.tls_cn END,
+	tls_names=CASE WHEN excluded.tls_names NOT IN ('','[]') THEN excluded.tls_names ELSE ports.tls_names END,
+	favicon=CASE WHEN excluded.favicon<>'' THEN excluded.favicon ELSE ports.favicon END`
+
+const portUpsertSQL = `INSERT INTO ports(node_key,ip,port,proto,service,state,source,first_seen,last_seen,
+	product,version,title,banner,tls_cn,tls_names,favicon)
+	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ` + portUpsertConflict
+
 // UpsertPort 幂等写入端口记录（node_key+ip+port+proto 唯一）。
 func (s *Store) UpsertPort(p *model.PortRecord) error {
-	_, err := s.db.Exec(`INSERT INTO ports(node_key,ip,port,proto,service,state,source,first_seen,last_seen)
-		VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(node_key,ip,port,proto) DO UPDATE SET service=excluded.service, state=excluded.state, source=excluded.source, last_seen=excluded.last_seen`,
-		p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen)
+	_, err := s.db.Exec(portUpsertSQL,
+		p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen,
+		p.Product, p.Version, p.Title, p.Banner, p.TLSCN, toJSON(tlsNamesOrEmpty(p.TLSNames)), p.Favicon)
 	return err
+}
+
+func tlsNamesOrEmpty(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }
 
 // UpsertPorts 批量幂等写入端口记录。
@@ -1097,16 +1153,15 @@ func (s *Store) UpsertPorts(ps []model.PortRecord) error {
 		return err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.Prepare(`INSERT INTO ports(node_key,ip,port,proto,service,state,source,first_seen,last_seen)
-		VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(node_key,ip,port,proto) DO UPDATE SET service=excluded.service, state=excluded.state, source=excluded.source, last_seen=excluded.last_seen`)
+	stmt, err := tx.Prepare(portUpsertSQL)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	for i := range ps {
 		p := &ps[i]
-		if _, err := stmt.Exec(p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen); err != nil {
+		if _, err := stmt.Exec(p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen,
+			p.Product, p.Version, p.Title, p.Banner, p.TLSCN, toJSON(tlsNamesOrEmpty(p.TLSNames)), p.Favicon); err != nil {
 			return err
 		}
 	}

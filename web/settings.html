@@ -62,6 +62,17 @@ var FIELDS = [
   { key: 'unarchived_offline_hours', alias: '', label: '账外资产离线清理阈值（小时）', type: 'number', desc: '未归档主机离线超过该时长自动从拓扑删除，默认 72，0 表示不清理', group: '资产与扫描' },
   { key: 'archive_offline_seconds', alias: '', label: '归档主机离线判定（秒）', type: 'number', desc: '归档主机最后发现超过该时长标记离线，默认 600', group: '资产与扫描' },
 
+  { key: 'discover_enabled', alias: '', label: '主动发现开关', type: 'bool', desc: '开启后允许「深度发现」：内置 TCP 端口扫描 + 服务指纹（不依赖 nmap）。会在目标侧留下连接记录，请确认已获授权', group: '资产与扫描' },
+  { key: 'discover_profile', alias: '', label: '默认端口档位', type: 'text', desc: 'quick=内网高价值端口（约 100 个，默认）· standard=1-1024+常见高位 · full=1-65535 全端口', group: '资产与扫描' },
+  { key: 'discover_fingerprint', alias: '', label: '服务指纹识别', type: 'bool', desc: '对高价值端口识别产品 / 版本 / 页面标题 / TLS 证书 / favicon（建议开启）', group: '资产与扫描' },
+  { key: 'discover_rate_pps', alias: '', label: '扫描速率上限（pps）', type: 'number', desc: '全局每秒连接数上限，默认 800。政务网老交换机建议不超过 800，调高可能打挂管理面', group: '资产与扫描' },
+  { key: 'discover_concurrency', alias: '', label: '单主机并发连接', type: 'number', desc: '默认 256，上限 2048。与速率上限共同决定扫描节奏', group: '资产与扫描' },
+  { key: 'discover_timeout_ms', alias: '', label: '单端口超时（毫秒）', type: 'number', desc: '默认 800。跨网段丢包多时可适当加大，但会整体变慢', group: '资产与扫描' },
+  { key: 'discover_max_fingerprints', alias: '', label: '单主机指纹端口上限', type: 'number', desc: '默认 32。只对最有价值的端口（TLS / Web / 已知服务）做指纹，避免变成小型 DoS', group: '资产与扫描' },
+  { key: 'discover_window', alias: '', label: '扫描时间窗口', type: 'text', desc: '如 22:00-06:00（支持跨夜），留空=全天。窗口外周期扫描直接跳过', group: '资产与扫描' },
+  { key: 'discover_sec', alias: '', label: '周期扫描间隔（秒）', type: 'number', desc: '0=仅手动触发；如 21600 表示每 6 小时自动扫一轮', group: '资产与扫描' },
+  { key: 'discover_cidrs', alias: '', label: '周期扫描网段', type: 'list', desc: '每行一个网段，如 10.10.1.0/24；仅当间隔 > 0 时生效', group: '资产与扫描' },
+
   { key: 'listen_addr', alias: 'http_listen', label: 'HTTP 监听地址', type: 'text', desc: '如 127.0.0.1:18080；修改后需重启服务生效', group: '服务与安全' },
   { key: 'audit_retention_days', alias: '', label: '审计日志保留天数', type: 'number', desc: '默认 90 天', group: '服务与安全' }
 ];

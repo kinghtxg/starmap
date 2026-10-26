@@ -16,12 +16,14 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"starmap/internal/api"
 	"starmap/internal/config"
 	"starmap/internal/detect"
+	"starmap/internal/discover"
 	"starmap/internal/ingest"
 	"starmap/internal/logging"
 	"starmap/internal/metrics"
@@ -135,6 +137,10 @@ func main() {
 	det.SessionsFunc = agg.Sessions
 	rvw := review.New(st, engine)
 	scanner := probe.New(engine)
+	// 内置扫描的全局速率上限：先按配置设好，之后 PUT /api/config 改值立即生效。
+	if cfg.DiscoverRatePPS > 0 {
+		scanner.SetRate(cfg.DiscoverRatePPS)
+	}
 	scanner.SetEnabled(cfg.ProbeEnabled)
 
 	// 5. 报文总线：抓包 + 探针共用一个 channel
@@ -305,6 +311,24 @@ func main() {
 			"auth", map[bool]string{true: "X-Metrics-Token", false: "admin 会话"}[cfg.MetricsToken != ""])
 	}
 
+	// 4.x 主动发现执行器（1.2）：手动触发与周期任务共用同一份执行/落库逻辑。
+	// 配置用 atomic.Value 快照传递：PUT /api/config 是 HTTP goroutine 在改 cfg，
+	// 周期任务在另一个 goroutine 读——直接读同一份结构体会被 -race 抓住（真实数据竞争）。
+	var cfgSnap atomic.Value
+	cfgSnap.Store(cfg)
+	discRunner := &discover.Runner{
+		Store:   st,
+		Engine:  engine,
+		Scanner: scanner,
+		Cfg: func() model.SystemConfig {
+			if v, ok := cfgSnap.Load().(model.SystemConfig); ok {
+				return v
+			}
+			return cfg
+		},
+	}
+	go discRunner.Loop(ctx)
+
 	srv := api.NewRouter(api.Deps{
 		Store:      st,
 		Engine:     engine,
@@ -314,7 +338,9 @@ func main() {
 		Cfg:        &cfg,
 		Aggregator: agg,
 		PacketCh:   packetCh,
+		Discover:   discRunner,
 		PersistConfig: func(c model.SystemConfig) error {
+			cfgSnap.Store(c) // 先让周期任务看到新配置，再落盘
 			b, err := json.Marshal(c)
 			if err != nil {
 				return err
@@ -495,6 +521,26 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	if saved.AutoDiscoveryMaxCIDRs > 0 {
 		cfg.AutoDiscoveryMaxCIDRs = saved.AutoDiscoveryMaxCIDRs
 	}
+	// 主动发现（1.2）
+	if saved.DiscoverProfile != "" {
+		cfg.DiscoverProfile = saved.DiscoverProfile
+	}
+	if saved.DiscoverRatePPS > 0 {
+		cfg.DiscoverRatePPS = saved.DiscoverRatePPS
+	}
+	if saved.DiscoverConcurrency > 0 {
+		cfg.DiscoverConcurrency = saved.DiscoverConcurrency
+	}
+	if saved.DiscoverTimeoutMS > 0 {
+		cfg.DiscoverTimeoutMS = saved.DiscoverTimeoutMS
+	}
+	cfg.DiscoverFingerprint = saved.DiscoverFingerprint
+	if saved.DiscoverMaxFP > 0 {
+		cfg.DiscoverMaxFP = saved.DiscoverMaxFP
+	}
+	cfg.DiscoverWindow = saved.DiscoverWindow
+	cfg.DiscoverSec = saved.DiscoverSec
+	cfg.DiscoverCIDRs = saved.DiscoverCIDRs
 	// 会话表容量治理（V1.0）
 	if saved.SessionMaxCount > 0 {
 		cfg.SessionMaxCount = saved.SessionMaxCount
@@ -510,6 +556,7 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	cfg.CaptureEnabled = saved.CaptureEnabled
 	cfg.AutoDiscoveryEnabled = saved.AutoDiscoveryEnabled
 	cfg.AutoDiscoveryFollowDiscovered = saved.AutoDiscoveryFollowDiscovered
+	cfg.DiscoverEnabled = saved.DiscoverEnabled
 	// 可观测性（V1.0）
 	//
 	// 只恢复"后台可改"的三项。metrics_enabled 故意不恢复：

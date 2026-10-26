@@ -8,6 +8,100 @@
 > 该 tag 已于 1.1.0 发布时从远端删除（`git push origin :refs/tags/v1.3.0`），
 > 远端现存 tag 只有 `v1.0.0`、`v1.1.0` 与官网用的 `gh-pages` 分支。
 
+## 1.2.0 (2026-10-27) — 主动发现：内置端口扫描与服务指纹
+
+主题：**从"只看流量里有的"到"把在监听的也找出来"。**
+1.0 让被动分析能长期在线跑，1.1 让出问题时看得懂；1.2 补上被动分析的结构性盲区——
+一台只在自己网段里监听、没有任何会话的设备，在纯流量视角下等于不存在。
+
+参考灯塔（ARL）的资产侦察思路，但**不把 masscan / nmap 当作前提**：
+政务网运维机上装不上工具是常态，装不上就等于能力归零，不是可接受的答案。
+
+### 新增
+
+**内置 TCP 端口扫描（`internal/probe/connect.go`、`ports.go`）**
+- 纯 Go、纯用户态、无需 root、无任何外部命令依赖；worker pool + 令牌桶。
+- 三档端口集：`quick`（108 个内网高价值端口）/ `standard`（1-1024 + 常见高位，1149 个）/ `full`（1-65535）。
+  端口表自持——nmap 的 top-ports 按公网服务频率排序，内网真正有价值的是 445/3389/8080/3306 这类。
+- 默认 256 并发 / 800ms 单端口超时 / **全局 800 pps 限速**（`limiter` 用"下次可发送时刻"而不是 ticker，
+  低频时空转、并发下要额外加锁的问题都不存在）。刻意的取舍：宁可慢，也不把老交换机管理面打挂。
+- `ctx` 可中断，取消后立即返回而不是等 256 个并发连接逐个超时。
+
+**服务指纹（`internal/probe/fingerprint.go`、`rules.go`、`mmh3.go`）**
+- 四类证据互补：HTTP（状态码 / Server / 标题 / 跳转地址）、TLS（证书 CN / SAN / 签发者 / 到期日 / 自签判定）、
+  banner（SSH / FTP / SMTP / MySQL / Redis / memcached / ZooKeeper 首包，只发只读命令）、favicon mmh3。
+- 70 条规则，优先国产内网高价值目标（泛微 / 致远 / 通达 / 蓝凌 / 用友 / 金蝶 / 深信服 / 奇安信 / 海康 / 大华 /
+  H3C / 华为 / 锐捷…），再退到通用 Web 服务器与中间件。命中即返回，不给"同时是 Apache+Tomcat+Java"的含糊结论。
+- 自实现 murmur3 x86-32 与 Shodan 风格 favicon 哈希（base64 每 76 字符换行 + 有符号 int32），
+  与社区指纹库对齐；为此不引入任何依赖。
+- 现代证书常常只写 SAN、CN 留空，判据放在 SAN 上而不是 CN。
+
+**发现编排器（`internal/probe/discover.go`、`schedule.go`、`internal/discover`）**
+- 先扫端口、只有真的开了端口才做指纹；指纹只挑最可能说明身份的端口（TLS > Web > 已知服务），
+  单主机上限默认 32——对 65535 个开放端口各发一次 HTTP 请求是小型 DoS，不是盘点。
+- 三重"能长期挂着"的约束：扫描时间窗口（支持跨夜 `22:00-06:00`）、失败指数退避（1m→6h）、
+  已知主机降频（拓扑里已有的 IP 只扫高价值端口，速率预算留给"从没见过"的地址）。
+- 执行与落库逻辑收在 `internal/discover.Runner`，手动触发与周期任务共用一份——
+  两条路径各写一份必然跑偏（一条修了限速、另一条忘了），这类"手动能扫、定时不扫"的幽灵 bug 极难排查。
+- 周期任务不是固定 Ticker，而是"每分钟检查、到点才跑"：周期 / 网段 / 开关都可能在界面上改，固定 Ticker 只有重启才生效。
+
+### 接口与配置
+
+- `POST /api/discover/run`（异步任务）、`GET /api/discover/status/{id}`、`GET /api/discover/plan`。
+- 新增配置 `discover_enabled` / `discover_profile` / `discover_rate_pps` / `discover_concurrency` /
+  `discover_timeout_ms` / `discover_fingerprint` / `discover_max_fingerprints` / `discover_window` /
+  `discover_sec` / `discover_cidrs`，全部可在「系统配置 → 资产与扫描」热改。
+  与 `auto_discovery_*` 分开两套：探活只是 ping 一下，端口扫描会在目标侧留下大量连接记录，
+  两者授权风险不同，政务网往往只批前者。
+- 时间窗口填写非法立即 400；`discover_sec = 0` 语义是"仅手动触发"，不是"每 0 秒扫一次"。
+- 端口记录输出补齐 `product / version / title / banner / tls_cn / tls_names / favicon_hash`。
+
+### 数据
+
+- `ports` 表新增 7 列（在线 `ADD COLUMN`，老库直接升级）。不重建表：端口表是历史累积的观测数据，
+  重建一次等于把所有"首次发现时间"重置为迁移当天，账实对照会全部失真。
+- upsert 的指纹列改为 `CASE WHEN excluded.x <> '' THEN excluded.x ELSE x END`：
+  同一端口会被流量提取（无指纹）与主动发现（有指纹）各写一次，直接覆盖会让辛苦扫到的产品名被一次流量写入清空。
+
+### 修复
+
+- 主动发现的主机先前无法关联 `node_key`：`NodeByIP` 在 `ObserveHost` 之前查，首轮发现的端口全部挂不上主机、
+  资产详情里看不到端口。改为先建节点再取键（由 `TestRunPersistsPortsAndFeedsTopology` 发现）。
+- 明文 HTTP 打到 TLS 端口时，nginx / Go 会返回 **400 + "plain HTTP request was sent to HTTPS port"**，
+  原逻辑会把它当成正常指纹，导致整个 HTTPS 站点被识别成"明文 400 页面"，证书情报一并丢失。
+  增加该特征识别后继续尝试 https。
+- 厂商名出现在 SSH banner 里（`SSH-2.0-Cisco-1.25`）曾把一台 SSH 服务标成 "Cisco 设备 / http"：
+  服务名错了比产品名缺失更难排查，收紧了 Cisco 规则的匹配串。
+
+### 测试
+
+- `internal/probe`：78.3% → 85.9%。覆盖端口档位/去重、真实 `net.Listen` 开放端口识别、ctx 取消、
+  超时生效、限速计数与并发发放、mmh3 已知向量、标题清洗、banner 清洗、规则优先级与端口限定、
+  httptest 明文与自签 TLS 证书提取、401 页面与 302 不跟随。
+- 新增 `internal/discover`：62.5%→81.7%（Options 映射、落库、指纹不被覆盖、窗口拒绝、
+  周期循环的开关/非法网段/取消退出、IP 数值序排序）。
+- 新增 `internal/api` 主动发现测试：开关门禁、参数校验、端到端触发→轮询→落库、指纹字段回显、配置热改。
+- 全仓覆盖率 70.6% → **73.3%**，CI 门槛 69 → 72；覆盖率门禁新增 `internal/probe:75` / `internal/discover:75`
+  两条核心包下界——这两个包是 1.2 的主要逻辑，不该靠 api 包的平均分掩护。
+- `scripts/ui-smoke.py` 新增「深度发现」用例（三档端口计划递增、弹窗结构、空目标不发出请求、
+  非法目标如实报错且保留弹窗）；顺带修好一直空转的拓扑下钻用例——它原来在 `/api/topology` 里找
+  `subnet:` 前缀，而聚合节点根本不在那个响应里，等于每次都在 "SKIP"，从未真正验证过。
+- `scripts/shot.py` 增加 `SHOTONLY` / `STARDISCOVER`：可以只重拍变化的截图，
+  不必为一个新弹窗拿数据较少的实例把整批截图覆盖成更差的版本。
+
+### 界面
+
+- 「深度发现」弹窗：扫描期间锁定目标与档位（否则改完再点等于又起一轮扫描），
+  结束后按钮变「关闭」，失败时按钮保持「开始发现」以便改目标重试。
+
+### 已知短板
+
+- 指纹规则靠人工维护，覆盖不到长尾产品；未命中时只留标题 / banner 原文，不做模糊猜测。
+- 没有爬虫（不跟进跳转后的目录结构），因此不产出 URL / 目录清单；这是刻意的边界——
+  目录爆破属于渗透测试动作，不在资产测绘的授权范围内。
+- 服务版本识别弱于 nmap `-sV`：能装 nmap 的环境仍建议用 `/api/ports/scan` 补充。
+- 无 UDP 扫描（SNMP / DNS / NTP 的 UDP 服务发现仍依赖流量侧）。
+
 ## 1.1.0 (2026-10-21) — 可观测性、最小权限与视觉统一
 
 主题：**从"单人能用"到"交接得出去"。** 1.0 解决了"能不能长期在线跑"；

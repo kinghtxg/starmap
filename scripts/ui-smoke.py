@@ -1,13 +1,18 @@
 """StarMap 前端交互冒烟（真浏览器）。
 
 这是 1.1.0 唯一没进 CI 的测试层：Web 包里的 `pages_test.go` 只能证明"页面骨架和令牌没漂移"，
-证明不了"点下去会怎样"。本脚本补的是后者——真开一个 Chromium，跑导航、下钻、登录、角色门禁。
+证明不了"点下去会怎样"。本脚本补的是后者——真开一个 Chromium，跑导航、下钻、登录、角色门禁、
+1.2 的深度发现弹窗。
 
 不进 CI 的原因：需要下载浏览器（内网/CI 都可能拉不动），且慢。定位为**发布前手动闸门**：
     python scripts/ui-smoke.py            # 只测无认证实例（默认 127.0.0.1:18097）
     AUTH_BASE=http://127.0.0.1:18096 ...  # 额外测登录与角色门禁
+    AUTH_BASE=                            # 或置空，跳过认证部分
 
 要求后端已灌数据（PCAP + simprobe），否则拓扑为空会跳过下钻用例而不是失败。
+深度发现只测"弹窗能开、档位计划对得上、空/非法目标拦得住"，**不真扫**：
+真扫会打内网，且要 discover_enabled，跨环境不可控；扫描的端到端在
+internal/api/discover_test.go 里用 httptest 覆盖。
 
 用法：
   /c/Users/41935/.workbuddy/binaries/python/envs/deploy/Scripts/python.exe scripts/ui-smoke.py
@@ -103,16 +108,27 @@ def smoke_pages(br):
 
 
 def smoke_topology(br):
-    """拓扑：下钻与返回。数据为空时跳过（不算失败）。"""
+    """拓扑：画布渲染 + 网段下钻 + 返回。
+
+    聚合网段看的是 /api/subnets 的 aggregated 标记，不是 /api/topology 的节点 ID：
+    /api/topology 出的是引擎原始节点（IP/MAC 维度），`subnet:` 前缀要等聚合后才有，
+    早先版本在 /api/topology 里找 `subnet:` 前缀，永远找不到，这段用例一直在空转。
+    """
     ctx = br.new_context(viewport={"width": 1440, "height": 900})
     errors = []
     pg = new_page(ctx, errors)
 
-    topo = pg.request.get(f"{BASE}/api/topology").json()
-    cidrs = [n["ID"][len("subnet:"):] for n in topo.get("Nodes", [])
-             if str(n.get("ID", "")).startswith("subnet:")]
+    cidrs = [s["cidr"] for s in pg.request.get(f"{BASE}/api/subnets").json()
+             if s.get("aggregated")]
     if not cidrs:
-        skipped.append("[拓扑] 当前数据没有 /24 聚合节点，跳下钻用例")
+        # 合成 PCAP 每个 /24 只有两三台，够不到默认聚合阈值（20）。
+        # 阈值本来就是运行时参数，临时降到 1 让聚合发生，比跳过用例更有价值。
+        pg.request.put(f"{BASE}/api/config", data={"aggregate_threshold": 1})
+        pg.wait_for_timeout(3500)  # 引擎每 2s 重算一次
+        cidrs = [s["cidr"] for s in pg.request.get(f"{BASE}/api/subnets").json()
+                 if s.get("aggregated")]
+    if not cidrs:
+        skipped.append("[拓扑] 没有 /24 聚合网段（数据太少且阈值降不下来），跳下钻用例")
         ctx.close()
         return
 
@@ -130,6 +146,72 @@ def smoke_topology(br):
     pg.wait_for_timeout(1500)
     check(not pg.locator("#btnBack").is_visible(), "[拓扑] 返回后按钮未被隐藏")
     check(not errors, f"[拓扑] 控制台错误: {errors}")
+    ctx.close()
+
+
+def smoke_discover(br):
+    """深度发现（1.2）：三档端口计划、弹窗结构、空/非法目标拦得住。"""
+    ctx = br.new_context(viewport={"width": 1440, "height": 900})
+    errors = []
+    pg = new_page(ctx, errors)
+
+    counts = {}
+    for k in ("quick", "standard", "full"):
+        r = pg.request.get(f"{BASE}/api/discover/plan?profile={k}")
+        if r.status != 200:
+            skipped.append(f"[发现] /api/discover/plan?profile={k} 返回 {r.status}（后端可能未升到 1.2）")
+            ctx.close()
+            return
+        counts[k] = r.json()["port_count"]
+    check(counts["quick"] < counts["standard"] < counts["full"],
+          f"[发现] 三档端口数未递增: {counts}")
+    check(counts["quick"] >= 50, f"[发现] quick 档端口过少: {counts['quick']}")
+    check(counts["full"] == 65535, f"[发现] full 档应覆盖 1-65535，实际 {counts['full']}")
+    check(pg.request.get(f"{BASE}/api/discover/plan?profile=nope").status == 400,
+          "[发现] 非法档位应 400")
+
+    pg.goto(f"{BASE}/assets.html", wait_until="networkidle")
+    # 「深度发现」挂在「端口记录」这个 tab 里，不是首屏
+    pg.click('.sm-tab[data-tab="ports"]')
+    pg.wait_for_timeout(400)
+    entry = pg.locator('[data-act="discover"]')
+    if entry.count() == 0:
+        skipped.append("[发现] 当前身份看不到「深度发现」入口（viewer 门禁或旧版页面）")
+        ctx.close()
+        return
+    entry.click()
+    pg.wait_for_selector(".sm-modal", timeout=4000)
+    check("深度发现" in pg.inner_text(".sm-modal-title"), "[发现] 弹窗标题不符")
+    check(pg.locator("#dProfile option").count() == 3, "[发现] 档位下拉不是 3 项")
+    check(pg.locator("#dFingerprint").is_checked(), "[发现] 指纹勾选默认未开")
+
+    sent = []
+    pg.on("request", lambda r: sent.append(r.url) if "/api/discover/run" in r.url else None)
+
+    # 空目标：前端拦，请求根本不该发出去
+    pg.click('[data-act="sm-modal-ok"]')
+    pg.wait_for_timeout(700)
+    check(not sent, f"[发现] 空目标仍发出了 {len(sent)} 个 /api/discover/run 请求")
+    check("请填写扫描目标" in pg.inner_text("body"), "[发现] 空目标没有提示")
+    check(pg.locator(".sm-modal").count() == 1, "[发现] 空目标后弹窗被关掉了（应留着让人填）")
+    check(not errors, f"[发现] 控制台错误: {errors}")
+
+    # 非法目标：后端 4xx/503，前端要如实报错并保留弹窗，不能假装成功。
+    # 这一步会故意打出 4xx，浏览器必然记一条 "Failed to load resource"，
+    # 所以只断言没有 JS 异常，不再拿 console 日志当缺陷。
+    pg.fill("#dTarget", "这不是地址")
+    pg.click('[data-act="sm-modal-ok"]')
+    pg.wait_for_timeout(1500)
+    check(pg.locator(".sm-toast.is-err").count() >= 1, "[发现] 非法目标没有错误提示")
+    check(pg.locator(".sm-modal").count() == 1, "[发现] 非法目标后弹窗被关掉了")
+    check("关闭" not in pg.inner_text('[data-act="sm-modal-ok"]'),
+          "[发现] 失败时按钮不该变成「关闭」")
+
+    pg.click('[data-act="sm-modal-close"]')
+    pg.wait_for_timeout(300)
+    check(pg.locator(".sm-modal").count() == 0, "[发现] 关闭按钮没关掉弹窗")
+    js_errors = [e for e in errors if e.startswith("pageerror")]
+    check(not js_errors, f"[发现] JS 异常: {js_errors}")
     ctx.close()
 
 
@@ -205,6 +287,7 @@ def main() -> int:
         br = p.chromium.launch(channel="msedge")
         smoke_pages(br)
         smoke_topology(br)
+        smoke_discover(br)
         if AUTH_BASE:
             smoke_auth(br)
         br.close()

@@ -100,6 +100,10 @@
     },
     scanPorts: (target) => req('POST', '/api/ports/scan', { target }),
     scanPortsStatus: (id) => req('GET', '/api/ports/scan/' + encodeURIComponent(id)),
+    // 主动发现（V1.6）：内置端口扫描 + 服务指纹，不依赖 nmap
+    discoverPlan: (profile) => req('GET', '/api/discover/plan' + (profile ? '?profile=' + encodeURIComponent(profile) : '')),
+    discoverRun: (payload) => req('POST', '/api/discover/run', payload),
+    discoverStatus: (id) => req('GET', '/api/discover/status/' + encodeURIComponent(id)),
     // 探针注册（V1.3）
     probes: () => req('GET', '/api/probes'),
     deleteProbe: (id) => req('DELETE', '/api/probes/' + encodeURIComponent(id)),

@@ -6,12 +6,12 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.1.0**（[发布说明与上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.2.0**（[1.2 发布说明](docs/RELEASE-1.2.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-70.6%25-yellowgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-73.3%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
@@ -54,7 +54,29 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 - **探针位置归纳**：探针上报携带 `location`，节点归属位置，拓扑按位置分组为泳道。
 - **主机资产库**：自动发现的主机登记为**未归档资产**，可人工归档登记归属单位 / 归属人 / 主机系统 / 位置；未归档主机离线超时自动清理（默认 72h，可配）。
 - **台账对照（账实差异）**：导入人工登记的资产台账 CSV（列名中英文兼容、Excel 导出直接可用），与观测结果三方对照 —— 在册在网 / **台账外设备** / 台账僵尸 / IP 不符；台账外设备按风险排序，网段清单还按 /24 汇总"哪个网段影子设备最多"。
-- **端口记录**：从流量五元组自动提取内网服务端口，也支持调用系统 `nmap` 做主动全端口扫描（默认 `1-65535`，可配），双来源汇总。
+- **端口记录**：从流量五元组自动提取内网服务端口；可用**内置扫描**（不依赖 nmap）或调用系统 `nmap` 做主动扫描，双来源汇总，并带上服务指纹（产品 / 版本 / 标题 / 证书 / favicon）。
+
+### 主动发现（1.2.0）
+
+被动分析回答"网内有什么在通信"，主动发现补上"网内还有什么在监听"。这一块参考了灯塔（ARL）那套资产侦察的思路，
+但**不引入 masscan / nmap 作为前提**——政务网运维机上常常装不上工具，装不上就归零不是可接受的答案。
+
+- **内置 TCP 端口扫描**：纯 Go、纯用户态、无需 root、不需要任何外部命令。三档端口集：
+  `quick`（约 100 个内网高价值端口，秒级）/ `standard`（1-1024 + 常见高位，约 1.1 千个）/ `full`（1-65535）。
+  端口表自持而非沿用 nmap 的 top-ports——后者按公网服务频率排序，而内网真正有价值的是 445 / 3389 / 8080 / 3306 这些。
+- **服务指纹**：把"端口开着"升级成"这个端口上跑的是什么"，四类证据互补：
+  HTTP（状态码 / Server / 页面标题 / 跳转地址）、TLS（证书 CN / SAN / 签发者 / 到期日，能把一串 IP 还原成业务系统）、
+  banner（SSH / FTP / SMTP / MySQL / Redis 等首包）、favicon mmh3 哈希（跨 IP 跨域名关联同一套系统的硬指纹）。
+  内置 70 条规则，优先认**国产内网高价值目标**（泛微 / 致远 / 通达 / 用友 / 金蝶 / 深信服 / 海康 / H3C / 华为…），
+  再退到通用 Web 服务器与中间件。宁可不给结论，也不给错误结论。
+- **编排（先便宜后昂贵）**：先扫端口，只有真的开了端口才做指纹；指纹只挑最可能说明身份的端口
+  （TLS > Web > 已知服务），单主机上限默认 32 个——对 65535 个开放端口各发一次 HTTP 请求，那是小型 DoS 而不是盘点。
+- **限速优先于速度**：全局令牌桶默认 800 pps。政务网里一台老交换机被 5000 pps 扫过去会直接管理面失联，
+  所以宁可慢，也不追求"最快扫完"。
+- **能长期挂着的三重约束**：扫描时间窗口（支持跨夜 `22:00-06:00`）、失败指数退避（一台断电机器不该每轮重扫全端口）、
+  已知主机降频（已在拓扑里的 IP 只扫高价值端口，把速率预算留给"从没见过"的地址——账外资产只可能出现在那里）。
+- **发现即入账**：结果写入端口记录（含指纹）并让活跃主机进入拓扑，避免"资产列表里有、拓扑图上看不见"的割裂。
+- **开关默认关闭**：端口扫描会在目标侧留下大量连接记录，与 ARP/ICMP 探活是两种授权风险，因此独立开关。
 
 ### 风险特征打标（仅标签）
 
@@ -193,6 +215,9 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 | POST/PUT/DELETE | `/assets/*` | 资产归档 / 维护 / 删除 |
 | GET | `/ports` | 端口记录（流量 + 扫描双来源） |
 | POST | `/ports/scan` | 主动端口扫描（nmap，异步） |
+| POST | `/discover/run` | 主动发现：内置端口扫描 + 服务指纹（异步） |
+| GET | `/discover/status/{id}` | 发现任务进度 / 结果 |
+| GET | `/discover/plan` | 端口档位计划（要扫多少端口） |
 | GET | `/events` | 事件列表（状态/类型筛选） |
 | POST | `/events/{id}/review` | 复核（confirm / false_positive / defer） |
 | GET/POST/PUT/DELETE | `/whitelist` `/domains` | 白名单 · 网络域 CRUD |
