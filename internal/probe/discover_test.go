@@ -202,15 +202,20 @@ func TestDiscoverMixedAlive(t *testing.T) {
 	}
 
 	hosts := []string{"10.1.1.1", "127.0.0.1", "10.1.1.2", "10.1.1.3"}
-	var done int
+	var last int
 	opt := DefaultDiscoverOptions()
 	opt.Scan.Timeout = 300 * time.Millisecond
 	opt.SkipFingerprint = true
+	// 这个闭包刻意不加锁：OnProgress 的契约是「串行调用、Done 单调递增」，
+	// 调用方不该被迫自己同步。以前这里不加锁就是 -race 直接抓到的数据竞争。
 	opt.OnProgress = func(p Progress) {
-		if p.Done == 1 && done != 0 {
-			t.Errorf("进度不应重复上报 Done=1")
+		if p.Done != last+1 {
+			t.Errorf("进度应逐台递增：上一次 %d，本次 %d", last, p.Done)
 		}
-		done = p.Done
+		if p.Total != len(hosts) {
+			t.Errorf("Total = %d，期望 %d", p.Total, len(hosts))
+		}
+		last = p.Done
 	}
 
 	res, err := s.Discover(context.Background(), hosts, opt)
@@ -238,8 +243,8 @@ func TestDiscoverMixedAlive(t *testing.T) {
 			t.Errorf("%s 不该有指纹: %+v", h.IP, h.Fingerprints)
 		}
 	}
-	if done != 4 {
-		t.Errorf("最终进度 Done = %d，期望 4", done)
+	if last != 4 {
+		t.Errorf("最终进度 Done = %d，期望 4", last)
 	}
 }
 

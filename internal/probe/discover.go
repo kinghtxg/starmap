@@ -38,10 +38,13 @@ type DiscoverOptions struct {
 	SkipFingerprint     bool               // 只扫端口不认服务（适合超大网段摸底）
 	// Ports 显式端口列表：非空时**优先于** Profile，用于"只关心这几个端口"的场景
 	// （例如只盯 445/3389 查横向移动，或复扫上一轮发现过的端口）。
-	Ports      []int
-	Known      func(ip string) bool // 已知主机判定：命中则降为 quick 档
-	Window     *Window              // 时间窗口：不在窗口内直接拒绝执行
-	OnProgress func(Progress)       // 进度回调（必须轻量，别在里面做 IO）
+	Ports  []int
+	Known  func(ip string) bool // 已知主机判定：命中则降为 quick 档
+	Window *Window              // 时间窗口：不在窗口内直接拒绝执行
+	// 进度回调：由主机并发 goroutine 触发，但**串行调用**（在内部锁内），
+	// 且 Done 单调递增。否则调用方每次都得自己加锁，忘了就是数据竞争
+	// （CI 的 -race 会直接把这条测出来）。别在里面做 IO 或回调 Discover 本身。
+	OnProgress func(Progress)
 }
 
 // DefaultDiscoverOptions 默认参数。
@@ -177,25 +180,22 @@ func (s *Scanner) Discover(ctx context.Context, hosts []string, opt DiscoverOpti
 			hr := s.discoverHost(ctx, ip, hostPorts, hostLabel, opt)
 			res.Hosts[i] = hr
 
+			// 计数与回调放在同一把锁里：这样 Done 严格单调，
+			// 界面上的进度只会往前走，不会因为 goroutine 抢锁顺序而回退。
 			mu.Lock()
 			done++
-			nAlive, nPorts, nFp, nTotal := alive, openPorts, fps, done
 			if hr.Alive {
 				alive++
-				nAlive++
 			}
 			openPorts += len(hr.Ports)
-			nPorts += len(hr.Ports)
 			fps += len(hr.Fingerprints)
-			nFp += len(hr.Fingerprints)
-			mu.Unlock()
-
 			if opt.OnProgress != nil {
 				opt.OnProgress(Progress{
-					Phase: "scan", Done: nTotal, Total: len(hosts), IP: ip,
-					Alive: nAlive, OpenPorts: nPorts, Fingerprints: nFp,
+					Phase: "scan", Done: done, Total: len(hosts), IP: ip,
+					Alive: alive, OpenPorts: openPorts, Fingerprints: fps,
 				})
 			}
+			mu.Unlock()
 		}(i, ip)
 	}
 	wg.Wait()
