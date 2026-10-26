@@ -271,10 +271,15 @@ func (s *Server) discoverStatus(c *gin.Context) {
 	id := c.Param("id")
 	s.discMu.Lock()
 	task := s.discTasks[id]
-	s.discMu.Unlock()
 	if task == nil {
+		s.discMu.Unlock()
 		fail(c, http.StatusNotFound, "发现任务不存在")
 		return
 	}
-	c.JSON(http.StatusOK, task)
+	// 必须持锁拷一份再序列化：后台 goroutine 正在写 Done/Alive/Current 等字段，
+	// 把 *discoverTask 直接交给 c.JSON 就是边读边写（CI 的 -race 抓到的就是这个）。
+	// 浅拷贝够用——Hosts 只在收尾时整体赋值一次，之后不再原地改元素。
+	snap := *task
+	s.discMu.Unlock()
+	c.JSON(http.StatusOK, snap)
 }

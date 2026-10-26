@@ -75,6 +75,10 @@
 - **进度回调是并发调用的**（首次发布后 CI 的 `-race` 抓到）：`Discover` 由主机 goroutine 直接调
   `OnProgress`，调用方只要在回调里写一个普通变量就是数据竞争——测试代码自己先踩了。
   现在回调在计数锁内**串行执行且 `Done` 单调递增**，调用方不必再自己加锁，界面进度也不会回退。
+- **任务状态接口边读边写**（同一轮 CI 在 Windows runner 上抓到）：`GET /api/discover/status` 只在
+  取任务指针时加锁，随后把 `*discoverTask` 直接交给 `c.JSON` 序列化，而后台 goroutine 正在写
+  `Done/Alive/Current`。改为持锁拷贝一份快照再序列化。这类 bug 只在并发时序恰好撞上时暴露，
+  单机跑一天的 `go test` 也未必能复现。
 
 ### 测试
 
