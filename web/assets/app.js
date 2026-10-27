@@ -356,7 +356,9 @@
   on('sm-reload', function () { location.reload(); });
 
   /* ---------- 分页 ---------- */
-  function pagerHTML(total, page, size, act) {
+  // note：可选的附加说明（如"服务端仅载入最近 N 条"），拼在"共 N 条"后面，
+  // 用醒目色标出——被截断却显示成"共 N 条"是最容易误导人的一种"正确的错"。
+  function pagerHTML(total, page, size, act, note) {
     act = act || 'sm-page';
     var pages = Math.max(1, Math.ceil(total / size));
     var cur = Math.min(Math.max(1, page), pages);
@@ -369,7 +371,8 @@
       if (cur < pages - 2) list.push('…');
       list.push(pages);
     }
-    var h = '<div class="sm-pager"><span style="margin-right:auto">共 ' + fmtNum(total) + ' 条 / ' + pages + ' 页</span>';
+    var h = '<div class="sm-pager"><span style="margin-right:auto">共 ' + fmtNum(total) + ' 条 / ' + pages + ' 页' +
+      (note ? ' · <b style="color:#a8661a">' + esc(note) + '</b>' : '') + '</span>';
     h += '<button class="sm-pg" data-act="' + escAttr(act) + '" data-page="' + (cur - 1) + '"' + (cur <= 1 ? ' disabled' : '') + '>&lsaquo;</button>';
     list.forEach(function (p) {
       if (p === '…') { h += '<span class="sm-pg" style="border:none;background:none">…</span>'; return; }

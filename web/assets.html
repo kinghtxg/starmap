@@ -161,6 +161,11 @@ function onlineDot(on) {
     : '<span class="sm-dot is-off"></span> 离线';
 }
 
+// 资产表按页渲染：万级资产一次性塞进 DOM 会让浏览器卡住好几秒，
+// 而这些行里 99% 用户根本不会看（他们用搜索/筛选）。
+var ASSET_PAGE_SIZE = 50;
+var assetPage = 1;
+
 function renderAssets() {
   var kw = (document.getElementById('fKw').value || '').toLowerCase();
   var st = document.getElementById('fStatus').value;
@@ -172,7 +177,11 @@ function renderAssets() {
     }
     return true;
   });
-  document.getElementById('cntBadge').textContent = list.length + ' 台';
+  var ameta = API.meta('/api/assets');
+  var aTrunc = ameta.total > assets.length;
+  document.getElementById('cntBadge').textContent = aTrunc
+    ? '显示 ' + assets.length + ' / 共 ' + ameta.total + ' 台'
+    : list.length + ' 台';
   var box = document.getElementById('assetTable');
   if (!list.length) {
     box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="9">' + UI.emptyHTML('暂无资产', '导入 PCAP 或启动抓包后，系统自动发现主机并登记为账外资产') + '</td></tr></tbody>';
@@ -183,7 +192,11 @@ function renderAssets() {
     '<th>IP 地址</th><th>MAC</th><th>主机名 / 系统</th><th>归属单位</th><th>归属人</th>' +
     '<th style="min-width:80px">状态</th><th style="min-width:90px">在线</th><th style="min-width:150px">最后发现</th>' +
     '<th style="min-width:140px" class="sm-td-ops">操作</th></tr></thead><tbody>';
-  html += list.map(function (a) {
+  // 只渲染当前页
+  var pages = Math.max(1, Math.ceil(list.length / ASSET_PAGE_SIZE));
+  if (assetPage > pages) assetPage = pages;
+  var pageList = list.slice((assetPage - 1) * ASSET_PAGE_SIZE, assetPage * ASSET_PAGE_SIZE);
+  html += pageList.map(function (a) {
     var ips = (a.ips && a.ips.length) ? a.ips.map(function (i) { return '<div class="sm-mono" style="font-size:12px">' + UI.esc(i) + '</div>'; }).join('') : '-';
     var os = a.os ? '<span class="sm-chip">' + UI.esc(a.os) + '</span>' : '';
     var hn = a.hostname ? '<div style="font-size:12px">' + UI.esc(a.hostname) + '</div>' : '';
@@ -205,6 +218,9 @@ function renderAssets() {
   }).join('');
   html += '</tbody>';
   box.innerHTML = html;
+  document.getElementById('assetPager').innerHTML = UI.pagerHTML(
+    list.length, assetPage, ASSET_PAGE_SIZE, 'asset-page',
+    aTrunc ? '服务端仅载入最近 ' + assets.length + ' 台（共 ' + ameta.total + ' 台）' : '');
 }
 
 /* ---------- 归档 / 编辑弹窗 ---------- */
@@ -248,7 +264,11 @@ var SRC_LABEL = { traffic: '流量', probe: '扫描', arp: 'ARP' };
 function renderPorts() {
   var kw = (document.getElementById('pIp').value || '').toLowerCase();
   var list = ports.filter(function (p) { return !kw || (p.ip || '').indexOf(kw) >= 0; });
-  document.getElementById('portCnt').textContent = list.length + ' 条';
+  var pmeta = API.meta('/api/ports');
+  var pTrunc = pmeta.total > ports.length;
+  document.getElementById('portCnt').textContent = pTrunc
+    ? '显示 ' + ports.length + ' / 共 ' + pmeta.total + ' 条'
+    : list.length + ' 条';
   var box = document.getElementById('portTable');
   if (!list.length) {
     box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="7">' + UI.emptyHTML('暂无端口记录', '从流量自动提取，或点击「深度发现」做内置扫描（无需 nmap）') + '</td></tr></tbody>';
@@ -269,6 +289,13 @@ function renderPorts() {
       '<td><span class="sm-badge">' + UI.esc(SRC_LABEL[p.source] || p.source) + '</span></td>' +
       '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtAgo(p.last_seen)) + '</td></tr>';
   }).join('');
+  if (pTrunc) {
+    // 服务端有容量护栏：超过上限的记录不返回。必须显式告知，
+    // 否则用户会以为"扫描扫丢了"，或者拿一份不完整的清单去交差。
+    html += '<tr><td colspan="7" class="sm-t-3" style="font-size:12px;padding:10px 12px">' +
+      '共 ' + pmeta.total + ' 条端口记录，当前仅载入最近 ' + ports.length + ' 条（上限 ' + pmeta.limit +
+      '）。请用上方 IP 过滤缩小范围，或直接在资产详情里看单机端口。</td></tr>';
+  }
   html += '</tbody>';
   box.innerHTML = html;
 }
@@ -504,9 +531,14 @@ function loadLedger() {
 
 function renderLedger() {
   var s = ledger.summary || {};
+  // 没有台账就谈不上"台账外"：差异是相对权威台账算出来的，
+  // 未导入时把全部主机标红，只会让人以为网里全是影子设备。
+  var hasLedger = (s.ledger_total || 0) > 0;
   var cards = [
-    { k: '台账条目', v: s.ledger_total || 0, i: 'asset', cls: '', ex: '人工登记' },
-    { k: '台账外设备', v: s.unmanaged || 0, i: 'warn', cls: (s.unmanaged ? 'is-high' : 'is-ok'), ex: '网内有、台账无' },
+    { k: '台账条目', v: s.ledger_total || 0, i: 'asset', cls: '', ex: hasLedger ? '人工登记' : '尚未导入' },
+    { k: '台账外设备', v: hasLedger ? (s.unmanaged || 0) : 0, i: 'warn',
+      cls: (hasLedger && s.unmanaged ? 'is-high' : 'is-ok'),
+      ex: hasLedger ? '网内有、台账无' : '导入台账后计算' },
     { k: '在册在网', v: s.managed || 0, i: 'check', cls: 'is-ok', ex: '账实一致' },
     { k: '台账僵尸', v: s.ghost || 0, i: 'clock', cls: (s.ghost ? 'is-warn' : ''), ex: '台账有、网内无' }
   ];
@@ -559,8 +591,10 @@ function ledgerRows() {
 function renderLedgerTable() {
   var box = document.getElementById('ledgerTable');
   var list = ledgerRows();
-  if (!list.length) {
-    var hasLedger = (ledger.summary && ledger.summary.ledger_total) > 0;
+  var hasLedger = (ledger.summary && ledger.summary.ledger_total) > 0;
+  // 注意条件：未导入台账时**即便有差异行也要走空态**。
+  // 否则"网内有 25 台、台账为空"会被渲染成一屏"台账外设备"，而它其实只是"还没核对"。
+  if (!hasLedger || !list.length) {
     var hasHost = (ledger.summary && ledger.summary.host_total) > 0;
     var title = hasLedger ? '该类差异为空' : '尚未导入资产台账';
     var desc = hasLedger
@@ -714,6 +748,10 @@ function loadAll() {
 
 /* ---------- 事件绑定 ---------- */
 UI.on('refresh', loadAll);
+UI.on('asset-page', function (el) {
+  assetPage = Number(el.getAttribute('data-page')) || 1;
+  renderAssets();
+});
 UI.on('archive', function (el) { assetForm({ node_key: el.getAttribute('data-key'), ips: [el.getAttribute('data-ip')], status: 'unarchived' }); });
 UI.on('edit', function (el) {
   var a = assets.find(function (x) { return x.node_key === el.getAttribute('data-key'); });
@@ -731,8 +769,8 @@ UI.on('ledger-refresh', function () { UI.toast('正在重新对照…', 'info');
 UI.on('ledger-template', downloadLedgerTemplate);
 UI.on('ledger-clear', ledgerClear);
 
-document.getElementById('fKw').addEventListener('input', renderAssets);
-document.getElementById('fStatus').addEventListener('change', renderAssets);
+document.getElementById('fKw').addEventListener('input', function () { assetPage = 1; renderAssets(); });
+document.getElementById('fStatus').addEventListener('change', function () { assetPage = 1; renderAssets(); });
 document.getElementById('pIp').addEventListener('input', renderPorts);
 document.getElementById('lKw').addEventListener('input', renderLedger);
 document.querySelectorAll('.sm-tab[data-tab]').forEach(function (b) {

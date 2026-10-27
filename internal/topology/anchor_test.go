@@ -273,3 +273,31 @@ func TestSubnetContextNodes(t *testing.T) {
 		}
 	}
 }
+
+// TestNodeByKey 稳定身份查询。
+//
+// 事件/审计这类跨重启还要对上设备的场景必须用 NodeKey，而不是自增 ID：
+// 节点被离线清理后重建会拿到新 ID，按 ID 查会指向不存在的行。
+func TestNodeByKey(t *testing.T) {
+	e := New(testCfg())
+	e.ObserveHost("10.10.1.9", "aa:bb:cc:00:00:09", base)
+
+	n := e.NodeByKey("mac:aa:bb:cc:00:00:09")
+	if n == nil {
+		t.Fatal("按 MAC 身份应能查到节点")
+	}
+	if len(n.IPs) == 0 || n.IPs[0] != "10.10.1.9" {
+		t.Errorf("节点 IP 异常: %v", n.IPs)
+	}
+
+	// 同一身份的两种写法：有 MAC 时 key 是 mac:，不会用 ip:
+	if got := e.NodeByKey("ip:10.10.1.9"); got != nil {
+		t.Error("有 MAC 的节点不应再按 ip: 身份命中（避免同一设备两个身份）")
+	}
+	if got := e.NodeByKey(""); got != nil {
+		t.Error("空 key 应返回 nil")
+	}
+	if got := e.NodeByKey("mac:aa:bb:cc:ff:ff:ff"); got != nil {
+		t.Error("不存在的 key 应返回 nil")
+	}
+}

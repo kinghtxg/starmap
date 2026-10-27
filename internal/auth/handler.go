@@ -6,6 +6,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,11 +116,22 @@ func localLogin(rt *runtime) gin.HandlerFunc {
 			failJSON(c, http.StatusBadRequest, "用户名或密码不能为空")
 			return
 		}
+		// 登录失败限流：本地账号是弱口令的重灾区，而 bcrypt 每次校验都要烧 CPU，
+		// 不限制就等于给攻击者一个"每请求一次就算一次哈希"的放大器。
+		ip := c.ClientIP()
+		if ok, retry := rt.login.Allow(ip, req.Username); !ok {
+			c.Header("Retry-After", strconv.Itoa(retry))
+			failJSON(c, http.StatusTooManyRequests,
+				"登录失败次数过多，请 "+strconv.Itoa(retry)+" 秒后再试")
+			return
+		}
 		u, ok := rt.verifyLocal(req.Username, req.Password)
 		if !ok {
+			rt.login.Fail(ip, req.Username)
 			failJSON(c, http.StatusUnauthorized, "用户名或密码错误")
 			return
 		}
+		rt.login.Succeed(ip, req.Username)
 		name := u.DisplayName
 		if name == "" {
 			name = u.Username

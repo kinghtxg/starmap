@@ -74,7 +74,8 @@ var FIELDS = [
   { key: 'discover_cidrs', alias: '', label: '周期扫描网段', type: 'list', desc: '每行一个网段，如 10.10.1.0/24；仅当间隔 > 0 时生效', group: '资产与扫描' },
 
   { key: 'listen_addr', alias: 'http_listen', label: 'HTTP 监听地址', type: 'text', desc: '如 127.0.0.1:18080；修改后需重启服务生效', group: '服务与安全' },
-  { key: 'audit_retention_days', alias: '', label: '审计日志保留天数', type: 'number', desc: '默认 90 天', group: '服务与安全' }
+  { key: 'audit_retention_days', alias: '', label: '审计日志保留天数', type: 'number', desc: '默认 90 天，0 表示不清理', group: '服务与安全' },
+  { key: 'event_retention_days', alias: '', label: '风险事件保留天数', type: 'number', desc: '默认 180 天，只清理已处置的事件（待处置的告警不会因过期被删除）', group: '服务与安全' }
 ];
 
 var READONLY = { db_path: '数据库路径', probe_token_set: '探针令牌已设置' };

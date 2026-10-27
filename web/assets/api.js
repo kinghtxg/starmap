@@ -4,6 +4,11 @@
 
   const BASE = ''; // 同源部署；file:// 下请求会失败并优雅降级
 
+  // 列表接口的元信息（总数/本次上限），按路径记录。
+  // 为什么不用全局变量：资产页会并发请求 /assets 与 /assets/stats，
+  // 全局变量会被后到的响应覆盖，页面上就会显示错的"共 N 条"。
+  const listMeta = {};
+
   async function req(method, path, body) {
     const init = { method, headers: {} };
     if (body instanceof FormData) {
@@ -27,6 +32,13 @@
       throw new Error(msg);
     }
     if (resp.status === 204) return null;
+    // 列表接口会带 X-Total-Count / X-Result-Limit：服务端有容量护栏，
+    // 超过上限的部分不返回。前端必须知道"被截断了"，否则用户会以为数据丢了。
+    const total = Number(resp.headers.get('X-Total-Count') || 0);
+    const cap = Number(resp.headers.get('X-Result-Limit') || 0);
+    if (total > 0) {
+      listMeta[path.split('?')[0]] = { total: total, limit: cap };
+    }
     const text = await resp.text();
     if (!text) return null;
     // 后端若返回 HTML（异常兜底）而非 JSON，给出友好错误而非 raw "Unexpected token '<'"
@@ -42,6 +54,9 @@
   }
 
   const API = {
+    // 列表元信息：{total, limit}；未取到返回 {total:0, limit:0}。
+    // 用法：const m = API.meta('/api/ports'); if (m.total > list.length) 显示截断提示
+    meta: (p) => listMeta[p] || { total: 0, limit: 0 },
     // 拓扑
     topology: () => req('GET', '/api/topology'),
     subnets: () => req('GET', '/api/subnets'),

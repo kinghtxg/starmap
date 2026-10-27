@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   type TEXT NOT NULL,
   node_id INTEGER NOT NULL DEFAULT 0,
+  node_key TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL DEFAULT '',
   detail TEXT NOT NULL DEFAULT '',
   evidence TEXT NOT NULL DEFAULT '{}',
@@ -138,6 +139,10 @@ CREATE TABLE IF NOT EXISTS ports (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_key ON ports(node_key, ip, port, proto);
 CREATE INDEX IF NOT EXISTS idx_ports_ip ON ports(ip);
 CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
+-- 事件列表按状态/类型筛选并倒序分页；没有索引时每次都是全表扫描 + 排序。
+-- 事件表是持续增长的（检测引擎每 2s 评估一轮），这条索引的价值随时间上升。
+CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, id DESC);
 CREATE TABLE IF NOT EXISTS probes (
   probe_id TEXT PRIMARY KEY,
   name TEXT NOT NULL DEFAULT '',
@@ -186,6 +191,22 @@ func Open(path string) (*Store, error) {
 	if err := migratePortFingerprint(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("端口指纹迁移失败: %w", err)
+	}
+	// 1.3：事件补 node_key。只加列不重建：事件是历史记录，
+	// 重建会丢掉"创建时间"这一列最核心的信息（它决定了保留期与时间线）。
+	if err := ensureColumn(db, "events", "node_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("事件 node_key 迁移失败: %w", err)
+	}
+	// 回填：老事件只有自增 node_id，节点还在的话能直接反查出稳定 key，
+	// 救回"升级后历史事件的关联节点变成裸数字"的观感问题。节点已删的行留空，
+	// 读取时会显示为"（已不在拓扑）"。
+	if _, err := db.Exec(`UPDATE events SET node_key = (
+	        SELECT nodes.node_key FROM nodes WHERE nodes.id = events.node_id)
+	    WHERE node_key = '' AND EXISTS (
+	        SELECT 1 FROM nodes WHERE nodes.id = events.node_id)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("事件 node_key 回填失败: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -733,8 +754,8 @@ func (s *Store) CreateEvent(e *model.RiskEvent) (int64, error) {
 		e.Status = model.EventStatusPending
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO events(type,node_id,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		e.Type, e.NodeID, e.Title, e.Detail, toJSON(e.Evidence), e.Status, e.Level,
+		`INSERT INTO events(type,node_id,node_key,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		e.Type, e.NodeID, e.NodeKey, e.Title, e.Detail, toJSON(e.Evidence), e.Status, e.Level,
 		e.CreatedAt, e.UpdatedAt, e.ReviewNote, e.Reviewer)
 	if err != nil {
 		return 0, err
@@ -759,7 +780,7 @@ func (s *Store) UpdateEventEvidence(id int64, evidence map[string]string) error 
 func scanEvent(row rowScanner) (*model.RiskEvent, error) {
 	var e model.RiskEvent
 	var evidence string
-	err := row.Scan(&e.ID, &e.Type, &e.NodeID, &e.Title, &e.Detail, &evidence, &e.Status, &e.Level,
+	err := row.Scan(&e.ID, &e.Type, &e.NodeID, &e.NodeKey, &e.Title, &e.Detail, &evidence, &e.Status, &e.Level,
 		&e.CreatedAt, &e.UpdatedAt, &e.ReviewNote, &e.Reviewer)
 	if err != nil {
 		return nil, err
@@ -770,7 +791,7 @@ func scanEvent(row rowScanner) (*model.RiskEvent, error) {
 
 // GetEvent 按 ID 查询事件。
 func (s *Store) GetEvent(id int64) (*model.RiskEvent, error) {
-	e, err := scanEvent(s.db.QueryRow(`SELECT id,type,node_id,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer FROM events WHERE id=?`, id))
+	e, err := scanEvent(s.db.QueryRow(`SELECT id,type,node_id,node_key,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer FROM events WHERE id=?`, id))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -778,18 +799,31 @@ func (s *Store) GetEvent(id int64) (*model.RiskEvent, error) {
 }
 
 // ListEvents 按状态/类型筛选查询事件（空串表示不筛选）。
+// 无限量：内部统计与测试用。对外接口一律走 ListEventsPaged，避免一次拉全表。
 func (s *Store) ListEvents(status, evType string) ([]model.RiskEvent, error) {
-	query := `SELECT id,type,node_id,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer FROM events WHERE 1=1`
+	return s.ListEventsPaged(status, evType, 0, 0)
+}
+
+// eventWhere 事件筛选条件的唯一构造点（列表与计数必须完全一致，
+// 否则"共 N 条"和实际列表对不上，用户会以为丢数据）。
+func eventWhere(status, evType string) (string, []any) {
+	where := " WHERE 1=1"
 	var args []any
 	if status != "" {
-		query += ` AND status=?`
+		where += " AND status=?"
 		args = append(args, status)
 	}
 	if evType != "" {
-		query += ` AND type=?`
+		where += " AND type=?"
 		args = append(args, evType)
 	}
-	query += ` ORDER BY id DESC`
+	return where, args
+}
+
+// ListEventsPaged 分页查询事件（limit<=0 且 offset<=0 表示不限量）。
+func (s *Store) ListEventsPaged(status, evType string, limit, offset int) ([]model.RiskEvent, error) {
+	where, args := eventWhere(status, evType)
+	query, args := applyPage(`SELECT id,type,node_id,node_key,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer FROM events`+where+` ORDER BY id DESC`, args, limit, offset)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -804,6 +838,14 @@ func (s *Store) ListEvents(status, evType string) ([]model.RiskEvent, error) {
 		out = append(out, *e)
 	}
 	return out, rows.Err()
+}
+
+// CountEvents 事件总数（与 ListEventsPaged 同一套筛选条件）。
+func (s *Store) CountEvents(status, evType string) (int, error) {
+	where, args := eventWhere(status, evType)
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`+where, args...).Scan(&n)
+	return n, err
 }
 
 // ---------- Whitelist CRUD ----------
@@ -1047,15 +1089,23 @@ func (s *Store) AssetByKey(key string) (*model.Asset, error) {
 	return a, err
 }
 
-// ListAssets 查询资产（按状态过滤，空串=全部）。
+// ListAssets 查询资产（按状态过滤，空串=全部）。无限量，内部/测试用。
 func (s *Store) ListAssets(status string) ([]model.Asset, error) {
-	var rows *sql.Rows
-	var err error
-	if status == "" {
-		rows, err = s.db.Query(assetColumns + ` ORDER BY status, last_seen DESC`)
-	} else {
-		rows, err = s.db.Query(assetColumns+` WHERE status=? ORDER BY last_seen DESC`, status)
+	return s.ListAssetsPaged(status, 0, 0)
+}
+
+// ListAssetsPaged 分页查询资产（limit<=0 且 offset<=0 表示不限量）。
+func (s *Store) ListAssetsPaged(status string, limit, offset int) ([]model.Asset, error) {
+	where, args := "", []any(nil)
+	if status != "" {
+		where, args = " WHERE status=?", []any{status}
 	}
+	order := ` ORDER BY status, last_seen DESC`
+	if status != "" {
+		order = ` ORDER BY last_seen DESC`
+	}
+	query, args := applyPage(assetColumns+where+order, args, limit, offset)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,6 +1119,19 @@ func (s *Store) ListAssets(status string) ([]model.Asset, error) {
 		out = append(out, *a)
 	}
 	return out, rows.Err()
+}
+
+// CountAssets 资产总数（与 ListAssetsPaged 同一套筛选条件）。
+func (s *Store) CountAssets(status string) (int, error) {
+	q := `SELECT COUNT(*) FROM assets`
+	var args []any
+	if status != "" {
+		q += ` WHERE status=?`
+		args = append(args, status)
+	}
+	var n int
+	err := s.db.QueryRow(q, args...).Scan(&n)
+	return n, err
 }
 
 // DeleteAsset 删除资产（按 node_key）。
@@ -1170,9 +1233,13 @@ func (s *Store) UpsertPorts(ps []model.PortRecord) error {
 
 // ListPorts 查询端口记录（可按 ip / node_key 过滤）。
 func (s *Store) ListPorts(ip, nodeKey string) ([]model.PortRecord, error) {
-	q := portColumns
-	var args []any
+	return s.ListPortsPaged(ip, nodeKey, 0, 0)
+}
+
+// portWhere 端口记录筛选条件的唯一构造点（列表与计数共用）。
+func portWhere(ip, nodeKey string) (string, []any) {
 	var conds []string
+	var args []any
 	if ip != "" {
 		conds = append(conds, "ip=?")
 		args = append(args, ip)
@@ -1181,10 +1248,18 @@ func (s *Store) ListPorts(ip, nodeKey string) ([]model.PortRecord, error) {
 		conds = append(conds, "node_key=?")
 		args = append(args, nodeKey)
 	}
-	if len(conds) > 0 {
-		q += " WHERE " + strings.Join(conds, " AND ")
+	if len(conds) == 0 {
+		return "", nil
 	}
-	q += " ORDER BY ip, port"
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// ListPortsPaged 分页查询端口记录（limit<=0 且 offset<=0 表示不限量）。
+func (s *Store) ListPortsPaged(ip, nodeKey string, limit, offset int) ([]model.PortRecord, error) {
+	where, args := portWhere(ip, nodeKey)
+	// 排序键带上 id 兜底：同一 IP:port 可能因 node_key 不同存在多行，
+	// 只按 (ip,port) 排序时 LIMIT 分页会出现"某行在两页都出现/都不出现"。
+	q, args := applyPage(portColumns+where+` ORDER BY ip, port, id`, args, limit, offset)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -1199,6 +1274,14 @@ func (s *Store) ListPorts(ip, nodeKey string) ([]model.PortRecord, error) {
 		out = append(out, *p)
 	}
 	return out, rows.Err()
+}
+
+// CountPorts 端口记录总数（与 ListPortsPaged 同一套筛选条件）。
+func (s *Store) CountPorts(ip, nodeKey string) (int, error) {
+	where, args := portWhere(ip, nodeKey)
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM ports`+where, args...).Scan(&n)
+	return n, err
 }
 
 // DeletePortsByKey 删除某主机的全部端口记录。
@@ -1322,6 +1405,46 @@ func (s *Store) ListLedger() ([]model.LedgerEntry, error) {
 // ClearLedger 清空台账，返回删除条数。
 func (s *Store) ClearLedger() (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM ledger`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ---------- 分页 ----------
+
+// applyPage 给查询追加 LIMIT/OFFSET。
+//
+// limit<=0 且 offset<=0 时原样返回（内部/测试需要全量）。
+// 只给 offset 不给 limit 时用 `LIMIT -1`——SQLite 语法要求 OFFSET 必须跟在 LIMIT 后面，
+// 这不是"不限量"以外的任何语义，别误读成负数限制。
+func applyPage(q string, args []any, limit, offset int) (string, []any) {
+	if limit <= 0 && offset <= 0 {
+		return q, args
+	}
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	} else {
+		q += " LIMIT -1"
+	}
+	if offset > 0 {
+		q += " OFFSET ?"
+		args = append(args, offset)
+	}
+	return q, args
+}
+
+// DeleteEventsBefore 清理早于 cutoff 的事件，返回删除条数。
+//
+// onlyResolved=true 时只删已处置（confirmed / false_positive / deferred）的事件：
+// 保留期到了但没人处置的告警不能静默消失——那等于把"没看见"变成"不存在"。
+func (s *Store) DeleteEventsBefore(cutoff time.Time, onlyResolved bool) (int64, error) {
+	q := `DELETE FROM events WHERE created_at < ?`
+	if onlyResolved {
+		q += ` AND status <> 'pending'`
+	}
+	res, err := s.db.Exec(q, cutoff)
 	if err != nil {
 		return 0, err
 	}

@@ -14,6 +14,7 @@ type runtime struct {
 	sessions *sessionStore
 	flows    *flowStore
 	oidc     *oidcClient
+	login    *loginLimiter
 }
 
 func newRuntime(cfg Config) *runtime {
@@ -23,6 +24,7 @@ func newRuntime(cfg Config) *runtime {
 		sessions: newSessionStore(),
 		flows:    newFlowStore(),
 		oidc:     newOIDCClient(c.OIDC),
+		login:    newLoginLimiter(),
 	}
 }
 

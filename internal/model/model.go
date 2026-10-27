@@ -161,9 +161,13 @@ type Session struct {
 
 // RiskEvent 风险事件
 type RiskEvent struct {
-	ID         int64             `json:"id"`
-	Type       string            `json:"type"` // frp|clash|reverse_proxy|unknown_egress|multi_net
-	NodeID     int64             `json:"node_id"`
+	ID     int64  `json:"id"`
+	Type   string `json:"type"` // frp|clash|reverse_proxy|unknown_egress|multi_net
+	NodeID int64  `json:"node_id"`
+	// NodeKey 稳定的节点身份（mac:/ip:/ext:）。
+	// 事件只存自增 node_id 是不够的：节点离线被清理后重建会拿到新的 id，
+	// 老事件就指向了一个不存在的行——界面上表现为"关联节点"变成一串裸数字。
+	NodeKey    string            `json:"node_key,omitempty"`
 	Title      string            `json:"title"`
 	Detail     string            `json:"detail"`
 	Evidence   map[string]string `json:"evidence"`
@@ -220,8 +224,15 @@ type SystemConfig struct {
 	DBPath             string   `json:"db_path" yaml:"db_path"`
 	ProbeToken         string   `json:"probe_token" yaml:"probe_token"`                   // §10.7 探针上报可选 token
 	AuditRetentionDays int      `json:"audit_retention_days" yaml:"audit_retention_days"` // §10.8 审计日志保留天数
+	// 风险事件保留天数（默认 180，0 表示不清理）。只清已处置的事件：
+	// 保留期到了但没人复核的告警不能被静默删除，否则"没看见"就变成了"不存在"。
+	EventRetentionDays int `json:"event_retention_days" yaml:"event_retention_days"`
 	// P0-4：CORS 白名单。为空表示仅允许同源（不发 Access-Control-Allow-Origin）。
 	CorsOrigins []string `json:"cors_origins" yaml:"cors_origins"`
+	// 可信反向代理网段。部署在 nginx / SLB 后面时必须填反代地址，
+	// 否则 ClientIP 恒为反代地址：审计日志里所有人的操作人都是 127.0.0.1，
+	// 登录失败限流也会把所有用户当成同一个来源。为空表示不信任任何代理（直连部署）。
+	TrustedProxies []string `json:"trusted_proxies" yaml:"trusted_proxies"`
 	// 可选账号系统 / APSSO SSO 门卫，默认 mode=none 即不启用（合规裁定 K1，见 docs/AUTH-APSSO.md）。
 	Auth auth.Config `json:"auth" yaml:"auth"`
 	// 未归档主机离线自动清理阈值（小时，默认 72）。0 表示不清理。

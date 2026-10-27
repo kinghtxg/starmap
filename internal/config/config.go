@@ -28,8 +28,9 @@ func Default() model.SystemConfig {
 		HeartbeatMaxBytes:  64,               // SPEC §5：心跳 payload < 64B
 		ListenAddr:         "127.0.0.1:8080", // P0-4：默认仅回环，对外请走反代
 		DBPath:             "starmap.db",
-		ProbeToken:         "", // §10.7：默认不校验
-		AuditRetentionDays: 90, // §10.8：审计日志保留 90 天
+		ProbeToken:         "",  // §10.7：默认不校验
+		AuditRetentionDays: 90,  // §10.8：审计日志保留 90 天
+		EventRetentionDays: 180, // 风险事件保留 180 天（只清已处置的）
 		Auth:               auth.Default(),
 		// 主机资产库（V1.2）
 		UnarchivedOfflineHours: 72,  // 未归档主机离线 72h 自动清理
@@ -111,8 +112,14 @@ func Load(path string) (model.SystemConfig, error) {
 	if fileCfg.AuditRetentionDays != 0 {
 		cfg.AuditRetentionDays = fileCfg.AuditRetentionDays
 	}
+	if fileCfg.EventRetentionDays != 0 {
+		cfg.EventRetentionDays = fileCfg.EventRetentionDays
+	}
 	if fileCfg.CorsOrigins != nil {
 		cfg.CorsOrigins = fileCfg.CorsOrigins
+	}
+	if fileCfg.TrustedProxies != nil {
+		cfg.TrustedProxies = fileCfg.TrustedProxies
 	}
 	if fileCfg.UnarchivedOfflineHours != 0 {
 		cfg.UnarchivedOfflineHours = fileCfg.UnarchivedOfflineHours

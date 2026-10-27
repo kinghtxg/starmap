@@ -794,6 +794,23 @@ func (e *Engine) GetNode(id int64) *model.Node {
 }
 
 // NodeByIP 按内网 IP 查节点。
+// NodeByKey 按稳定身份（mac:/ip:/ext:）查节点。
+// 事件、审计这类"跨重启还要能对上设备"的场景必须用它，不能用自增 ID——
+// 节点被清理后重建会拿到新 ID。
+func (e *Engine) NodeByKey(key string) *model.Node {
+	if key == "" {
+		return nil
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if id, ok := e.nodeKey[key]; ok {
+		if n := e.nodes[id]; n != nil {
+			return n
+		}
+	}
+	return nil
+}
+
 func (e *Engine) NodeByIP(ip string) *model.Node {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

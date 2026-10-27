@@ -119,6 +119,7 @@ function applyFilter() {
     ? all.filter(function (e) {
       return String(e.Title || '').toLowerCase().indexOf(kw) >= 0 ||
         String(e.NodeID).indexOf(kw) >= 0 ||
+        String(e.NodeLabel || '').toLowerCase().indexOf(kw) >= 0 ||
         String(e.NodeAPID || '').toLowerCase().indexOf(kw) >= 0 ||
         String(e.Detail || '').toLowerCase().indexOf(kw) >= 0;
     })
@@ -137,7 +138,11 @@ function render() {
   });
   document.getElementById('sumLine').textContent =
     '高危 ' + st.high + ' · 中危 ' + st.mid + ' · 待处置 ' + st.pending;
-  document.getElementById('cntBadge').textContent = view.length + ' 条';
+  // 徽标与分页必须同源，否则会出现"列表 8 条 / 共 6 条"这种自相矛盾的数字。
+  // 筛选生效时写成 "7 / 共 8 条"，读者一眼能看出这是筛选后的结果而不是总数。
+  document.getElementById('cntBadge').textContent = view.length === all.length
+    ? all.length + ' 条'
+    : view.length + ' / 共 ' + all.length + ' 条';
 
   if (!view.length) {
     box.innerHTML = UI.emptyHTML('暂无符合条件的风险事件', '可调整筛选条件，或等待检测引擎产出新的告警');
@@ -164,14 +169,18 @@ function render() {
         '<td>' + UI.riskTag(ev.Level) + '</td>' +
         '<td><div class="sm-ellipsis" title="' + UI.escAttr(ev.Title) + '">' + UI.esc(ev.Title) + '</div></td>' +
         '<td class="sm-t-2" style="font-size:12px">' + UI.esc(typeLabel(ev.Type)) + '</td>' +
-        '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(ev.NodeAPID || ev.NodeID) + '</span></td>' +
+        '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(ev.NodeLabel || ev.NodeAPID || ev.NodeID) + '</span></td>' +
         '<td>' + statusBadge(ev.Status) + '</td>' +
         '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtTime(ev.CreatedAt)) + '</td>' +
         '<td class="sm-td-ops"><button class="sm-btn is-text is-sm" data-act="open" data-id="' + UI.escAttr(ev.ID) + '">复核</button></td>' +
         '</tr>';
     }).join('') +
     '</tbody></table>';
-  document.getElementById('pager').innerHTML = UI.pagerHTML(total, page, SIZE, 'page');
+  var emeta = API.meta('/api/events');
+  var etrunc = emeta.total > all.length
+    ? '服务端仅载入最近 ' + all.length + ' 条（共 ' + emeta.total + ' 条）'
+    : '';
+  document.getElementById('pager').innerHTML = UI.pagerHTML(total, page, SIZE, 'page', etrunc);
 }
 
 /* ---------- 抽屉 ---------- */
@@ -190,7 +199,7 @@ function openDrawer(id) {
     kv('类型', '<span class="sm-badge is-brand">' + UI.esc(typeLabel(ev.Type)) + '</span>') +
     kv('风险等级', UI.riskTag(ev.Level)) +
     kv('处置状态', statusBadge(ev.Status)) +
-    kv('关联节点', '<span class="sm-mono">' + UI.esc(ev.NodeAPID || ev.NodeID) + '</span>') +
+    kv('关联节点', '<span class="sm-mono">' + UI.esc(ev.NodeLabel || ev.NodeAPID || ev.NodeID) + '</span>') +
     kv('详情', UI.esc(ev.Detail || '-')) +
     kv('创建时间', UI.fmtTime(ev.CreatedAt)) +
     kv('更新时间', UI.fmtTime(ev.UpdatedAt)) +

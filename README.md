@@ -6,12 +6,12 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.2.0**（[1.2 发布说明](docs/RELEASE-1.2.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.3.0**（[1.3 发布说明](docs/RELEASE-1.3.md) · [1.2](docs/RELEASE-1.2.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-73.3%25-yellowgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-73.5%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
@@ -275,7 +275,15 @@ UI 设计基准与「刻本」同一套令牌。
 
 ## 文档
 
-- [docs/RELEASE-1.0.md](docs/RELEASE-1.0.md) — **发布说明 + 上线就绪度评估 + 已知边界（部署前必读）**
+**先读这三份**（1.3.0 补齐）：
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — **架构与实现详解**：每个功能怎么实现、代码在哪、为什么这么写
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — **部署与运维手册**：反代、配置项全表、升级、监控、排障
+- [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
+
+其余：
+- [docs/RELEASE-1.3.md](docs/RELEASE-1.3.md) — 1.3.0 发布说明（安全加固 / 容量护栏 / 文档）
+- [docs/RELEASE-1.2.md](docs/RELEASE-1.2.md) — 1.2.0 发布说明（主动发现）
+- [docs/RELEASE-1.0.md](docs/RELEASE-1.0.md) — 发布说明 + 上线就绪度评估 + 已知边界（部署前必读）
 - [SPEC](SPEC.md) — 需求与数据模型规格
 - [ACCEPTANCE](ACCEPTANCE.md) — 验收清单
 - [CHANGELOG](CHANGELOG.md) — 版本变更（含每处修复的动机）
@@ -290,6 +298,9 @@ UI 设计基准与「刻本」同一套令牌。
 | `session_idle_seconds` | 300 | 会话静默多久回收；调太小会让慢速长连接反复上下线 |
 | `session_max_age_seconds` | 21600 | 单会话最长存活，防不关闭的连接撑爆 |
 | `aggregate_threshold` | 20 | 单个 /24 超过该主机数则聚合显示；大图调大 |
+| `trusted_proxies` | 空 | 部署在反代后必须填，否则审计里的操作人全是反代 IP |
+| `event_retention_days` | 180 | 事件保留期（只清已处置的）；此前完全没有清理策略 |
+| `audit_retention_days` | 90 | 审计保留期；1.3 之前清理函数没有调用点，是"改了没用"的开关 |
 
 舒适规模：**1 万节点 / 3 万边**（全量快照约 43ms）。超过后建议调大聚合阈值或改用网段下钻分区查看。
 

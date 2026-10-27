@@ -1053,9 +1053,42 @@ html[data-sm-role="operator"] [data-role="admin"] {
   .sm-h1 { font-size: 20px; }
   .sm-content { padding: 0 16px 20px; }
 }
+/* 窄屏（手机 / 竖屏平板）：
+   1. 侧栏不能直接 display:none —— 那样导航就没了，手机上无法切页；
+      改成顶部横向滚动导航条（纯 CSS，无 JS 状态，刷新后依然可用）。
+   2. 顶栏的全局搜索与用户名在 390px 下放不下，必须先收起，
+      否则整页横向溢出（实测溢出 89px，页面出现左右滚动条）。 */
 @media (max-width: 760px) {
-  .sm-sider { display: none; }
+  .sm-body { flex-direction: column; }
+  .sm-sider {
+    display: flex;
+    flex-direction: row;
+    position: static;
+    width: 100%;
+    flex: 0 0 auto;
+    height: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--sm-sider-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    z-index: 20;
+  }
+  .sm-sider-brand, .sm-sider-foot, .sm-sider-group { display: none; }
+  .sm-sider-nav {
+    display: flex;
+    flex-direction: row;
+    gap: 4px;
+    padding: 6px 10px;
+    overflow: visible;
+  }
+  .sm-navitem { white-space: nowrap; padding: 6px 10px; }
+  .sm-gsearch { display: none; }
+  .sm-userchip .sm-ellipsis, .sm-userchip .sm-role { display: none; }
+  .sm-userchip { padding: 4px 8px; gap: 0; }
   .sm-grid-2, .sm-grid-3, .sm-grid-4 { grid-template-columns: 1fr; }
   .sm-brand-en, .sm-topbar-sep { display: none; }
   .sm-footer { flex-direction: column; align-items: flex-start; gap: 6px; }
+  /* 弹窗在窄屏要贴边，固定 520px 宽会直接溢出屏幕 */
+  .sm-modal { width: calc(100vw - 24px) !important; max-height: calc(100vh - 48px); }
 }

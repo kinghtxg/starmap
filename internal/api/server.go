@@ -83,6 +83,13 @@ type Server struct {
 	discMu    sync.Mutex
 	discTasks map[string]*discoverTask
 	discSeq   int64
+
+	// 资产同步节流（见 syncAssetsThrottled）：
+	// syncAssets 是"全节点 × 逐台查库 + 逐台写库"的 O(N) 操作，
+	// 而资产页一次加载会同时请求 /assets 与 /assets/stats，等于同一份全量同步跑两遍。
+	assetMu       sync.Mutex
+	assetSyncing  bool
+	lastAssetSync time.Time
 }
 
 // scanTask 主动端口扫描任务状态。
@@ -108,6 +115,9 @@ func NewRouter(d Deps) *gin.Engine {
 	// 这里仍能拿到 500 状态并打出完整日志（若顺序反过来，panic 会跳过本层收尾逻辑）。
 	r.Use(logging.Middleware())
 	r.Use(gin.Recovery())
+	// 安全头与请求体上限：越靠外越好，未认证请求、404、静态资源都要带上
+	r.Use(securityHeaders())
+	r.Use(bodyLimit())
 	if s.d.Metrics != nil {
 		r.Use(s.d.Metrics.Middleware())
 	}
@@ -258,6 +268,18 @@ func secureEqual(a, b string) bool {
 // token 校验失败时用 secureEqual 常量时间比较。
 func fail(c *gin.Context, code int, msg string) {
 	c.JSON(code, gin.H{"error": msg})
+}
+
+// internalError 内部错误出口：详细原因进日志（带 request_id 可追），
+// 客户端只拿到一句人话。
+//
+// 直接把 err.Error() 回给前端会漏出 SQL 语句、表名/列名、文件路径——
+// 对"内网自用"也许无所谓，但开源产品会被部署到客户环境，
+// 报错信息就是别人做渗透时最便宜的侦察情报。
+func internalError(c *gin.Context, err error, msg string) {
+	logging.FromContext(c.Request.Context()).Error(msg,
+		logging.Err(err), logging.Fmt("path", c.Request.URL.Path))
+	fail(c, http.StatusInternalServerError, msg)
 }
 
 // ---------- 指标导出 ----------
@@ -582,10 +604,14 @@ func (s *Server) peersOf(apiID string) []gin.H {
 
 // eventJSON 前端契约事件
 type eventJSON struct {
-	ID         int64             `json:"ID"`
-	Type       string            `json:"Type"`
-	NodeID     int64             `json:"NodeID"`
-	NodeAPID   string            `json:"NodeAPID,omitempty"`
+	ID       int64  `json:"ID"`
+	Type     string `json:"Type"`
+	NodeID   int64  `json:"NodeID"`
+	NodeAPID string `json:"NodeAPID,omitempty"`
+	// NodeLabel 人类可读的节点标识（IP / 网段 / MAC）。
+	// 前端只显示 NodeAPID 时，用户看到的是 "40" 这种内部主键，
+	// 既不知道是哪台设备，也无法据此去拓扑里定位。
+	NodeLabel  string            `json:"NodeLabel,omitempty"`
 	Title      string            `json:"Title"`
 	Detail     string            `json:"Detail"`
 	Evidence   map[string]string `json:"Evidence"`
@@ -615,17 +641,72 @@ func (s *Server) toEventJSON(e *model.RiskEvent) eventJSON {
 	if ev.Evidence == nil {
 		ev.Evidence = map[string]string{}
 	}
-	if n := s.d.Engine.GetNode(e.NodeID); n != nil {
+	// 先按稳定身份找，再回退自增 ID：
+	// 节点离线被清理后重建会拿到新 ID，只按 ID 查会让历史事件"关联节点"变成裸数字。
+	var n *model.Node
+	if e.NodeKey != "" {
+		n = s.d.Engine.NodeByKey(e.NodeKey)
+	}
+	if n == nil {
+		n = s.d.Engine.GetNode(e.NodeID)
+	}
+	if n != nil {
 		ev.NodeAPID = topology.APINodeID(n)
+		ev.NodeLabel = nodeDisplayLabel(n)
+	} else if e.NodeID > 0 {
+		// 设备已经不在拓扑里：明确说出来，比留一串数字有用得多
+		ev.NodeLabel = "节点 #" + strconv.FormatInt(e.NodeID, 10) + "（已不在拓扑）"
 	}
 	return ev
 }
 
+// nodeDisplayLabel 把节点转成"人能看懂"的标识。
+// 优先级：网段（聚合节点）> 主 IP > MAC > 内部 ID。
+// 事件列表、审计详情这类地方只会出现一个节点标识，显示数字主键等于没给信息。
+func nodeDisplayLabel(n *model.Node) string {
+	if n == nil {
+		return ""
+	}
+	for _, l := range n.Labels {
+		if (l == topology.LabelSubnetAgg || l == topology.LabelExternalAg) && len(n.IPs) > 0 {
+			if l == topology.LabelExternalAg {
+				return "外部 " + n.IPs[0]
+			}
+			return "网段 " + n.IPs[0]
+		}
+	}
+	// 多 IP 设备优先展示内网地址：对外出口地址对定位没有帮助
+	var fallback string
+	for _, ip := range n.IPs {
+		if topology.IsPrivate(ip) {
+			if len(n.IPs) > 1 {
+				return ip + " 等 " + strconv.Itoa(len(n.IPs)) + " 个地址"
+			}
+			return ip
+		}
+		if fallback == "" {
+			fallback = ip
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	if n.MAC != "" {
+		return n.MAC
+	}
+	return strconv.FormatInt(n.ID, 10)
+}
+
 func (s *Server) listEvents(c *gin.Context) {
-	evs, err := s.d.Store.ListEvents(c.Query("status"), c.Query("type"))
+	status, evType := c.Query("status"), c.Query("type")
+	limit, offset := pageParams(c)
+	evs, err := s.d.Store.ListEventsPaged(status, evType, limit, offset)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "查询事件失败")
 		return
+	}
+	if total, cerr := s.d.Store.CountEvents(status, evType); cerr == nil {
+		setListMeta(c, total, limit)
 	}
 	out := make([]eventJSON, 0, len(evs))
 	for i := range evs {
@@ -649,6 +730,9 @@ func (s *Server) reviewEvent(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
+	if !checkField(c, "note", body.Note, maxNoteLen) || !checkField(c, "reviewer", body.Reviewer, maxNameLen) {
+		return
+	}
 	ev, err := s.d.Reviewer.Review(id, body.Action, body.Note, body.Reviewer)
 	switch {
 	case errors.Is(err, review.ErrInvalidAction):
@@ -658,7 +742,7 @@ func (s *Server) reviewEvent(c *gin.Context) {
 		fail(c, http.StatusNotFound, err.Error())
 		return
 	case err != nil:
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	c.JSON(http.StatusOK, s.toEventJSON(ev))
@@ -681,7 +765,7 @@ func toWhitelistJSON(w *model.WhitelistEntry) whitelistJSON {
 func (s *Server) listWhitelist(c *gin.Context) {
 	list, err := s.d.Store.ListWhitelist()
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	out := make([]whitelistJSON, 0, len(list))
@@ -713,10 +797,13 @@ func (s *Server) createWhitelist(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "value 不能为空")
 		return
 	}
+	if !checkField(c, "value", body.Value, maxValueLen) || !checkField(c, "note", body.Note, maxNoteLen) {
+		return
+	}
 	w := &model.WhitelistEntry{Kind: strings.ToLower(body.Kind), Value: strings.TrimSpace(body.Value), Note: body.Note}
 	id, err := s.d.Store.CreateWhitelistEntry(w)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	w.ID = id
@@ -741,9 +828,12 @@ func (s *Server) updateWhitelist(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "非法 kind 或空 value")
 		return
 	}
+	if !checkField(c, "value", body.Value, maxValueLen) || !checkField(c, "note", body.Note, maxNoteLen) {
+		return
+	}
 	w := &model.WhitelistEntry{ID: id, Kind: strings.ToLower(body.Kind), Value: strings.TrimSpace(body.Value), Note: body.Note}
 	if err := s.d.Store.UpdateWhitelistEntry(w); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.d.Reviewer.Audit(s.actor(c), "whitelist_update", w.Kind+":"+w.Value, body.Note)
@@ -758,7 +848,7 @@ func (s *Server) deleteWhitelist(c *gin.Context) {
 		return
 	}
 	if err := s.d.Store.DeleteWhitelistEntry(id); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.d.Reviewer.Audit(s.actor(c), "whitelist_delete", strconv.FormatInt(id, 10), "")
@@ -792,7 +882,7 @@ func (s *Server) refreshDomains() {
 func (s *Server) listDomains(c *gin.Context) {
 	ds, err := s.d.Store.ListDomains()
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	out := make([]domainJSON, 0, len(ds))
@@ -812,10 +902,14 @@ func (s *Server) createDomain(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "name 不能为空")
 		return
 	}
+	if !checkField(c, "name", body.Name, maxNameLen) ||
+		!checkCIDRs(c, body.CIDRs) || !checkColor(c, body.Color) {
+		return
+	}
 	d := &model.NetDomain{Name: body.Name, CIDRs: body.CIDRs, Color: body.Color}
 	id, err := s.d.Store.CreateDomain(d)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	d.ID = id
@@ -835,9 +929,17 @@ func (s *Server) updateDomain(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
+	if strings.TrimSpace(body.Name) == "" {
+		fail(c, http.StatusBadRequest, "name 不能为空")
+		return
+	}
+	if !checkField(c, "name", body.Name, maxNameLen) ||
+		!checkCIDRs(c, body.CIDRs) || !checkColor(c, body.Color) {
+		return
+	}
 	d := &model.NetDomain{ID: id, Name: body.Name, CIDRs: body.CIDRs, Color: body.Color}
 	if err := s.d.Store.UpdateDomain(d); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.refreshDomains() // 修改 CIDR 后节点 Domain 归属随之更新
@@ -852,7 +954,7 @@ func (s *Server) deleteDomain(c *gin.Context) {
 		return
 	}
 	if err := s.d.Store.DeleteDomain(id); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.refreshDomains()
@@ -1140,7 +1242,8 @@ func (s *Server) syncTopology() int {
 	// 流量角度：提取内网主机端口（V1.2）
 	s.extractPortsFromSessions(sessions)
 	// 节点 → 资产同步（账外资产自动登记，V1.2）
-	s.syncAssets()
+	// 用节流版：探针上报是高频路径，每批都跑全量同步会把单连接占死。
+	s.syncAssetsThrottled()
 	return len(sessions)
 }
 
@@ -1292,6 +1395,7 @@ func (s *Server) configToMap(cfg *model.SystemConfig) gin.H {
 		"db_path":                      cfg.DBPath,
 		"probe_token_set":              cfg.ProbeToken != "", // 不回显明文
 		"audit_retention_days":         cfg.AuditRetentionDays,
+		"event_retention_days":         cfg.EventRetentionDays,
 		"unarchived_offline_hours":     cfg.UnarchivedOfflineHours,
 		"archive_offline_seconds":      cfg.ArchiveOfflineSeconds,
 		"scan_ports":                   cfg.ScanPorts,
@@ -1385,6 +1489,14 @@ func listFrom(m map[string]any, keys ...string) ([]string, bool) {
 func (s *Server) putConfig(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		// 请求体超过 bodyLimit 上限：必须回 413 而不是笼统的 400，
+		// 否则运维看到"读取请求体失败"会去查网络、查代理，方向全错。
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			fail(c, http.StatusRequestEntityTooLarge,
+				"配置请求体超过上限（"+strconv.FormatInt(tooLarge.Limit, 10)+" 字节）")
+			return
+		}
 		fail(c, http.StatusBadRequest, "读取请求体失败")
 		return
 	}
@@ -1438,6 +1550,9 @@ func (s *Server) putConfig(c *gin.Context) {
 	}
 	if v, ok := numFrom(m, "audit_retention_days"); ok && v > 0 {
 		cfg.AuditRetentionDays = int(v)
+	}
+	if v, ok := numFrom(m, "event_retention_days"); ok && v > 0 {
+		cfg.EventRetentionDays = int(v)
 	}
 	if v, ok := numFrom(m, "unarchived_offline_hours"); ok && v >= 0 {
 		cfg.UnarchivedOfflineHours = int(v)
@@ -1599,12 +1714,16 @@ func (s *Server) listAudit(c *gin.Context) {
 	limit := 500
 	if v := c.Query("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			// 夹取：审计表只增不减，?limit=100000000 等于要求把整表读进内存
 			limit = n
+			if limit > listMaxLimit {
+				limit = listMaxLimit
+			}
 		}
 	}
 	logs, err := s.d.Store.ListAuditLogs(limit)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "查询审计日志失败")
 		return
 	}
 	out := make([]auditJSON, 0, len(logs))
@@ -1772,7 +1891,7 @@ const ledgerMaxBytes = 16 << 20
 // 以资产库为准（资产库由 AllNodes 同步，已含被聚合网段折叠的主机，见 V1.4 P0），
 // 风险等级从拓扑节点补充——账外设备里"有没有高风险的"才是排查优先级的关键。
 func (s *Server) collectLedgerHosts() []ledger.Host {
-	s.syncAssets()
+	s.syncAssetsThrottled()
 	assets, err := s.d.Store.ListAssets("")
 	if err != nil {
 		return nil
@@ -1878,7 +1997,7 @@ func (s *Server) ledgerImport(c *gin.Context) {
 func (s *Server) listLedger(c *gin.Context) {
 	entries, err := s.d.Store.ListLedger()
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	if entries == nil {
@@ -1891,7 +2010,7 @@ func (s *Server) listLedger(c *gin.Context) {
 func (s *Server) clearLedger(c *gin.Context) {
 	n, err := s.d.Store.ClearLedger()
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.d.Reviewer.Audit(s.actor(c), "ledger_clear", "all", fmt.Sprintf("清空 %d 条台账", n))
@@ -1902,7 +2021,7 @@ func (s *Server) clearLedger(c *gin.Context) {
 func (s *Server) ledgerDiff(c *gin.Context) {
 	entries, err := s.d.Store.ListLedger()
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	hosts := s.collectLedgerHosts()
@@ -1937,12 +2056,16 @@ func (s *Server) listProxies(c *gin.Context) {
 }
 
 func (s *Server) listAssets(c *gin.Context) {
-	s.syncAssets() // 列表前先同步一次，保证新节点即时可见
+	s.syncAssetsThrottled() // 同步（带 5s 节流），保证新节点可见且不拖垮单连接
 	status := c.Query("status")
-	assets, err := s.d.Store.ListAssets(status)
+	limit, offset := pageParams(c)
+	assets, err := s.d.Store.ListAssetsPaged(status, limit, offset)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "查询资产失败")
 		return
+	}
+	if total, cerr := s.d.Store.CountAssets(status); cerr == nil {
+		setListMeta(c, total, limit)
 	}
 	out := make([]gin.H, 0, len(assets))
 	for _, a := range assets {
@@ -1951,14 +2074,54 @@ func (s *Server) listAssets(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-func (s *Server) assetStats(c *gin.Context) {
-	s.syncAssets()
-	assets, err := s.d.Store.ListAssets("")
-	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+// ---------- 资产同步 ----------
+
+// assetSyncInterval 两次全量同步之间的最小间隔。
+// 5 秒是个折中：资产页连续刷新（F5 连按、多标签页）不会每次都跑一遍全量同步，
+// 而新发现的设备最迟 5 秒后就能在资产库里看到——比"每次请求都同步"的代价低两个数量级。
+const assetSyncInterval = 5 * time.Second
+
+// syncAssetsThrottled 带节流与防重入的全量同步。
+//
+// 为什么必须节流：syncAssets 对每台主机做一次 SELECT + 一次 UPSERT，
+// 1 万台主机就是 2 万次 SQLite 往返；而 store 用单连接（MaxOpenConns=1），
+// 这段时间里所有其它请求（拓扑、事件、端口）都在排队。这不是"慢一点"，是整站卡住。
+//
+// 并发进来的第二个调用直接返回（读到的是上一轮结果）：宁可让访问者看到 5 秒前的资产快照，
+// 也不要让它排队等 2 万次 SQL——后者会把连接池占满，连带把只读接口一起拖死。
+func (s *Server) syncAssetsThrottled() {
+	s.assetMu.Lock()
+	if s.assetSyncing || time.Since(s.lastAssetSync) < assetSyncInterval {
+		s.assetMu.Unlock()
 		return
 	}
-	var total, archived, unarchived, online, offline int
+	s.assetSyncing = true
+	s.lastAssetSync = time.Now()
+	s.assetMu.Unlock()
+
+	defer func() {
+		s.assetMu.Lock()
+		s.assetSyncing = false
+		s.assetMu.Unlock()
+	}()
+	s.syncAssets()
+}
+
+func (s *Server) assetStats(c *gin.Context) {
+	s.syncAssetsThrottled()
+	assets, err := s.d.Store.ListAssets("")
+	if err != nil {
+		internalError(c, err, "查询资产统计失败")
+		return
+	}
+	// 直接遍历 model 而不是调 assetJSON：后者每条都构造一个 gin.H（map + 时间格式化），
+	// 1 万条资产就是 1 万个 map，而这里只需要一个布尔值。
+	offlineSec := s.d.Cfg.ArchiveOfflineSeconds
+	if offlineSec <= 0 {
+		offlineSec = 600
+	}
+	window := time.Duration(offlineSec) * time.Second
+	var total, archived, unarchived, online int
 	for _, a := range assets {
 		total++
 		if a.Status == model.AssetArchived {
@@ -1966,10 +2129,8 @@ func (s *Server) assetStats(c *gin.Context) {
 		} else {
 			unarchived++
 		}
-		if s.assetJSON(a)["online"].(bool) {
+		if time.Since(a.LastSeen) < window {
 			online++
-		} else {
-			offline++
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -1977,7 +2138,7 @@ func (s *Server) assetStats(c *gin.Context) {
 		"archived":   archived,
 		"unarchived": unarchived, // 账外资产
 		"online":     online,
-		"offline":    offline,
+		"offline":    total - online,
 	})
 }
 
@@ -1999,8 +2160,16 @@ func (s *Server) archiveAsset(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "缺少 node_key")
 		return
 	}
+	if !checkField(c, "hostname", body.Hostname, maxNameLen) ||
+		!checkField(c, "os", body.OS, maxNameLen) ||
+		!checkField(c, "owner", body.Owner, maxNameLen) ||
+		!checkField(c, "department", body.Department, maxNameLen) ||
+		!checkField(c, "location", body.Location, maxNameLen) ||
+		!checkField(c, "description", body.Description, maxDescLen) {
+		return
+	}
 	if err := s.d.Store.ArchiveAsset(body.NodeKey, body.Owner, body.Department, body.Location, body.Hostname, body.OS, body.Description, s.actor(c)); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.d.Reviewer.Audit(s.actor(c), "asset_archive", body.NodeKey,
@@ -2022,8 +2191,16 @@ func (s *Server) updateAsset(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "请求体格式错误: "+err.Error())
 		return
 	}
+	if !checkField(c, "hostname", body.Hostname, maxNameLen) ||
+		!checkField(c, "os", body.OS, maxNameLen) ||
+		!checkField(c, "owner", body.Owner, maxNameLen) ||
+		!checkField(c, "department", body.Department, maxNameLen) ||
+		!checkField(c, "location", body.Location, maxNameLen) ||
+		!checkField(c, "description", body.Description, maxDescLen) {
+		return
+	}
 	if err := s.d.Store.UpdateAsset(key, body.Owner, body.Department, body.Location, body.Hostname, body.OS, body.Description); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.d.Reviewer.Audit(s.actor(c), "asset_update", key, "")
@@ -2033,7 +2210,7 @@ func (s *Server) updateAsset(c *gin.Context) {
 func (s *Server) deleteAsset(c *gin.Context) {
 	key := c.Param("key")
 	if err := s.d.Store.DeleteAsset(key); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	_, _ = s.d.Store.DeletePortsByKey(key)
@@ -2046,10 +2223,14 @@ func (s *Server) deleteAsset(c *gin.Context) {
 func (s *Server) listPorts(c *gin.Context) {
 	ip := c.Query("ip")
 	key := c.Query("node_key")
-	ports, err := s.d.Store.ListPorts(ip, key)
+	limit, offset := pageParams(c)
+	ports, err := s.d.Store.ListPortsPaged(ip, key, limit, offset)
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "查询端口记录失败")
 		return
+	}
+	if total, cerr := s.d.Store.CountPorts(ip, key); cerr == nil {
+		setListMeta(c, total, limit)
 	}
 	type portJSON struct {
 		ID       int64  `json:"id"`
@@ -2150,7 +2331,7 @@ func (s *Server) scanPortsStatus(c *gin.Context) {
 func (s *Server) listProbes(c *gin.Context) {
 	probes, err := s.d.Store.ListProbes()
 	if err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	if probes == nil {
@@ -2162,7 +2343,7 @@ func (s *Server) listProbes(c *gin.Context) {
 func (s *Server) deleteProbe(c *gin.Context) {
 	id := c.Param("id")
 	if err := s.d.Store.DeleteProbe(id); err != nil {
-		fail(c, http.StatusInternalServerError, err.Error())
+		internalError(c, err, "服务内部错误")
 		return
 	}
 	s.d.Reviewer.Audit(s.actor(c), "probe_delete", id, "")

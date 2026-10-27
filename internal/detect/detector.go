@@ -145,6 +145,11 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 
 		ev.Status = model.EventStatusPending
 		ev.CreatedAt = now
+		// 记下稳定的节点身份：只存自增 node_id，节点一旦离线被清理再重建，
+		// 老事件就指向了一个不存在的行（界面上"关联节点"退化成裸数字）。
+		if node != nil {
+			ev.NodeKey = node.NodeKey
+		}
 		id, err := d.Store.CreateEvent(ev)
 		if err != nil {
 			return created, err

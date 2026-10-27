@@ -329,6 +329,13 @@ func main() {
 	}
 	go discRunner.Loop(ctx)
 
+	// 4.y 数据保留期维护：审计日志与风险事件都是"只增不减"的表。
+	//
+	// 注意 audit_retention_days 此前只是界面上一个能改的数字——清理函数
+	// DeleteAuditLogsBefore 写好了却没有任何调用点，等于配置静默失效。
+	// 这里把它接上，并给事件补上同样的保留期（此前彻底没有清理策略）。
+	go maintenanceLoop(ctx, st, &cfg)
+
 	srv := api.NewRouter(api.Deps{
 		Store:      st,
 		Engine:     engine,
@@ -350,6 +357,18 @@ func main() {
 		Version: version.String(),
 		Metrics: met,
 	})
+
+	// 可信反向代理：只有来自这些网段的请求才会解析 X-Forwarded-For。
+	//
+	// 两件事都依赖它：审计日志的 actor、登录失败限流的分组维度。
+	// 不配置（默认）时 Gin 直接取 TCP 对端地址——这是最安全的默认（XFF 是客户端可写文本），
+	// 但部署在 nginx / SLB 后面时它会让所有请求看起来都来自同一个地址，
+	// 于是审计全是 127.0.0.1、限流把全网用户当成一个人。这种情况必须显式配置。
+	if err := srv.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		slog.Warn("trusted_proxies 配置无效，已按「不信任任何代理」启动",
+			"value", cfg.TrustedProxies, "err", err)
+		_ = srv.SetTrustedProxies([]string{})
+	}
 
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddr,
@@ -630,4 +649,49 @@ func isExcludedCIDR(cidr string, excludes []string) bool {
 		}
 	}
 	return false
+}
+
+// maintenanceInterval 数据保留期清理的执行间隔。
+// 6 小时：保留期以"天"为单位，清理频率高了只是白扫表，低了也无所谓。
+const maintenanceInterval = 6 * time.Hour
+
+// maintenanceLoop 定期清理超过保留期的审计日志与已处置事件。
+//
+// 为什么启动时先跑一次：长期运行的实例可能在升级前就攒了几十 GB 的历史数据，
+// 升级后如果等 6 小时才清，第一个小时的查询依然是被拖慢的。
+func maintenanceLoop(ctx context.Context, st *store.Store, cfg *model.SystemConfig) {
+	run := func() {
+		if st == nil {
+			return
+		}
+		now := time.Now()
+		if days := cfg.AuditRetentionDays; days > 0 {
+			cutoff := now.AddDate(0, 0, -days)
+			if n, err := st.DeleteAuditLogsBefore(cutoff); err != nil {
+				slog.Warn("审计日志清理失败", "err", err)
+			} else if n > 0 {
+				slog.Info("审计日志已按保留期清理", "deleted", n, "days", days)
+			}
+		}
+		if days := cfg.EventRetentionDays; days > 0 {
+			cutoff := now.AddDate(0, 0, -days)
+			if n, err := st.DeleteEventsBefore(cutoff, true); err != nil {
+				slog.Warn("风险事件清理失败", "err", err)
+			} else if n > 0 {
+				slog.Info("风险事件已按保留期清理", "deleted", n, "days", days, "only_resolved", true)
+			}
+		}
+	}
+
+	run()
+	t := time.NewTicker(maintenanceInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			run()
+		}
+	}
 }
