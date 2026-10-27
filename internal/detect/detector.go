@@ -5,9 +5,7 @@ package detect
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"strconv"
 	"sync"
 	"time"
 
@@ -214,7 +212,3 @@ func publicPeerOf(s *model.Session) string {
 func sessionDuration(s *model.Session) time.Duration {
 	return s.LastSeen.Sub(s.FirstSeen)
 }
-
-func evTitle(format string, args ...any) string { return fmt.Sprintf(format, args...) }
-
-func nodeIDStr(id int64) string { return strconv.FormatInt(id, 10) }

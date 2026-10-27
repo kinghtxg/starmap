@@ -106,12 +106,6 @@ func clientHello(sni string) []byte {
 	return append(rec, hs...)
 }
 
-type pktSpec struct {
-	ts      time.Time
-	payload []byte
-	length  int
-}
-
 // buildFRPPCAP 合成 FRP 特征 PCAP：长连接（>1h 时间戳）+ 周期小包心跳 + TLS hello。
 func buildFRPPCAP(t *testing.T, srcIP string, srcMAC string, sport uint16) []byte {
 	t.Helper()

@@ -10,8 +10,8 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-78.0%25-yellowgreen)]()
+[![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20staticcheck%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
+[![Coverage](https://img.shields.io/badge/coverage-78.1%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
@@ -175,10 +175,15 @@ go test ./... -coverpkg=./internal/... -coverprofile=coverage.out
 go test ./internal/parser/ -run '^$' -fuzz=FuzzExtractForwarded -fuzztime=60s
 go test ./internal/topology/ -bench=. -benchmem -run '^$'
 
+# 静态检查（gofmt + vet + staticcheck；缺 staticcheck 会明确报错而不是跳过）
+go install honnef.co/go/tools/cmd/staticcheck@latest
+make lint
+
 # 前端（发布前手动闸门，需 Playwright + msedge）
-python scripts/ui-smoke.py      # 真浏览器跑导航 / 下钻 / 登录 / 角色门禁
+python scripts/ui-smoke.py      # 真浏览器跑导航 / 下钻 / 登录 / 角色门禁 / 分页搜索
 python scripts/shot.py          # 采集 README 截图（顺带收集控制台错误）
 make ci                                            # lint + race + coverage 一条命令
+make release-check                                 # ci + ui，发布前完整闸门
 
 # 生成合成 PCAP 测试数据（5 类场景 → testdata/out/）
 go run testdata/gen_pcap.go

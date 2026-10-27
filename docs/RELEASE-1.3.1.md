@@ -136,6 +136,58 @@ box.Update(func(*model.SystemConfig) error)  // 写锁内改副本，返回 erro
 - **搜索无结果时总数归零**：`api.js` 改用"响应头是否存在"判断，不再用 `total > 0`
   （后者会把 total=0 的响应整个丢弃，meta 里留着旧值）。
 
+### 5. 第二轮审计：把 CI 的假防线换成真防线
+
+改完上面四项后按要求"重复测试"。CI 九 job 全绿，但顺手去核对那条 staticcheck
+步骤究竟检查了什么，结论是——**它一行代码都没检查过**。
+
+```yaml
+# 修复前
+run: |
+  go install honnef.co/go/tools/cmd/staticcheck@2024.1.1 || true
+  staticcheck ./... || { echo "warning"; }
+```
+
+`staticcheck@2024.1.1` 依赖的 `x/tools` 用「负数常量做数组长度」的写法（`-delta*delta`），
+在 Go 1.26 下**编译即失败**。于是链条是：安装失败 → `|| true` 吞掉 → 下一步执行一个
+不存在的命令 → `|| { echo warning }` 再吞掉。这个 job 永远是绿的，永远打印同一条
+warning，看起来像是有静态检查。
+
+修好之后（`@latest` + 装失败即失败 + 打印版本号），`staticcheck 2026.2.2` 第一次真实
+运行就报出 **11 项**。逐条处理：
+
+| 问题 | 处理 |
+|---|---|
+| `verifyIDToken` 的验签 `switch` 缺 `default` | 加 `default` 返回错误 |
+| ES256 公钥由裸坐标 `&ecdsa.PublicKey{X,Y}` 拼装 | 改用 `ecdsa.ParseUncompressedPublicKey` 做曲线校验 |
+| `NewRequestID() == NewRequestID()` —— 测不出碰撞的断言 | 改为 1000 次去重 + 长度校验 |
+| `RequestIDFrom(nil)` 传 nil context（刻意为之） | `//lint:ignore` 加理由，保留用例 |
+| 6 处彻底死代码 | 删除 |
+
+两条值得展开：
+
+**① 缺 `default` 的验签 `switch`。** 当前白名单在更前面就拦掉了非 RS256/ES256 的
+`alg`，所以**现状不是漏洞**（`alg:none` 进不来）。但"白名单改了、case 忘了加 =
+静默跳过验签"是 JWT 的经典杀法。加一条 `default` 返回错误，把未来的疏忽变成
+看得见的失败——成本一行，收益是这类事故永远不可能发生。
+
+**② 裸坐标拼装的 ES256 公钥。** `&ecdsa.PublicKey{X: …, Y: …}` 不做任何校验，
+一个**不在 P-256 曲线上的点**也会被当成合法公钥。JWKS 是外部输入：身份服务被攻破、
+或 DNS 被劫持指向攻击者的 JWKS，就能投毒。接受伪造的点等于接受伪造的签名。
+改用 `ecdsa.ParseUncompressedPublicKey`（Go 1.25+，会验证点在曲线上、非无穷远点），
+顺带做了两件正确的事：
+
+- 兼容"裁掉坐标前导零字节"的身份服务（不补零会把**合法**密钥拒掉，这是可用性事故）；
+- 超长坐标明确拒绝，而不是被 `big.Int.SetBytes` 静默当成另一个数。
+
+新增两条测试，其中「不在曲线上的点必须被拒」做了**负向验证**：把实现改回裸坐标后，
+`TestECPublicKeyOnCurve` 立刻红并打印 `不在曲线上的点必须被拒绝`。
+
+最后把 staticcheck **转为阻断**，并把 `|| true` 逃生阀一并拆掉，本地 `make lint`
+也接入同一条检查（缺工具时明确报错而不是静默跳过）：
+
+> 留下 `|| true` 等价于留一句"检查不过也能过"。
+
 ---
 
 ## 验证
@@ -143,11 +195,26 @@ box.Update(func(*model.SystemConfig) error)  // 写锁内改副本，返回 erro
 ### 自动化
 
 ```
-go build ./...                    OK
-go vet ./...                      OK
-go test ./...                     全绿（覆盖率见下）
-make lint                         OK
+gofmt -l .                      无输出
+go build ./...                  OK
+go vet ./...                    OK
+staticcheck ./...               0 项（2026.2.2，本地与 CI 一致）
+go test ./...                   全绿
 ```
+
+覆盖率 **78.1%**（1.3.0 为 73.5%），门禁全过：
+
+| 包 | 覆盖率 | 门槛 |
+|---|---|---|
+| 全仓 | 78.1% | 65% |
+| `store` | 71.5% | 60% |
+| `api` | 71.1% | 55% |
+| `detect` | 86.6% | 75% |
+| `auth` | 82.1% | 75% |
+| `logging` | 78.4% | 70% |
+| `metrics` | 92.6% | 85% |
+| `probe` | 83.7% | 75% |
+| `discover` | 83.6% | 75% |
 
 新增测试：
 
@@ -156,6 +223,8 @@ make lint                         OK
 | `internal/config/box_test.go` | 副本隔离、slice 深拷贝（含 auth 内嵌）、回滚、nil 安全、并发无丢失更新 |
 | `internal/store/search_test.go` | 三表关键字命中、列表与计数同源、**通配符转义**、搜索+分页不重不漏 |
 | `cmd/starmap/config_consistency_test.go` | 配置三向一致性 + 禁止裸指针读配置 |
+| `internal/auth/oidc_test.go`（新增用例） | **不在曲线上的点被拒**、签名真验签、前导零补齐、超长坐标拒绝 |
+| `internal/logging/logging_test.go`（改写） | 请求 ID 1000 次去重 + 格式校验 |
 
 ### 真浏览器（`make ui`）
 

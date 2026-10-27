@@ -2,6 +2,8 @@ package auth
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -666,6 +668,114 @@ func TestPickKeyAndKeyDecode(t *testing.T) {
 	}
 	if _, err := ecPublicKey(jwk{X: "AQAB", Y: "!!!"}); err == nil {
 		t.Fatal("非法 y 应报错")
+	}
+}
+
+// ecCoord 取 P-256 公钥的 x/y 坐标（各 32 字节）。
+// 走 Bytes() 拿未压缩点而不是直接读 X/Y：后者自 Go 1.26 起已弃用，
+// 且读取裸坐标再参与运算正是本次要修掉的坏习惯。
+func ecCoord(t *testing.T, pub *ecdsa.PublicKey) (x, y []byte) {
+	t.Helper()
+	b, err := pub.Bytes() // 0x04 || X(32) || Y(32)
+	if err != nil {
+		t.Fatalf("序列化公钥失败: %v", err)
+	}
+	return b[1:33], b[33:65]
+}
+
+// jwkFromEC 把 P-256 公钥转成 JWK 的 x/y 字段（定长 32 字节，符合 RFC 7518）。
+func jwkFromEC(t *testing.T, pub *ecdsa.PublicKey) jwk {
+	t.Helper()
+	x, y := ecCoord(t, pub)
+	return jwk{
+		Kty: "EC", Alg: "ES256",
+		X: base64.RawURLEncoding.EncodeToString(x),
+		Y: base64.RawURLEncoding.EncodeToString(y),
+	}
+}
+
+// TestECPublicKeyOnCurve 覆盖 ES256 公钥构造的安全边界。
+// 关键断言是"不在曲线上的点必须被拒"——这是 1.3.1 从裸坐标拼装改为
+// ecdsa.ParseUncompressedPublicKey 的直接动机：JWKS 是外部输入，接受
+// 一个伪造的公钥点等于接受伪造的签名。
+func TestECPublicKeyOnCurve(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := jwkFromEC(t, &priv.PublicKey)
+
+	pub, err := ecPublicKey(j)
+	if err != nil {
+		t.Fatalf("合法 ES256 公钥应解析成功: %v", err)
+	}
+	if !pub.Equal(&priv.PublicKey) {
+		t.Fatal("解析出的公钥与原始公钥不一致")
+	}
+
+	// 用解析出的公钥真做一次签名验签，确认不是"看起来构造成功"而已。
+	digest := sha256.Sum256([]byte("starmap-es256"))
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
+		t.Fatal("用解析出的公钥验证签名失败")
+	}
+
+	// 翻掉 y 的最低位：同长度、同格式，但几乎必然不在曲线上。
+	_, yb := ecCoord(t, &priv.PublicKey)
+	bad := append([]byte(nil), yb...)
+	bad[len(bad)-1] ^= 0x01
+	offCurve := j
+	offCurve.Y = base64.RawURLEncoding.EncodeToString(bad)
+	if _, err := ecPublicKey(offCurve); err == nil {
+		t.Fatal("不在曲线上的点必须被拒绝")
+	}
+
+	// 坐标长度超出 P-256（33 字节）必须被拒绝，而不是被静默截断。
+	long := j
+	long.X = base64.RawURLEncoding.EncodeToString(make([]byte, 33))
+	if _, err := ecPublicKey(long); err == nil {
+		t.Fatal("超长坐标必须被拒绝")
+	}
+}
+
+// TestECPublicKeyLeadingZeroPadding 部分身份服务会裁掉坐标的前导零字节。
+// 这类密钥是合法的，必须能解析出与定长写法完全相同的公钥。
+func TestECPublicKeyLeadingZeroPadding(t *testing.T) {
+	var priv *ecdsa.PrivateKey
+	for i := 0; i < 4000; i++ {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if x, _ := ecCoord(t, &k.PublicKey); x[0] == 0 {
+			priv = k
+			break
+		}
+	}
+	if priv == nil {
+		t.Skip("未生成到带前导零的密钥，跳过")
+	}
+	full := jwkFromEC(t, &priv.PublicKey)
+	x, _ := ecCoord(t, &priv.PublicKey)
+	trimmed := full
+	trimmed.X = base64.RawURLEncoding.EncodeToString(x[1:]) // 前导零被裁掉
+	if trimmed.X == full.X {
+		t.Skip("前导零未被裁掉，无法构造对比用例")
+	}
+
+	a, err := ecPublicKey(full)
+	if err != nil {
+		t.Fatalf("定长坐标应解析成功: %v", err)
+	}
+	b, err := ecPublicKey(trimmed)
+	if err != nil {
+		t.Fatalf("裁掉前导零的坐标应解析成功: %v", err)
+	}
+	if !a.Equal(b) {
+		t.Fatal("两种写法应得到同一公钥")
 	}
 }
 

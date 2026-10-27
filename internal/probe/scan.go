@@ -458,8 +458,6 @@ func addN(ip net.IP, n uint32) {
 	v4[3] = byte(v)
 }
 
-func incIP(ip net.IP) { addN(ip, 1) }
-
 // parseTraceroute 解析 Linux traceroute -n 输出中的跳数与 IP。
 func parseTraceroute(out string) []HostHit {
 	var hits []HostHit

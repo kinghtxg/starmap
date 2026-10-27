@@ -82,6 +82,7 @@ func TestRequestIDContext(t *testing.T) {
 	if RequestIDFrom(context.Background()) != "" {
 		t.Fatal("空 context 应返回空串")
 	}
+	//lint:ignore SA1012 刻意传 nil：RequestIDFrom 必须对 nil context 判空而不是 panic
 	if RequestIDFrom(nil) != "" {
 		t.Fatal("nil context 不应 panic")
 	}
@@ -89,8 +90,27 @@ func TestRequestIDContext(t *testing.T) {
 	if got := RequestIDFrom(ctx); got != "abc123" {
 		t.Fatalf("request id 丢失: %q", got)
 	}
-	if NewRequestID() == NewRequestID() {
-		t.Fatal("两次生成的 request id 不应相同")
+}
+
+// TestNewRequestIDUnique 断言请求 ID 的唯一性与格式。
+// 原先只比较连续两次的结果（NewRequestID() == NewRequestID()），
+// 既被 staticcheck 判为可疑表达式，也测不出"偶发碰撞"这种真实缺陷；
+// 改为大样本去重，才是请求 ID 真正要保证的性质。
+func TestNewRequestIDUnique(t *testing.T) {
+	const n = 1000
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		id := NewRequestID()
+		if id == "req-fallback" {
+			t.Fatal("crypto/rand 读取失败，已退化为固定前缀")
+		}
+		if len(id) != 16 {
+			t.Fatalf("请求 ID 应为 16 个十六进制字符，得到 %q", id)
+		}
+		if _, dup := seen[id]; dup {
+			t.Fatalf("第 %d 次生成出现重复请求 ID: %q", i, id)
+		}
+		seen[id] = struct{}{}
 	}
 }
 

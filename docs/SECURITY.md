@@ -235,6 +235,8 @@
 | SQL 注入 | 参数化查询 + 模糊测试 | `internal/store/*_test.go` |
 | 解析器健壮性 | XFF / ClientHello / HTTP Host 模糊测试 | `internal/parser/fuzz_test.go` |
 | 依赖漏洞 | `govulncheck` 阻断（0 可达漏洞） | CI |
+| 静态检查 | `staticcheck` 阻断（0 项） | CI + `make lint` |
+| 公钥合法性 | JWKS 的 ES256 公钥必须落在 P-256 曲线上，不在曲线上的点直接拒绝 | `internal/auth/oidc_test.go` |
 | XSS（动态） | 把 payload 写进 6 类用户可控字段，真浏览器验证不执行 | 发布前手动：`scripts/ui-smoke.py` 同类思路 |
 
 **动态 XSS 验证的三条判据**（缺一不可）：① DOM 里不出现注入的元素；

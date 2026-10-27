@@ -362,6 +362,10 @@ func (r *runtime) verifyIDToken(ctx context.Context, idToken string) (idClaims, 
 		if !ecdsa.VerifyASN1(pub, digest[:], sig) {
 			return idClaims{}, errors.New("id_token 签名校验失败")
 		}
+	default:
+		// 上方已有 alg 白名单，走到这里说明两者不同步。宁可拒绝，也不能
+		// 落进"没有匹配分支 = 跳过验签"的经典 JWT 陷阱。
+		return idClaims{}, fmt.Errorf("不支持的签名算法: %s", hdr.Alg)
 	}
 
 	var claims idClaims
@@ -437,6 +441,15 @@ func rsaPublicKey(k jwk) (*rsa.PublicKey, error) {
 	return &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: ei}, nil
 }
 
+// ecPublicKey 由 JWK 的 x/y 构造 P-256 公钥。
+//
+// 早期实现直接拼 &ecdsa.PublicKey{X:…, Y:…}，这在 Go 1.26 起已被弃用，原因正是
+// 本函数最容易踩的坑：裸坐标不经校验，一个不在曲线上的点也能被接受。JWKS 来自
+// 上游身份服务，属于外部输入，一旦身份服务被攻破或 DNS 被劫持，攻击者就能塞入
+// 一个特制的公钥点。这里改用 ecdsa.ParseUncompressedPublicKey，它会校验点是否
+// 落在 P-256 上，非法点直接报错。
+//
+// ES256 在 RFC 7518 §3.4 中固定绑定 P-256，因此曲线不需要从 JWK 里读。
 func ecPublicKey(k jwk) (*ecdsa.PublicKey, error) {
 	x, err := base64.RawURLEncoding.DecodeString(k.X)
 	if err != nil {
@@ -446,9 +459,19 @@ func ecPublicKey(k jwk) (*ecdsa.PublicKey, error) {
 	if err != nil {
 		return nil, errors.New("JWK y 解码失败")
 	}
-	return &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(x),
-		Y:     new(big.Int).SetBytes(y),
-	}, nil
+	const coordLen = 32 // P-256 坐标固定 32 字节
+	if len(x) > coordLen || len(y) > coordLen {
+		return nil, errors.New("JWK 坐标长度超出 P-256")
+	}
+	// JWK 规定坐标定长，但部分实现会去掉前导零字节；左侧补零还原成定长，
+	// 否则 ParseUncompressedPublicKey 会因长度不足而拒绝合法密钥。
+	buf := make([]byte, 1+2*coordLen)
+	buf[0] = 0x04 // 未压缩点前缀
+	copy(buf[1+coordLen-len(x):1+coordLen], x)
+	copy(buf[1+2*coordLen-len(y):], y)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), buf)
+	if err != nil {
+		return nil, errors.New("JWK 公钥点非法")
+	}
+	return pub, nil
 }

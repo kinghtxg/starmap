@@ -11,14 +11,17 @@ export CGO_ENABLED=0
 PORT="${E2E_PORT:-18099}"
 BASE="http://127.0.0.1:${PORT}"
 TMP="$(mktemp -d)"
-trap 'kill "$(cat "$TMP/pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+# Git Bash 下 mktemp -d 返回形如 C:\Users\x\AppData\Local\Temp/tmp.xxx（带反斜杠）。
+# 把这种路径塞进 YAML 双引号串会被当成转义序列（\U \T …），解析直接失败；
+# 下面的 db_path 因此改用单引号（YAML 单引号串不做转义）。
+trap 'kill "$(cat "$TMP/pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$TMP" 2>/dev/null || true' EXIT
 
 echo "[1/6] 构建二进制"
 go build -o "$TMP/starmap" ./cmd/starmap
 
 cat > "$TMP/config.yaml" <<EOF
 listen_addr: "127.0.0.1:${PORT}"
-db_path: "$TMP/starmap.db"
+db_path: '$TMP/starmap.db'
 probe_enabled: false
 capture_enabled: false
 EOF

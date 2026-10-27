@@ -35,12 +35,6 @@ func fullCfg() model.SystemConfig {
 	}
 }
 
-// seedSession 同时喂给引擎与检测会话表。
-func seedSession(d *Detector, eng *topology.Engine, s *model.Session) {
-	eng.Ingest(s)
-	d.SessionsFunc = func() []model.Session { return append(currentSessions(), *s) }
-}
-
 // 多会话场景下的会话表
 var sessionList []model.Session
 

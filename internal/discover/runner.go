@@ -217,13 +217,6 @@ func (r *Runner) Loop(ctx context.Context) {
 	}
 }
 
-func orAllDay(w string) string {
-	if w == "" {
-		return "全天"
-	}
-	return w
-}
-
 // SortHostsByIP 按 IP 数值序排序（字符串排序会把 10.0.0.10 排到 10.0.0.9 前面）。
 func SortHostsByIP(hosts []probe.HostResult) {
 	sort.SliceStable(hosts, func(i, j int) bool { return ipLess(hosts[i].IP, hosts[j].IP) })

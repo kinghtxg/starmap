@@ -27,7 +27,13 @@ jobs:
 
       - name: gofmt（格式必须统一，否则 review 噪音太大）
         run: |
-          out=$(gofmt -l cmd internal test testdata 2>/dev/null || true)
+          # 先确认目录存在。此前是 `out=$(gofmt -l cmd internal test testdata 2>/dev/null || true)`：
+          # 目录一旦改名，gofmt 报错被 2>/dev/null 和 || true 一起吞掉，out 为空 → 步骤绿，
+          # 等于格式检查悄悄退化成了"什么都不检查"。
+          for d in cmd internal test testdata; do
+            [ -d "$d" ] || { echo "::error::目录 $d 不存在，格式检查会退化为空检查"; exit 1; }
+          done
+          out=$(gofmt -l cmd internal test testdata)
           if [ -n "$out" ]; then
             echo "以下文件未格式化："
             echo "$out"
@@ -37,7 +43,7 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # 静态检查（1.3.1 起真的会执行）。
+      # 静态检查（1.3.1 起真的会执行，且阻断）。
       #
       # 此前写的是 `go install ...@2024.1.1 || true` 再接 `staticcheck || { echo warning }`：
       # 那一版 staticcheck 依赖的 x/tools 用「负数常量做数组长度」的写法，在 Go 1.26 下
@@ -45,20 +51,14 @@ jobs:
       # 又被 `|| { echo warning }` 吞掉。结果是这个 job 永远绿、永远打印一条 warning，
       # **一行代码都没检查过**。没有比"以为有防线"更糟的防线。
       #
-      # 现在：装失败就是失败（不再静默跳过），检查出问题仍是 warning（还没做干净，
-      # 但至少能看见）。等告警清零后再转阻断。
+      # 修好之后第一次真实运行报出 11 项（死代码 6 处、已弃用的 ecdsa 裸坐标、
+      # 一个恒不可能失败的断言、nil context 等），现已全部清零，因此转为阻断：
+      # 留下 `|| true` 等价于留一句"检查不过也能过"。
       - name: staticcheck
         run: |
-          set -e
           go install honnef.co/go/tools/cmd/staticcheck@latest
           "$(go env GOPATH)/bin/staticcheck" -version
-          set +e
           "$(go env GOPATH)/bin/staticcheck" ./...
-          rc=$?
-          set -e
-          if [ $rc -ne 0 ]; then
-            echo "::warning::staticcheck 发现问题（当前为警告，后续版本转阻断）"
-          fi
 
       # 依赖与标准库漏洞扫描（1.0.0 起阻断：当前为 0，出现新告警应视为发布阻断项）
       - name: govulncheck（可达漏洞扫描）

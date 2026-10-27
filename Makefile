@@ -9,6 +9,9 @@ COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS    := -s -w -X starmap/internal/version.Version=$(VERSION) -X starmap/internal/version.Commit=$(COMMIT)
 MIN_COVER  := 65
 
+# staticcheck 不在 PATH 时可用 make lint STATICCHECK=/abs/path/staticcheck 覆盖
+STATICCHECK ?= staticcheck
+
 # 前端冒烟需要 playwright：make ui PYTHON=/path/to/python
 PYTHON     ?= python3
 # 已灌数据的实例地址（默认与脚本内置一致）
@@ -62,11 +65,22 @@ fuzz:
 bench:
 	go test ./internal/topology/ -bench=. -benchmem -run '^$$'
 
+.PHONY: staticcheck
+staticcheck:
+	@command -v $(STATICCHECK) >/dev/null 2>&1 || { \
+	  echo "缺少 staticcheck。安装： go install honnef.co/go/tools/cmd/staticcheck@latest"; \
+	  echo "（不做静默跳过——跳过就等于没有这道闸门）"; exit 1; }
+	$(STATICCHECK) ./...
+
 .PHONY: lint
 lint:
-	@out=$$(gofmt -l cmd internal test testdata 2>/dev/null); \
+	@for d in cmd internal test testdata; do \
+	  [ -d "$$d" ] || { echo "目录 $$d 不存在，格式检查会退化为空检查"; exit 1; }; \
+	done; \
+	out=$$(gofmt -l cmd internal test testdata); \
 	if [ -n "$$out" ]; then echo "未格式化:"; echo "$$out"; exit 1; fi
 	go vet ./...
+	$(MAKE) staticcheck
 
 .PHONY: ci
 ci: lint race cover

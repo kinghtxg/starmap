@@ -124,6 +124,12 @@ auth:
   账号不存在时执行同等开销的 dummy 比对，防用户名枚举。
 - **ID Token**：走 APSSO 发现文档的 `jwks_uri` 验签（RS256 / ES256），并校验 `iss`、`aud`、`exp`；
   验签失败**不降级**为「已登录」，也**不降级**为匿名放行。
+  - `alg` 走**白名单**（只认 `RS256` / `ES256`），验签 `switch` 另有 `default` 返回错误——
+    白名单与分支不同步时宁可拒绝，也不落进「没有匹配分支 = 跳过验签」的 `alg:none` 陷阱。
+  - ES256 公钥用 `ecdsa.ParseUncompressedPublicKey` 解析，**校验点确实落在 P-256 曲线上**
+    （1.3.1 前是直接拼 `ecdsa.PublicKey{X,Y}`，会把不在曲线上的点当合法公钥）。
+    JWKS 是外部输入：身份服务被攻破或 DNS 被劫持指向攻击者 JWKS，就能投毒公钥。
+  - 兼容裁掉坐标前导零字节的身份服务；超长坐标明确拒绝，不做静默截断。
 - **故障 semantics**：身份服务不可达 / 拒绝 → `503` 错误页（见 §7.5「不允许静默放行」）。
 - **密钥不回显**：`session_secret`、`client_secret`、本地账号口令字段均标注 `json:"-"`，
   不会被 `GET /api/config` 返回；`PUT /api/config` 也不会改写它们（`mergeRuntimeConfig` 不含 auth）。
