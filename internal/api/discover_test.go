@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"starmap/internal/config"
 	"starmap/internal/detect"
 	"starmap/internal/discover"
 	"starmap/internal/model"
@@ -40,10 +41,9 @@ func newDiscoverRouter(t *testing.T, cfg model.SystemConfig) (http.Handler, *sto
 		Store: st, Engine: eng, Scanner: scanner,
 		Cfg: func() model.SystemConfig { return cfg },
 	}
-	cfgPtr := &cfg
 	h := NewRouter(Deps{
 		Store: st, Engine: eng, Detector: det, Reviewer: rvw, Scanner: scanner,
-		Cfg: cfgPtr, Aggregator: agg, Discover: runner,
+		Cfg: config.NewBox(cfg), Aggregator: agg, Discover: runner,
 	})
 	return h, st, eng
 }

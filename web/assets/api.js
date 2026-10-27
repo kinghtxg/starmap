@@ -32,12 +32,16 @@
       throw new Error(msg);
     }
     if (resp.status === 204) return null;
-    // 列表接口会带 X-Total-Count / X-Result-Limit：服务端有容量护栏，
-    // 超过上限的部分不返回。前端必须知道"被截断了"，否则用户会以为数据丢了。
-    const total = Number(resp.headers.get('X-Total-Count') || 0);
-    const cap = Number(resp.headers.get('X-Result-Limit') || 0);
-    if (total > 0) {
-      listMeta[path.split('?')[0]] = { total: total, limit: cap };
+    // 列表接口带 X-Total-Count / X-Result-Limit：total 是**当前筛选条件下**的服务端总数。
+    //
+    // 必须用「头是否存在」判断，不能用 total > 0：
+    // 搜不到任何结果时 total 就是 0，早期写成 if (total > 0) 会把这次响应直接丢弃，
+    // 于是 meta 里留着上一次的旧总数——列表已经空了，徽标还显示「120 台」，
+    // 用户会以为"筛掉了但还有 120 台"，比不显示更误导。
+    const rawTotal = resp.headers.get('X-Total-Count');
+    if (rawTotal !== null) {
+      const cap = Number(resp.headers.get('X-Result-Limit') || 0);
+      listMeta[path.split('?')[0]] = { total: Number(rawTotal) || 0, limit: cap };
     }
     const text = await resp.text();
     if (!text) return null;
@@ -55,7 +59,8 @@
 
   const API = {
     // 列表元信息：{total, limit}；未取到返回 {total:0, limit:0}。
-    // 用法：const m = API.meta('/api/ports'); if (m.total > list.length) 显示截断提示
+    // 1.3.1 起列表走真·服务端分页，total 是**当前筛选条件下**的服务端总数，
+    // 分页器据此计算总页数；旧的"total > list.length 即被截断"用法不再适用。
     meta: (p) => listMeta[p] || { total: 0, limit: 0 },
     // 拓扑
     topology: () => req('GET', '/api/topology'),
@@ -64,10 +69,16 @@
     stats: () => req('GET', '/api/stats'),
     health: () => req('GET', '/api/health'),
     // 事件
+    // 1.3.1 起支持真·分页：q 为服务端模糊搜索，limit/offset 为分页窗口。
+    // 注意：筛选必须交给服务端。前端本地筛选 + 服务端分页 =
+    // 用户看到的"筛选结果"只覆盖当前页，会得出"没有匹配项"的错误结论。
     events: (params = {}) => {
       const qs = new URLSearchParams();
       if (params.status) qs.set('status', params.status);
       if (params.type) qs.set('type', params.type);
+      if (params.q) qs.set('q', params.q);
+      if (params.limit) qs.set('limit', params.limit);
+      if (params.offset) qs.set('offset', params.offset);
       const s = qs.toString();
       return req('GET', '/api/events' + (s ? '?' + s : ''));
     },
@@ -101,7 +112,18 @@
     putConfig: (cfg) => req('PUT', '/api/config', cfg),
     audit: () => req('GET', '/api/audit'),
     // 主机资产库 + 端口记录（V1.2）
-    assets: (status) => req('GET', '/api/assets' + (status ? '?status=' + encodeURIComponent(status) : '')),
+    // params 支持对象 {status, q, limit, offset}；也兼容旧的 API.assets('archived') 字符串写法。
+    assets: (params) => {
+      if (typeof params === 'string') params = { status: params };
+      params = params || {};
+      const qs = new URLSearchParams();
+      if (params.status) qs.set('status', params.status);
+      if (params.q) qs.set('q', params.q);
+      if (params.limit) qs.set('limit', params.limit);
+      if (params.offset) qs.set('offset', params.offset);
+      const s = qs.toString();
+      return req('GET', '/api/assets' + (s ? '?' + s : ''));
+    },
     assetStats: () => req('GET', '/api/assets/stats'),
     archiveAsset: (payload) => req('POST', '/api/assets/archive', payload),
     updateAsset: (key, payload) => req('PUT', '/api/assets/' + encodeURIComponent(key), payload),
@@ -110,6 +132,9 @@
       const qs = new URLSearchParams();
       if (params.ip) qs.set('ip', params.ip);
       if (params.node_key) qs.set('node_key', params.node_key);
+      if (params.q) qs.set('q', params.q);
+      if (params.limit) qs.set('limit', params.limit);
+      if (params.offset) qs.set('offset', params.offset);
       const s = qs.toString();
       return req('GET', '/api/ports' + (s ? '?' + s : ''));
     },

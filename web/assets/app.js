@@ -384,6 +384,20 @@
 
   /* ---------- 数字滚动 ---------- */
   var REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // debounce 延迟执行：输入框连续输入时只在停下来后发一次请求。
+  //
+  // 列表搜索走的是 SQLite 的 LIKE 全表扫，后端又只有一条连接。
+  // 每按一个键发一次请求，快速输入会堆出十几条并发查询并全部排在单连接后面，
+  // 结果是"越打字越卡"，而且先发的响应可能后到，把界面刷成旧结果。
+  function debounce(fn, ms) {
+    var timer = null;
+    return function () {
+      var args = arguments, self = this;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(function () { timer = null; fn.apply(self, args); }, ms || 300);
+    };
+  }
   function countTo(el, target, dur) {
     if (!el) return;
     var from = parseFloat(String(el.textContent).replace(/[^\d.\-]/g, '')) || 0;
@@ -598,7 +612,7 @@
     openDrawer: openDrawer, closeDrawer: closeDrawer,
     tip: tip, menu: menu, closeMenu: closeMenu,
     loadingHTML: loadingHTML, skeletonRows: skeletonRows, emptyHTML: emptyHTML, errorHTML: errorHTML,
-    pagerHTML: pagerHTML, countTo: countTo, busy: busy, copy: copy,
+    pagerHTML: pagerHTML, countTo: countTo, busy: busy, copy: copy, debounce: debounce,
     on: on, off: off,
     renderSider: renderSider, renderTopbar: renderTopbar, renderFooter: renderFooter,
     loadMe: loadMe, applyRoleGate: applyRoleGate, can: can,

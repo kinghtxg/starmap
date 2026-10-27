@@ -2,14 +2,18 @@
 
 这是 1.1.0 唯一没进 CI 的测试层：Web 包里的 `pages_test.go` 只能证明"页面骨架和令牌没漂移"，
 证明不了"点下去会怎样"。本脚本补的是后者——真开一个 Chromium，跑导航、下钻、登录、角色门禁、
-1.2 的深度发现弹窗。
+1.2 的深度发现弹窗，以及 1.3.1 的**列表真·服务端分页与搜索**。
 
 不进 CI 的原因：需要下载浏览器（内网/CI 都可能拉不动），且慢。定位为**发布前手动闸门**：
-    python scripts/ui-smoke.py            # 只测无认证实例（默认 127.0.0.1:18097）
+    make ui                               # 用默认实例 127.0.0.1:18097
+    make ui BASE=http://127.0.0.1:18080   # 或指定实例
     AUTH_BASE=http://127.0.0.1:18096 ...  # 额外测登录与角色门禁
     AUTH_BASE=                            # 或置空，跳过认证部分
 
 要求后端已灌数据（PCAP + simprobe），否则拓扑为空会跳过下钻用例而不是失败。
+分页用例同理：事件不足一页时跳过翻页断言，但**搜索、通配符转义、limit 夹取**这三项
+与数据量无关，空库也会验——它们正是"看着正常但结论是错的"那类问题的高发区。
+
 深度发现只测"弹窗能开、档位计划对得上、空/非法目标拦得住"，**不真扫**：
 真扫会打内网，且要 discover_enabled，跨环境不可控；扫描的端到端在
 internal/api/discover_test.go 里用 httptest 覆盖。
@@ -282,12 +286,135 @@ def smoke_auth(br):
     ctx2.close()
 
 
+def api_json(pg, path):
+    """用浏览器上下文请求接口，返回 (json, headers)。"""
+    r = pg.request.get(BASE + path)
+    if not r.ok:
+        return None, {}
+    try:
+        return r.json(), r.headers
+    except Exception:
+        return None, {}
+
+
+def poll(pg, fn, timeout=8.0, interval=0.2):
+    """轮询直到 fn() 为真。比 wait_for_function 稳：不依赖页面里注入的 JS 表达式。"""
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if fn():
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
+
+
+def smoke_paging(br):
+    """列表的真·服务端分页与搜索（1.3.1）。
+
+    分页最容易出的错不是"翻不动"，而是这两类**静默错误**：
+      1. 翻过去了，但拿到的还是同一批数据（页码变了内容没变）；
+      2. 筛选只在当前页生效——用户搜不到上限之外的数据，却得到"没有匹配"的答案，
+         于是确信那台机器不存在。第 2 类比第 1 类危险得多，所以重点验它。
+
+    不假设数据量：空库/小库自动跳过需要多页的断言，只验"分页参数确实生效"。
+    """
+    ctx = br.new_context(viewport={"width": 1440, "height": 900})
+    errors = []
+    pg = new_page(ctx, errors)
+    pg.goto(f"{BASE}/events.html", wait_until="networkidle")
+
+    # ---- 分页契约（API 层） ----
+    _, h1 = api_json(pg, "/api/events?limit=5&offset=0")
+    n_total = int(h1.get("x-total-count") or 0)
+    check(int(h1.get("x-result-limit") or 0) == 5,
+          f"[分页] limit=5 未回显 X-Result-Limit（实际 {h1.get('x-result-limit')}）")
+
+    page1, _ = api_json(pg, "/api/events?limit=5&offset=0")
+    page2, _ = api_json(pg, "/api/events?limit=5&offset=5")
+    if n_total > 5 and page1 and page2:
+        ids1 = {e.get("ID") for e in page1}
+        ids2 = {e.get("ID") for e in page2}
+        check(ids1.isdisjoint(ids2), "[分页] 第 1/2 页返回了重复事件（排序键不稳定）")
+    else:
+        skipped.append("[分页] 事件不足 6 条，跳过翻页断言")
+
+    # limit 必须被夹取，否则 ?limit=1e9 等于要求把整表读进内存
+    _, h2 = api_json(pg, "/api/events?limit=999999&offset=0")
+    check(int(h2.get("x-result-limit") or 0) == 5000, "[分页] limit 未被夹取到 5000")
+
+    # ---- 搜索在服务端生效 ----
+    kw = "frp"
+    found, fh = api_json(pg, f"/api/events?q={kw}&limit=50&offset=0")
+    if found:
+        bad = [e.get("ID") for e in found
+               if kw not in ((e.get("Title") or "") + (e.get("Detail") or "")).lower()]
+        check(not bad, f"[搜索] 服务端返回了不含关键字的条目（说明筛选没下沉到 SQL）: {bad[:5]}")
+    n_found = int(fh.get("x-total-count") or 0)
+    check(n_found <= n_total, f"[搜索] 过滤后总数 {n_found} 大于全量 {n_total}")
+
+    # ---- LIKE 通配符必须转义 ----
+    # 不转义时搜 "%" 会命中全部记录，用户会以为"搜索坏了"
+    pct, ph = api_json(pg, "/api/events?q=%25&limit=50&offset=0")
+    if pct:
+        bad = [e.get("ID") for e in pct
+               if "%" not in ((e.get("Title") or "") + (e.get("Detail") or ""))]
+        check(not bad, f"[搜索] 搜字面量 % 却命中了不含 % 的记录（通配符未转义）: {bad[:5]}")
+    check(int(ph.get("x-total-count") or 0) < n_total or n_total == 0,
+          "[搜索] 搜 % 命中了全部记录，LIKE 通配符未转义")
+
+    # ---- UI：翻页必须换数据 ----
+    if n_total > 20:
+        pg.goto(f"{BASE}/events.html", wait_until="networkidle")
+        pg.select_option("#fStatus", "")          # 页面默认只看「待处置」，先放开
+        got_rows = poll(pg, lambda: pg.locator("#list table tbody tr").count() == 20)
+        if got_rows:
+            sel = "#list table tbody tr button[data-act=open]"
+            before = set(pg.eval_on_selector_all(sel, "els => els.map(e => e.dataset.id)"))
+            pg.locator("#pager button[data-page='2']").first.click()
+            changed = poll(pg, lambda: not (set(pg.eval_on_selector_all(
+                sel, "els => els.map(e => e.dataset.id)")) & before))
+            check(changed, "[分页] 点第 2 页后表格内容没变（服务端分页未生效）")
+        else:
+            skipped.append("[分页] 事件列表未渲染满 20 行，跳过 UI 翻页断言")
+    else:
+        skipped.append("[分页] 事件不足 21 条，跳过 UI 翻页断言")
+
+    # ---- UI：资产页搜索走后端 ----
+    pg.goto(f"{BASE}/assets.html", wait_until="networkidle")
+    if poll(pg, lambda: pg.locator("#assetTable tbody tr").count() > 0):
+        n_asset = int((api_json(pg, "/api/assets?limit=1&offset=0")[1]).get("x-total-count") or 0)
+        before = pg.inner_text("#cntBadge").strip()
+        pg.fill("#fKw", "zzz-不存在的关键字-zzz")
+        # 关键：不能只等"徽标变成 0 台"——徽标初值就是 0 台，会立刻"满足"。
+        # 必须等它发生变化后再判断，否则断言在页面还没更新时就跑完了。
+        narrowed = poll(pg, lambda: (lambda t: t != before and "0 台" in t)(pg.inner_text("#cntBadge").strip()))
+        if narrowed:
+            check(True, "[搜索] 资产页无匹配时徽标归零（总数与列表同源）")
+            check("没有符合条件" in pg.inner_text("#assetTable"),
+                  "[搜索] 无匹配时未显示筛选态空态文案")
+            # 清空关键字必须恢复全量（不能把本地 filter 的残留带回去）
+            pg.fill("#fKw", "")
+            check(poll(pg, lambda: pg.inner_text("#cntBadge").strip() == f"{n_asset} 台"),
+                  f"[搜索] 清空关键字后未恢复全量 {n_asset} 台（实际 {pg.inner_text('#cntBadge')!r}）")
+        else:
+            skipped.append("[搜索] 资产页搜索未生效，跳过（可能资产为空）")
+    else:
+        skipped.append("[搜索] 资产表为空，跳过资产搜索断言")
+
+    check(not errors, f"[分页] 页面控制台错误: {errors}")
+    ctx.close()
+
+
 def main() -> int:
     with sync_playwright() as p:
         br = p.chromium.launch(channel="msedge")
         smoke_pages(br)
         smoke_topology(br)
         smoke_discover(br)
+        smoke_paging(br)
         if AUTH_BASE:
             smoke_auth(br)
         br.close()

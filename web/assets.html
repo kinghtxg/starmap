@@ -112,9 +112,8 @@
 <script>
 'use strict';
 
-var assets = [];
-var ports = [];
 var curTab = 'assets';
+// assets / ports 是"当前页"的数据，声明在各自的区块里（见「主机资产」「端口记录」）
 
 /* ---------- Tab 切换 ---------- */
 function switchTab(t) {
@@ -161,30 +160,61 @@ function onlineDot(on) {
     : '<span class="sm-dot is-off"></span> 离线';
 }
 
-// 资产表按页渲染：万级资产一次性塞进 DOM 会让浏览器卡住好几秒，
-// 而这些行里 99% 用户根本不会看（他们用搜索/筛选）。
+// 资产表走真·服务端分页（1.3.1）：每页只取 50 条，筛选条件一并发给服务端。
+//
+// 为什么不再"全量拉回 + 本地筛选 + 本地翻页"：
+//  1. 万级资产时首次加载要序列化几 MB JSON、渲染几万个 DOM 节点。
+//  2. 更关键的是**正确性**——服务端有容量上限（5000），本地筛选只能筛到被上限截断
+//     之后的那部分数据。用户搜一台 6000 条之外的机器会看到"没有匹配"，
+//     然后得出"这台机器不存在"的结论。这不是少显示，是给出错误答案。
 var ASSET_PAGE_SIZE = 50;
 var assetPage = 1;
+var assetTotal = 0;
+var assets = [];
+var assetSeq = 0; // 请求序号：快速输入时先发的响应可能后到，必须丢弃旧响应
+
+function assetFilter() {
+  return {
+    q: (document.getElementById('fKw').value || '').trim(),
+    status: document.getElementById('fStatus').value
+  };
+}
+
+function loadAssets() {
+  var f = assetFilter();
+  var seq = ++assetSeq;
+  return API.assets({
+    q: f.q,
+    status: f.status,
+    limit: ASSET_PAGE_SIZE,
+    offset: (assetPage - 1) * ASSET_PAGE_SIZE
+  }).then(function (d) {
+    if (seq !== assetSeq) return; // 已有更新的请求在飞，本次结果作废
+    assets = d || [];
+    assetTotal = API.meta('/api/assets').total;
+    if (assetTotal < assets.length) assetTotal = assets.length;
+    // 删掉最后一页的最后一条后当前页会空 → 自动回退一页，而不是留一个空表
+    if (!assets.length && assetPage > 1) {
+      assetPage--;
+      return loadAssets();
+    }
+    renderAssets();
+  }).catch(function (e) {
+    if (seq === assetSeq) UI.toast(e.message, 'err');
+  });
+}
 
 function renderAssets() {
-  var kw = (document.getElementById('fKw').value || '').toLowerCase();
-  var st = document.getElementById('fStatus').value;
-  var list = assets.filter(function (a) {
-    if (st && a.status !== st) return false;
-    if (kw) {
-      var hay = (a.ips || []).join(' ') + ' ' + (a.mac || '') + ' ' + (a.owner || '') + ' ' + (a.department || '') + ' ' + (a.hostname || '');
-      if (hay.toLowerCase().indexOf(kw) < 0) return false;
-    }
-    return true;
-  });
-  var ameta = API.meta('/api/assets');
-  var aTrunc = ameta.total > assets.length;
-  document.getElementById('cntBadge').textContent = aTrunc
-    ? '显示 ' + assets.length + ' / 共 ' + ameta.total + ' 台'
-    : list.length + ' 台';
+  document.getElementById('cntBadge').textContent = assetTotal + ' 台';
   var box = document.getElementById('assetTable');
-  if (!list.length) {
-    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="9">' + UI.emptyHTML('暂无资产', '导入 PCAP 或启动抓包后，系统自动发现主机并登记为账外资产') + '</td></tr></tbody>';
+  if (!assets.length) {
+    var f = assetFilter();
+    var filtered = f.q || f.status;
+    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="9">' +
+      (filtered
+        ? UI.emptyHTML('没有符合条件的资产', '试试清空搜索关键字，或把状态切回「全部」')
+        : UI.emptyHTML('暂无资产', '导入 PCAP 或启动抓包后，系统自动发现主机并登记为账外资产')) +
+      '</td></tr></tbody>';
     document.getElementById('assetPager').innerHTML = '';
     return;
   }
@@ -192,11 +222,8 @@ function renderAssets() {
     '<th>IP 地址</th><th>MAC</th><th>主机名 / 系统</th><th>归属单位</th><th>归属人</th>' +
     '<th style="min-width:80px">状态</th><th style="min-width:90px">在线</th><th style="min-width:150px">最后发现</th>' +
     '<th style="min-width:140px" class="sm-td-ops">操作</th></tr></thead><tbody>';
-  // 只渲染当前页
-  var pages = Math.max(1, Math.ceil(list.length / ASSET_PAGE_SIZE));
-  if (assetPage > pages) assetPage = pages;
-  var pageList = list.slice((assetPage - 1) * ASSET_PAGE_SIZE, assetPage * ASSET_PAGE_SIZE);
-  html += pageList.map(function (a) {
+  // 服务端已经分好页，这里直接渲染本页数据
+  html += assets.map(function (a) {
     var ips = (a.ips && a.ips.length) ? a.ips.map(function (i) { return '<div class="sm-mono" style="font-size:12px">' + UI.esc(i) + '</div>'; }).join('') : '-';
     var os = a.os ? '<span class="sm-chip">' + UI.esc(a.os) + '</span>' : '';
     var hn = a.hostname ? '<div style="font-size:12px">' + UI.esc(a.hostname) + '</div>' : '';
@@ -219,8 +246,7 @@ function renderAssets() {
   html += '</tbody>';
   box.innerHTML = html;
   document.getElementById('assetPager').innerHTML = UI.pagerHTML(
-    list.length, assetPage, ASSET_PAGE_SIZE, 'asset-page',
-    aTrunc ? '服务端仅载入最近 ' + assets.length + ' 台（共 ' + ameta.total + ' 台）' : '');
+    assetTotal, assetPage, ASSET_PAGE_SIZE, 'asset-page', '');
 }
 
 /* ---------- 归档 / 编辑弹窗 ---------- */
@@ -261,17 +287,47 @@ function assetForm(a) {
 
 /* ---------- 端口记录 ---------- */
 var SRC_LABEL = { traffic: '流量', probe: '扫描', arp: 'ARP' };
+
+// 端口表同样走服务端分页：一次全端口扫描能产出几万条记录，
+// 全量拉回来的 JSON 就有几 MB，浏览器渲染几万行会直接卡死。
+var PORT_PAGE_SIZE = 100;
+var portPage = 1;
+var portTotal = 0;
+var ports = [];
+var portSeq = 0;
+
+function loadPorts() {
+  var q = (document.getElementById('pIp').value || '').trim();
+  var seq = ++portSeq;
+  return API.ports({
+    q: q,
+    limit: PORT_PAGE_SIZE,
+    offset: (portPage - 1) * PORT_PAGE_SIZE
+  }).then(function (d) {
+    if (seq !== portSeq) return;
+    ports = d || [];
+    portTotal = API.meta('/api/ports').total;
+    if (portTotal < ports.length) portTotal = ports.length;
+    if (!ports.length && portPage > 1) {
+      portPage--;
+      return loadPorts();
+    }
+    renderPorts();
+  }).catch(function (e) {
+    if (seq === portSeq) UI.toast(e.message, 'err');
+  });
+}
+
 function renderPorts() {
-  var kw = (document.getElementById('pIp').value || '').toLowerCase();
-  var list = ports.filter(function (p) { return !kw || (p.ip || '').indexOf(kw) >= 0; });
-  var pmeta = API.meta('/api/ports');
-  var pTrunc = pmeta.total > ports.length;
-  document.getElementById('portCnt').textContent = pTrunc
-    ? '显示 ' + ports.length + ' / 共 ' + pmeta.total + ' 条'
-    : list.length + ' 条';
+  document.getElementById('portCnt').textContent = portTotal + ' 条';
   var box = document.getElementById('portTable');
-  if (!list.length) {
-    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="7">' + UI.emptyHTML('暂无端口记录', '从流量自动提取，或点击「深度发现」做内置扫描（无需 nmap）') + '</td></tr></tbody>';
+  if (!ports.length) {
+    var kw = (document.getElementById('pIp').value || '').trim();
+    box.innerHTML = '<tbody><tr class="sm-empty-row"><td colspan="7">' +
+      (kw
+        ? UI.emptyHTML('没有匹配的端口记录', '换个关键字试试：可搜 IP、服务名、产品名、页面标题或证书 CN')
+        : UI.emptyHTML('暂无端口记录', '从流量自动提取，或点击「深度发现」做内置扫描（无需 nmap）')) +
+      '</td></tr></tbody>';
     document.getElementById('portPager').innerHTML = '';
     return;
   }
@@ -279,7 +335,7 @@ function renderPorts() {
     '<th>IP 地址</th><th style="min-width:80px">端口</th><th style="min-width:80px">协议</th>' +
     '<th>服务</th><th style="min-width:180px">指纹</th>' +
     '<th style="min-width:90px">来源</th><th style="min-width:150px">最后发现</th></tr></thead><tbody>';
-  html += list.map(function (p) {
+  html += ports.map(function (p) {
     return '<tr>' +
       '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(p.ip) + '</span></td>' +
       '<td><span class="sm-mono" style="font-weight:600">' + p.port + '</span></td>' +
@@ -289,15 +345,10 @@ function renderPorts() {
       '<td><span class="sm-badge">' + UI.esc(SRC_LABEL[p.source] || p.source) + '</span></td>' +
       '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtAgo(p.last_seen)) + '</td></tr>';
   }).join('');
-  if (pTrunc) {
-    // 服务端有容量护栏：超过上限的记录不返回。必须显式告知，
-    // 否则用户会以为"扫描扫丢了"，或者拿一份不完整的清单去交差。
-    html += '<tr><td colspan="7" class="sm-t-3" style="font-size:12px;padding:10px 12px">' +
-      '共 ' + pmeta.total + ' 条端口记录，当前仅载入最近 ' + ports.length + ' 条（上限 ' + pmeta.limit +
-      '）。请用上方 IP 过滤缩小范围，或直接在资产详情里看单机端口。</td></tr>';
-  }
   html += '</tbody>';
   box.innerHTML = html;
+  document.getElementById('portPager').innerHTML = UI.pagerHTML(
+    portTotal, portPage, PORT_PAGE_SIZE, 'port-page', '');
 }
 
 // 指纹列：优先产品名（最有判断价值），其次标题 / banner / 证书 CN。
@@ -734,12 +785,9 @@ function ledgerClear() {
 }
 
 /* ---------- 加载 ---------- */
-function loadAssets() {
-  return API.assets().then(function (d) { assets = d || []; renderAssets(); }).catch(function (e) { UI.toast(e.message, 'err'); });
-}
-function loadPorts() {
-  return API.ports().then(function (d) { ports = d || []; renderPorts(); }).catch(function (e) { UI.toast(e.message, 'err'); });
-}
+// 注意：loadAssets / loadPorts 定义在各自区块内（走服务端分页，需要构造查询参数），
+// 这里只负责串起来，不要再在这里重新定义同名函数——函数声明会提升，
+// 后者会覆盖前者，分页逻辑就悄悄失效了。
 function loadAll() {
   renderStats();
   loadAssets();
@@ -749,8 +797,16 @@ function loadAll() {
 /* ---------- 事件绑定 ---------- */
 UI.on('refresh', loadAll);
 UI.on('asset-page', function (el) {
-  assetPage = Number(el.getAttribute('data-page')) || 1;
-  renderAssets();
+  var p = Number(el.getAttribute('data-page')) || 1;
+  if (p === assetPage) return;
+  assetPage = p;
+  loadAssets();
+});
+UI.on('port-page', function (el) {
+  var p = Number(el.getAttribute('data-page')) || 1;
+  if (p === portPage) return;
+  portPage = p;
+  loadPorts();
 });
 UI.on('archive', function (el) { assetForm({ node_key: el.getAttribute('data-key'), ips: [el.getAttribute('data-ip')], status: 'unarchived' }); });
 UI.on('edit', function (el) {
@@ -769,9 +825,20 @@ UI.on('ledger-refresh', function () { UI.toast('正在重新对照…', 'info');
 UI.on('ledger-template', downloadLedgerTemplate);
 UI.on('ledger-clear', ledgerClear);
 
-document.getElementById('fKw').addEventListener('input', function () { assetPage = 1; renderAssets(); });
-document.getElementById('fStatus').addEventListener('change', function () { assetPage = 1; renderAssets(); });
-document.getElementById('pIp').addEventListener('input', renderPorts);
+// 筛选交给服务端：输入防抖 300ms（每键一次请求会在单连接后端上堆成队列），
+// 且条件一变必须回到第 1 页——留在第 5 页会让用户看到"只有 3 条"的假象。
+document.getElementById('fKw').addEventListener('input', UI.debounce(function () {
+  assetPage = 1;
+  loadAssets();
+}, 300));
+document.getElementById('fStatus').addEventListener('change', function () {
+  assetPage = 1;
+  loadAssets();
+});
+document.getElementById('pIp').addEventListener('input', UI.debounce(function () {
+  portPage = 1;
+  loadPorts();
+}, 300));
 document.getElementById('lKw').addEventListener('input', renderLedger);
 document.querySelectorAll('.sm-tab[data-tab]').forEach(function (b) {
   b.addEventListener('click', function () { switchTab(b.getAttribute('data-tab')); });

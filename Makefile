@@ -9,6 +9,11 @@ COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS    := -s -w -X starmap/internal/version.Version=$(VERSION) -X starmap/internal/version.Commit=$(COMMIT)
 MIN_COVER  := 65
 
+# 前端冒烟需要 playwright：make ui PYTHON=/path/to/python
+PYTHON     ?= python3
+# 已灌数据的实例地址（默认与脚本内置一致）
+BASE       ?= http://127.0.0.1:18097
+
 .PHONY: help
 help:
 	@echo "make build     构建单二进制"
@@ -19,7 +24,9 @@ help:
 	@echo "make fuzz      跑一轮模糊测试（各 60s）"
 	@echo "make bench     性能基线"
 	@echo "make lint      格式检查 + vet"
+	@echo "make ui        前端交互冒烟（真浏览器，需已灌数据的实例）"
 	@echo "make ci        完整流水线（lint + race + cover）"
+	@echo "make release-check  发布前闸门（ci + ui）"
 	@echo "make clean     清理产物"
 
 .PHONY: build
@@ -63,6 +70,22 @@ lint:
 
 .PHONY: ci
 ci: lint race cover
+
+# 前端交互冒烟：真浏览器跑导航、下钻、角色门禁、深度发现弹窗、列表分页与搜索。
+#
+# 为什么不进 make ci：要下载 Chromium（内网/CI 常拉不动）且慢。
+# 它属于**发布前闸门**——CI 保证"代码能编译、测试能过、没有竞态"，
+# 这里保证"点下去真的是对的"。两者缺一不可，但成本不同，所以分开。
+#
+# 前置：先起一个已灌数据的实例（BASE 指向它），否则拓扑/分页用例会被跳过而不是失败。
+.PHONY: ui
+ui:
+	@echo "目标实例: $(BASE)"
+	BASE=$(BASE) $(PYTHON) scripts/ui-smoke.py
+
+# 发布前一把过：代码层闸门 + 交互层闸门。
+.PHONY: release-check
+release-check: ci ui
 
 .PHONY: clean
 clean:

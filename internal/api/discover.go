@@ -68,7 +68,7 @@ const (
 func (s *Server) discoverPlan(c *gin.Context) {
 	profile := c.Query("profile")
 	if profile == "" {
-		profile = s.d.Cfg.DiscoverProfile
+		profile = s.cfg().DiscoverProfile
 	}
 	ports, label, err := probe.PortPlan(profile)
 	if err != nil {
@@ -98,7 +98,7 @@ func (s *Server) discoverRun(c *gin.Context) {
 		fail(c, http.StatusServiceUnavailable, "主动发现执行器未初始化")
 		return
 	}
-	if !s.d.Cfg.DiscoverEnabled {
+	if !s.cfg().DiscoverEnabled {
 		// 主动扫描会在目标侧留下大量连接记录，必须由管理员显式开启后才允许。
 		fail(c, http.StatusServiceUnavailable,
 			"主动发现未启用：请先在系统配置中开启 discover_enabled（或在 config.yaml 中设置）")
@@ -127,7 +127,7 @@ func (s *Server) discoverRun(c *gin.Context) {
 
 	profile := strings.TrimSpace(body.Profile)
 	if profile == "" {
-		profile = s.d.Cfg.DiscoverProfile
+		profile = s.cfg().DiscoverProfile
 	}
 	_, label, err := probe.PortPlan(profile)
 	if err != nil {

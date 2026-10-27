@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"starmap/internal/config"
 	"starmap/internal/model"
 )
 
@@ -174,7 +175,7 @@ func TestAuditLimitClamped(t *testing.T) {
 func TestSyncAssetsThrottled(t *testing.T) {
 	cfg := testCfg()
 	_, st, eng := newDiscoverRouter(t, cfg)
-	s := &Server{d: Deps{Store: st, Engine: eng, Cfg: &cfg}}
+	s := &Server{d: Deps{Store: st, Engine: eng, Cfg: config.NewBox(cfg)}}
 
 	// 首次调用会真的同步（此处节点为空，等于空转），记录时间戳
 	s.syncAssetsThrottled()

@@ -801,28 +801,44 @@ func (s *Store) GetEvent(id int64) (*model.RiskEvent, error) {
 // ListEvents 按状态/类型筛选查询事件（空串表示不筛选）。
 // 无限量：内部统计与测试用。对外接口一律走 ListEventsPaged，避免一次拉全表。
 func (s *Store) ListEvents(status, evType string) ([]model.RiskEvent, error) {
-	return s.ListEventsPaged(status, evType, 0, 0)
+	return s.ListEventsPaged(EventFilter{Status: status, Type: evType}, 0, 0)
+}
+
+// EventFilter 事件列表的筛选条件。
+//
+// 用结构体而不是位置参数：条件是会长的（1.3.1 加了 Keyword，以后可能加 level / 时间范围），
+// 位置参数每加一个就要改所有调用点，而且调用处 `ListEventsPaged("", "", ...)` 完全看不出
+// 那两个空串各自是什么。更重要的是——列表与计数必须共用同一份条件对象，
+// 两边各拼一遍 WHERE 就是"共 N 条"和列表对不上的根源。
+type EventFilter struct {
+	Status  string
+	Type    string
+	Keyword string // 标题/详情模糊匹配
 }
 
 // eventWhere 事件筛选条件的唯一构造点（列表与计数必须完全一致，
 // 否则"共 N 条"和实际列表对不上，用户会以为丢数据）。
-func eventWhere(status, evType string) (string, []any) {
+func eventWhere(f EventFilter) (string, []any) {
 	where := " WHERE 1=1"
 	var args []any
-	if status != "" {
+	if f.Status != "" {
 		where += " AND status=?"
-		args = append(args, status)
+		args = append(args, f.Status)
 	}
-	if evType != "" {
+	if f.Type != "" {
 		where += " AND type=?"
-		args = append(args, evType)
+		args = append(args, f.Type)
+	}
+	if cond, kwArgs := likeAny([]string{"title", "detail"}, f.Keyword); cond != "" {
+		where += " AND " + cond
+		args = append(args, kwArgs...)
 	}
 	return where, args
 }
 
 // ListEventsPaged 分页查询事件（limit<=0 且 offset<=0 表示不限量）。
-func (s *Store) ListEventsPaged(status, evType string, limit, offset int) ([]model.RiskEvent, error) {
-	where, args := eventWhere(status, evType)
+func (s *Store) ListEventsPaged(f EventFilter, limit, offset int) ([]model.RiskEvent, error) {
+	where, args := eventWhere(f)
 	query, args := applyPage(`SELECT id,type,node_id,node_key,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer FROM events`+where+` ORDER BY id DESC`, args, limit, offset)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -841,11 +857,42 @@ func (s *Store) ListEventsPaged(status, evType string, limit, offset int) ([]mod
 }
 
 // CountEvents 事件总数（与 ListEventsPaged 同一套筛选条件）。
-func (s *Store) CountEvents(status, evType string) (int, error) {
-	where, args := eventWhere(status, evType)
+func (s *Store) CountEvents(f EventFilter) (int, error) {
+	where, args := eventWhere(f)
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`+where, args...).Scan(&n)
 	return n, err
+}
+
+// ---------- 模糊匹配工具 ----------
+
+// escapeLike 转义 LIKE 的通配符。
+//
+// 不转义的后果不是安全问题（参数仍是绑定的），而是**语义错**：
+// 用户在搜索框里输入 "100%" 或 "10_0_0_1"，这两个字符会被当通配符，
+// 于是"搜什么都能匹配到"，看起来像搜索失灵。
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "%", `\%`)
+	s = strings.ReplaceAll(s, "_", `\_`)
+	return s
+}
+
+// likeAny 对多列做「任一命中」的模糊匹配，返回 (条件, 参数)。
+// 空关键字返回空条件，调用方据此跳过拼接。
+func likeAny(cols []string, keyword string) (string, []any) {
+	kw := strings.TrimSpace(keyword)
+	if kw == "" || len(cols) == 0 {
+		return "", nil
+	}
+	pat := "%" + escapeLike(kw) + "%"
+	parts := make([]string, 0, len(cols))
+	args := make([]any, 0, len(cols))
+	for _, c := range cols {
+		parts = append(parts, c+` LIKE ? ESCAPE '\'`)
+		args = append(args, pat)
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
 // ---------- Whitelist CRUD ----------
@@ -1089,20 +1136,43 @@ func (s *Store) AssetByKey(key string) (*model.Asset, error) {
 	return a, err
 }
 
+// AssetFilter 资产列表的筛选条件（列表与计数同源）。
+type AssetFilter struct {
+	Status  string
+	Keyword string // IP/MAC/主机名/系统/归属单位/归属人 模糊匹配
+}
+
+// assetWhere 资产筛选条件的唯一构造点。
+func assetWhere(f AssetFilter) (string, []any) {
+	var conds []string
+	var args []any
+	if f.Status != "" {
+		conds = append(conds, "status=?")
+		args = append(args, f.Status)
+	}
+	// ips 是 JSON 数组文本（如 ["10.0.0.1","10.0.0.2"]），LIKE 能匹配到里面的 IP。
+	if cond, kwArgs := likeAny(
+		[]string{"ips", "mac", "hostname", "os", "owner", "department"}, f.Keyword); cond != "" {
+		conds = append(conds, cond)
+		args = append(args, kwArgs...)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
 // ListAssets 查询资产（按状态过滤，空串=全部）。无限量，内部/测试用。
 func (s *Store) ListAssets(status string) ([]model.Asset, error) {
-	return s.ListAssetsPaged(status, 0, 0)
+	return s.ListAssetsPaged(AssetFilter{Status: status}, 0, 0)
 }
 
 // ListAssetsPaged 分页查询资产（limit<=0 且 offset<=0 表示不限量）。
-func (s *Store) ListAssetsPaged(status string, limit, offset int) ([]model.Asset, error) {
-	where, args := "", []any(nil)
-	if status != "" {
-		where, args = " WHERE status=?", []any{status}
-	}
-	order := ` ORDER BY status, last_seen DESC`
-	if status != "" {
-		order = ` ORDER BY last_seen DESC`
+func (s *Store) ListAssetsPaged(f AssetFilter, limit, offset int) ([]model.Asset, error) {
+	where, args := assetWhere(f)
+	order := ` ORDER BY status, last_seen DESC, node_key`
+	if f.Status != "" {
+		order = ` ORDER BY last_seen DESC, node_key`
 	}
 	query, args := applyPage(assetColumns+where+order, args, limit, offset)
 	rows, err := s.db.Query(query, args...)
@@ -1122,15 +1192,10 @@ func (s *Store) ListAssetsPaged(status string, limit, offset int) ([]model.Asset
 }
 
 // CountAssets 资产总数（与 ListAssetsPaged 同一套筛选条件）。
-func (s *Store) CountAssets(status string) (int, error) {
-	q := `SELECT COUNT(*) FROM assets`
-	var args []any
-	if status != "" {
-		q += ` WHERE status=?`
-		args = append(args, status)
-	}
+func (s *Store) CountAssets(f AssetFilter) (int, error) {
+	where, args := assetWhere(f)
 	var n int
-	err := s.db.QueryRow(q, args...).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM assets`+where, args...).Scan(&n)
 	return n, err
 }
 
@@ -1231,22 +1296,34 @@ func (s *Store) UpsertPorts(ps []model.PortRecord) error {
 	return tx.Commit()
 }
 
+// PortFilter 端口记录的筛选条件（列表与计数同源）。
+type PortFilter struct {
+	IP      string // 精确匹配
+	NodeKey string // 精确匹配
+	Keyword string // IP/服务/产品/标题/Banner 模糊匹配
+}
+
 // ListPorts 查询端口记录（可按 ip / node_key 过滤）。
 func (s *Store) ListPorts(ip, nodeKey string) ([]model.PortRecord, error) {
-	return s.ListPortsPaged(ip, nodeKey, 0, 0)
+	return s.ListPortsPaged(PortFilter{IP: ip, NodeKey: nodeKey}, 0, 0)
 }
 
 // portWhere 端口记录筛选条件的唯一构造点（列表与计数共用）。
-func portWhere(ip, nodeKey string) (string, []any) {
+func portWhere(f PortFilter) (string, []any) {
 	var conds []string
 	var args []any
-	if ip != "" {
+	if f.IP != "" {
 		conds = append(conds, "ip=?")
-		args = append(args, ip)
+		args = append(args, f.IP)
 	}
-	if nodeKey != "" {
+	if f.NodeKey != "" {
 		conds = append(conds, "node_key=?")
-		args = append(args, nodeKey)
+		args = append(args, f.NodeKey)
+	}
+	if cond, kwArgs := likeAny(
+		[]string{"ip", "service", "product", "version", "title", "banner", "tls_cn"}, f.Keyword); cond != "" {
+		conds = append(conds, cond)
+		args = append(args, kwArgs...)
 	}
 	if len(conds) == 0 {
 		return "", nil
@@ -1255,8 +1332,8 @@ func portWhere(ip, nodeKey string) (string, []any) {
 }
 
 // ListPortsPaged 分页查询端口记录（limit<=0 且 offset<=0 表示不限量）。
-func (s *Store) ListPortsPaged(ip, nodeKey string, limit, offset int) ([]model.PortRecord, error) {
-	where, args := portWhere(ip, nodeKey)
+func (s *Store) ListPortsPaged(f PortFilter, limit, offset int) ([]model.PortRecord, error) {
+	where, args := portWhere(f)
 	// 排序键带上 id 兜底：同一 IP:port 可能因 node_key 不同存在多行，
 	// 只按 (ip,port) 排序时 LIMIT 分页会出现"某行在两页都出现/都不出现"。
 	q, args := applyPage(portColumns+where+` ORDER BY ip, port, id`, args, limit, offset)
@@ -1277,8 +1354,8 @@ func (s *Store) ListPortsPaged(ip, nodeKey string, limit, offset int) ([]model.P
 }
 
 // CountPorts 端口记录总数（与 ListPortsPaged 同一套筛选条件）。
-func (s *Store) CountPorts(ip, nodeKey string) (int, error) {
-	where, args := portWhere(ip, nodeKey)
+func (s *Store) CountPorts(f PortFilter) (int, error) {
+	where, args := portWhere(f)
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM ports`+where, args...).Scan(&n)
 	return n, err

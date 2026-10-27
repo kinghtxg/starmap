@@ -2,6 +2,8 @@ package api
 
 import (
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 )
@@ -48,4 +50,27 @@ func setListMeta(c *gin.Context, total, limit int) {
 	c.Header("X-Result-Limit", strconv.Itoa(limit))
 	// 跨域部署（cors_origins 非空）时，自定义响应头默认对 JS 不可见
 	c.Header("Access-Control-Expose-Headers", "X-Total-Count,X-Result-Limit")
+}
+
+// maxKeywordLen 列表模糊搜索的关键字长度上限（按字符数，不是字节数）。
+//
+// 为什么要截断：LIKE '%...%' 无法走索引，SQLite 会对每一行跑一次模式匹配。
+// 关键字越长，单行匹配越慢，几万行累起来就是肉眼可见的卡顿。
+// 64 个字符足够定位任何一台设备，再长的关键字实际是误粘贴。
+const maxKeywordLen = 64
+
+// queryKeyword 取列表的模糊搜索关键字。
+//
+// 同时接受 q 与 keyword：前端各页历史命名不统一，与其改一堆前端不如两个都认。
+func queryKeyword(c *gin.Context) string {
+	kw := c.Query("q")
+	if kw == "" {
+		kw = c.Query("keyword")
+	}
+	kw = strings.TrimSpace(kw)
+	if utf8.RuneCountInString(kw) > maxKeywordLen {
+		// 按 rune 截断，不能按字节切——中文关键字按下标切会切出半个字符
+		kw = string([]rune(kw)[:maxKeywordLen])
+	}
+	return kw
 }

@@ -34,7 +34,7 @@ func TestEventsPaging(t *testing.T) {
 		t.Fatalf("全量查询应有 10 条，实际 %d err=%v", len(all), err)
 	}
 
-	page, err := st.ListEventsPaged("", "", 3, 0)
+	page, err := st.ListEventsPaged(EventFilter{}, 3, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestEventsPaging(t *testing.T) {
 	// 翻页不能重复也不能漏
 	seen := map[int64]bool{}
 	for off := 0; off < 10; off += 3 {
-		p, err := st.ListEventsPaged("", "", 3, off)
+		p, err := st.ListEventsPaged(EventFilter{}, 3, off)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -65,7 +65,7 @@ func TestEventsPaging(t *testing.T) {
 	}
 
 	// 只给 offset 不给 limit：SQLite 需要 LIMIT -1 才能用 OFFSET
-	p, err := st.ListEventsPaged("", "", 0, 8)
+	p, err := st.ListEventsPaged(EventFilter{}, 0, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,10 +73,10 @@ func TestEventsPaging(t *testing.T) {
 		t.Errorf("offset=8 应剩 2 条，实际 %d", len(p))
 	}
 
-	if n, err := st.CountEvents("", ""); err != nil || n != 10 {
+	if n, err := st.CountEvents(EventFilter{}); err != nil || n != 10 {
 		t.Errorf("CountEvents = %d err=%v，期望 10", n, err)
 	}
-	if n, err := st.CountEvents(model.EventStatusConfirmed, ""); err != nil || n != 0 {
+	if n, err := st.CountEvents(EventFilter{Status: model.EventStatusConfirmed}); err != nil || n != 0 {
 		t.Errorf("按状态计数应为 0，实际 %d err=%v", n, err)
 	}
 }
@@ -94,11 +94,11 @@ func TestAssetsPagingAndCount(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page, err := st.ListAssetsPaged("", 4, 0)
+	page, err := st.ListAssetsPaged(AssetFilter{}, 4, 0)
 	if err != nil || len(page) != 4 {
 		t.Fatalf("limit=4 应返回 4 条，实际 %d err=%v", len(page), err)
 	}
-	if n, err := st.CountAssets(""); err != nil || n != 7 {
+	if n, err := st.CountAssets(AssetFilter{}); err != nil || n != 7 {
 		t.Errorf("CountAssets = %d err=%v，期望 7", n, err)
 	}
 }
@@ -114,14 +114,14 @@ func TestPortsPagingAndCount(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page, err := st.ListPortsPaged("10.0.0.1", "", 5, 0)
+	page, err := st.ListPortsPaged(PortFilter{IP: "10.0.0.1"}, 5, 0)
 	if err != nil || len(page) != 5 {
 		t.Fatalf("limit=5 应返回 5 条，实际 %d err=%v", len(page), err)
 	}
 	// 排序含 id，翻页不该出现同一行跨页重复
 	seen := map[int64]bool{}
 	for off := 0; off < 20; off += 5 {
-		p, err := st.ListPortsPaged("10.0.0.1", "", 5, off)
+		p, err := st.ListPortsPaged(PortFilter{IP: "10.0.0.1"}, 5, off)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,10 +132,10 @@ func TestPortsPagingAndCount(t *testing.T) {
 			seen[r.ID] = true
 		}
 	}
-	if n, err := st.CountPorts("10.0.0.1", ""); err != nil || n != 20 {
+	if n, err := st.CountPorts(PortFilter{IP: "10.0.0.1"}); err != nil || n != 20 {
 		t.Errorf("CountPorts = %d err=%v，期望 20", n, err)
 	}
-	if n, err := st.CountPorts("10.0.0.1", "mac:none"); err != nil || n != 0 {
+	if n, err := st.CountPorts(PortFilter{IP: "10.0.0.1", NodeKey: "mac:none"}); err != nil || n != 0 {
 		t.Errorf("按 node_key 过滤应命中 0 条，实际 %d", n)
 	}
 }

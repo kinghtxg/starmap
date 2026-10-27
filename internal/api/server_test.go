@@ -15,6 +15,7 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcapgo"
 
+	"starmap/internal/config"
 	"starmap/internal/detect"
 	"starmap/internal/model"
 	"starmap/internal/parser"
@@ -50,7 +51,7 @@ func newTestRouter(t *testing.T, cfg model.SystemConfig) (http.Handler, *store.S
 	scanner.SetEnabled(cfg.ProbeEnabled)
 	return NewRouter(Deps{
 		Store: st, Engine: eng, Detector: det, Reviewer: rvw, Scanner: scanner,
-		Cfg: &cfg, Aggregator: agg,
+		Cfg: config.NewBox(cfg), Aggregator: agg,
 	}), st
 }
 

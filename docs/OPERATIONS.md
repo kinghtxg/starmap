@@ -320,7 +320,7 @@ grep '"level":"ERROR"' app.log | jq   # json 格式时
 | 审计里操作人全是 127.0.0.1 | 反代未配 `trusted_proxies` | 见 2.3 |
 | 实时抓包按钮灰 | 未用 `-tags pcap` 构建，或缺 libpcap/权限 | 页面会显示具体原因；改用 PCAP 导入 |
 | `/metrics` 403 | 未配 `metrics_token` 且非 admin 会话 | 配 token 或用 admin 登录后访问 |
-| 端口记录只显示 2000 条 | 列表接口容量护栏 | 用 IP 过滤；或直接查库 / 单机详情 |
+| 端口记录翻不到更多页 | 单页上限 5000 条（`?limit=` 会被夹取） | 正常行为；用关键字搜索收窄，或翻页（`?offset=`） |
 | 深度发现 503 | `discover_enabled=false` | 系统配置里开启（先确认已获授权） |
 | 升级后拓扑少了很多节点 | 老库 `node_key` 回填中 / 老化参数变化 | 看日志有无 `restore` 相关告警 |
 | 磁盘持续增长 | 端口记录 / 会话表 | 调小保留期；`ports` 按网段清理 |

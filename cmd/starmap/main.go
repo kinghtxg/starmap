@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -312,20 +311,18 @@ func main() {
 	}
 
 	// 4.x 主动发现执行器（1.2）：手动触发与周期任务共用同一份执行/落库逻辑。
-	// 配置用 atomic.Value 快照传递：PUT /api/config 是 HTTP goroutine 在改 cfg，
-	// 周期任务在另一个 goroutine 读——直接读同一份结构体会被 -race 抓住（真实数据竞争）。
-	var cfgSnap atomic.Value
-	cfgSnap.Store(cfg)
+	// 配置统一装进并发安全容器（internal/config.Box）。
+	//
+	// 此前这里有一个 atomic.Value 快照给周期任务用，API 层却拿的是裸 *model.SystemConfig 指针，
+	// 于是同一份配置存在两个副本、两套同步语义：周期任务读到的是新值，
+	// 而 getConfig / 保留期清理读的还是指针指向的那份，改配置时两者会短暂不一致。
+	// 现在只有一个真源，读写都过 Box。
+	cfgBox := config.NewBox(cfg)
 	discRunner := &discover.Runner{
 		Store:   st,
 		Engine:  engine,
 		Scanner: scanner,
-		Cfg: func() model.SystemConfig {
-			if v, ok := cfgSnap.Load().(model.SystemConfig); ok {
-				return v
-			}
-			return cfg
-		},
+		Cfg:     cfgBox.Get,
 	}
 	go discRunner.Loop(ctx)
 
@@ -334,7 +331,7 @@ func main() {
 	// 注意 audit_retention_days 此前只是界面上一个能改的数字——清理函数
 	// DeleteAuditLogsBefore 写好了却没有任何调用点，等于配置静默失效。
 	// 这里把它接上，并给事件补上同样的保留期（此前彻底没有清理策略）。
-	go maintenanceLoop(ctx, st, &cfg)
+	go maintenanceLoop(ctx, st, cfgBox)
 
 	srv := api.NewRouter(api.Deps{
 		Store:      st,
@@ -342,12 +339,12 @@ func main() {
 		Detector:   det,
 		Reviewer:   rvw,
 		Scanner:    scanner,
-		Cfg:        &cfg,
+		Cfg:        cfgBox,
 		Aggregator: agg,
 		PacketCh:   packetCh,
 		Discover:   discRunner,
 		PersistConfig: func(c model.SystemConfig) error {
-			cfgSnap.Store(c) // 先让周期任务看到新配置，再落盘
+			// 配置已经在 Box.Update 里生效，这里只负责落盘。
 			b, err := json.Marshal(c)
 			if err != nil {
 				return err
@@ -510,6 +507,11 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	if saved.AuditRetentionDays > 0 {
 		cfg.AuditRetentionDays = saved.AuditRetentionDays
 	}
+	// 风险事件保留期：1.3.0 新增的配置项，PUT /api/config 能改，
+	// 但当时漏了这条恢复逻辑——后台设成 30 天，重启后静默回到默认 180 天。
+	if saved.EventRetentionDays > 0 {
+		cfg.EventRetentionDays = saved.EventRetentionDays
+	}
 	// 主机资产库（V1.2）
 	if saved.UnarchivedOfflineHours > 0 {
 		cfg.UnarchivedOfflineHours = saved.UnarchivedOfflineHours
@@ -659,11 +661,15 @@ const maintenanceInterval = 6 * time.Hour
 //
 // 为什么启动时先跑一次：长期运行的实例可能在升级前就攒了几十 GB 的历史数据，
 // 升级后如果等 6 小时才清，第一个小时的查询依然是被拖慢的。
-func maintenanceLoop(ctx context.Context, st *store.Store, cfg *model.SystemConfig) {
+//
+// 每轮都重新读配置：保留期是后台可以改的，读一次就缓存会让"改了没生效"重演
+// （这个函数上一版正是如此——它拿的是启动时的配置指针）。
+func maintenanceLoop(ctx context.Context, st *store.Store, box *config.Box) {
 	run := func() {
 		if st == nil {
 			return
 		}
+		cfg := box.Get()
 		now := time.Now()
 		if days := cfg.AuditRetentionDays; days > 0 {
 			cutoff := now.AddDate(0, 0, -days)

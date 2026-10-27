@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"starmap/internal/auth"
+	"starmap/internal/config"
 	"starmap/internal/detect"
 	"starmap/internal/discover"
 	"starmap/internal/ingest"
@@ -41,12 +42,15 @@ const MaxPCAPUpload = 200 << 20
 
 // Deps API 层依赖
 type Deps struct {
-	Store      *store.Store
-	Engine     *topology.Engine
-	Detector   *detect.Detector
-	Reviewer   *review.Reviewer
-	Scanner    *probe.Scanner
-	Cfg        *model.SystemConfig
+	Store    *store.Store
+	Engine   *topology.Engine
+	Detector *detect.Detector
+	Reviewer *review.Reviewer
+	Scanner  *probe.Scanner
+	// Cfg 并发安全的配置容器（见 internal/config.Box）。
+	// 不再用裸 *model.SystemConfig：PUT /api/config 会在运行中改配置，
+	// 而读配置的 goroutine 至少有 HTTP handler 与后台清理任务两类，无同步就是数据竞争。
+	Cfg        *config.Box
 	Aggregator *parser.Aggregator
 	// Discover 主动发现执行器（1.2）；nil 表示不提供主动发现接口。
 	Discover *discover.Runner
@@ -122,8 +126,11 @@ func NewRouter(d Deps) *gin.Engine {
 		r.Use(s.d.Metrics.Middleware())
 	}
 	r.Use(s.corsMiddleware())
+	// 认证配置在启动时定版（改 auth.mode 必须重启，这是有意的：
+	// 热切换账号体系会让当前会话的语义突然变化）。
+	authCfg := d.Cfg.Get().Auth
 	// 可选账号系统 / APSSO SSO 门卫（默认 mode=none，不启用时零行为差异，见 docs/AUTH-APSSO.md）
-	r.Use(auth.Middleware(d.Cfg.Auth))
+	r.Use(auth.Middleware(authCfg))
 	// 附加中间件必须在路由注册之前挂载：RequireRole 是绑在路由上的，
 	// 晚于它挂载中间件就来不及把角色写进上下文。
 	for _, mw := range d.Middleware {
@@ -131,7 +138,7 @@ func NewRouter(d Deps) *gin.Engine {
 			r.Use(mw)
 		}
 	}
-	auth.RegisterRoutes(r, d.Cfg.Auth)
+	auth.RegisterRoutes(r, authCfg)
 
 	api := r.Group("/api")
 	// 权限分层：写死在路由表上，看一眼就知道谁能调什么。
@@ -211,10 +218,18 @@ func NewRouter(d Deps) *gin.Engine {
 
 // ---------- middleware ----------
 
+// cfg 返回当前配置的独立副本。
+//
+// 所有 handler 读配置都必须走这里，不要持有副本跨 goroutine 使用，
+// 也不要在外部改写返回值的字段（改了不影响真实配置，容易写出"以为改生效了"的 bug）。
+func (s *Server) cfg() model.SystemConfig {
+	return s.d.Cfg.Get()
+}
+
 func (s *Server) corsMiddleware() gin.HandlerFunc {
 	// P0-4/P1-7：CORS 收紧为白名单。默认空 = 仅同源，不发 Access-Control-Allow-Origin，
 	// 杜绝任意恶意网页跨域读写内网 StarMap。
-	origins := s.d.Cfg.CorsOrigins
+	origins := s.cfg().CorsOrigins
 	return func(c *gin.Context) {
 		if origin := c.Request.Header.Get("Origin"); origin != "" {
 			if allowedOrigin(origin, origins) {
@@ -298,7 +313,7 @@ func (s *Server) metricsGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := ""
 		if s.d.Cfg != nil {
-			token = strings.TrimSpace(s.d.Cfg.MetricsToken)
+			token = strings.TrimSpace(s.cfg().MetricsToken)
 		}
 		if token != "" {
 			if secureEqual(c.GetHeader("X-Metrics-Token"), token) {
@@ -331,13 +346,11 @@ func (s *Server) health(c *gin.Context) {
 
 func (s *Server) stats(c *gin.Context) {
 	snap := s.d.Engine.Snapshot()
-	events, _ := s.d.Store.ListEvents("", "")
-	pending := 0
-	for _, e := range events {
-		if e.Status == model.EventStatusPending {
-			pending++
-		}
-	}
+	// 事件统计走 COUNT，不要把事件全表读进内存再循环数。
+	// 事件表是持续增长的（检测引擎每 2s 评估一轮），几万条时首页每刷一次
+	// 就要做一次"全表读 + 反序列化"，纯属白烧内存和 CPU。
+	eventCount, _ := s.d.Store.CountEvents(store.EventFilter{})
+	pendingCount, _ := s.d.Store.CountEvents(store.EventFilter{Status: model.EventStatusPending})
 	s.mu.Lock()
 	capSt := gin.H{
 		"Running":    s.capRunning,
@@ -356,8 +369,8 @@ func (s *Server) stats(c *gin.Context) {
 		"ActiveNodes":   snap.Stats.ActiveNodes,
 		"ActiveEdges":   snap.Stats.ActiveEdges,
 		"TotalBytes":    snap.Stats.TotalBytes,
-		"EventCount":    len(events),
-		"PendingEvents": pending,
+		"EventCount":    eventCount,
+		"PendingEvents": pendingCount,
 		"SessionCount":  aggSt.Active,
 		"PacketCount":   atomic.LoadInt64(&s.packetsTotal),
 		"Capture":       capSt,
@@ -699,13 +712,14 @@ func nodeDisplayLabel(n *model.Node) string {
 
 func (s *Server) listEvents(c *gin.Context) {
 	status, evType := c.Query("status"), c.Query("type")
+	f := store.EventFilter{Status: status, Type: evType, Keyword: queryKeyword(c)}
 	limit, offset := pageParams(c)
-	evs, err := s.d.Store.ListEventsPaged(status, evType, limit, offset)
+	evs, err := s.d.Store.ListEventsPaged(f, limit, offset)
 	if err != nil {
 		internalError(c, err, "查询事件失败")
 		return
 	}
-	if total, cerr := s.d.Store.CountEvents(status, evType); cerr == nil {
+	if total, cerr := s.d.Store.CountEvents(f); cerr == nil {
 		setListMeta(c, total, limit)
 	}
 	out := make([]eventJSON, 0, len(evs))
@@ -1000,7 +1014,7 @@ func (s *Server) ingestProbe(c *gin.Context) {
 		location = report.Metadata["location"]
 	}
 	// token 校验
-	if want := s.d.Cfg.ProbeToken; want != "" {
+	if want := s.cfg().ProbeToken; want != "" {
 		got := c.GetHeader("X-Probe-Token")
 		if got == "" {
 			got = c.Query("token")
@@ -1279,12 +1293,12 @@ func (s *Server) captureStart(c *gin.Context) {
 	}
 	s.mu.Unlock()
 
-	ifaces := s.d.Cfg.CaptureInterfaces
+	ifaces := s.cfg().CaptureInterfaces
 	if len(ifaces) == 0 {
 		fail(c, http.StatusBadRequest, "未配置抓包网卡（capture_interfaces）")
 		return
 	}
-	src, err := ingest.StartCapture(ifaces, s.d.Cfg.CaptureBPF)
+	src, err := ingest.StartCapture(ifaces, s.cfg().CaptureBPF)
 	if err != nil {
 		if errors.Is(err, ingest.ErrNotEnabled) {
 			fail(c, http.StatusNotImplemented, err.Error())
@@ -1365,8 +1379,8 @@ func (s *Server) triggerProbe(c *gin.Context) {
 
 // getConfig 输出当前配置（含前端别名键）。
 func (s *Server) getConfig(c *gin.Context) {
-	cfg := s.d.Cfg
-	c.JSON(http.StatusOK, s.configToMap(cfg))
+	cfg := s.cfg()
+	c.JSON(http.StatusOK, s.configToMap(&cfg))
 }
 
 // configToMap 输出当前配置（含前端别名键）。
@@ -1505,198 +1519,225 @@ func (s *Server) putConfig(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "JSON 解析失败: "+err.Error())
 		return
 	}
-	cfg := s.d.Cfg
-
-	if v, ok := m["probe_enabled"].(bool); ok {
-		cfg.ProbeEnabled = v
-		s.d.Scanner.SetEnabled(v)
-	}
-	if v, ok := m["capture_enabled"].(bool); ok {
-		cfg.CaptureEnabled = v
-	}
-	if v, ok := listFrom(m, "capture_interfaces", "interfaces"); ok {
-		cfg.CaptureInterfaces = v
-	}
-	if v, ok := strFrom(m, "capture_bpf"); ok {
-		cfg.CaptureBPF = v
-	}
-	if v, ok := numFrom(m, "aging_seconds"); ok && v > 0 {
-		cfg.AgingSeconds = int64(v)
-	}
-	if v, ok := numFrom(m, "aggregate_threshold"); ok && v > 0 {
-		cfg.AggregateThreshold = int(v)
-	}
-	if v, ok := numFrom(m, "noise_bytes", "noise_min_bytes"); ok && v > 0 {
-		cfg.NoiseBytes = int64(v)
-	}
-	if v, ok := numFrom(m, "noise_packets", "noise_min_packets"); ok && v > 0 {
-		cfg.NoisePackets = int64(v)
-	}
-	if v, ok := numFrom(m, "noise_duration_sec"); ok && v > 0 {
-		cfg.NoiseDurationSec = int64(v)
-	}
-	if v, ok := numFrom(m, "reverse_proxy_hosts", "reverse_proxy_host_threshold"); ok && v > 0 {
-		cfg.ReverseProxyHosts = int(v)
-	}
-	if v, ok := numFrom(m, "long_conn_seconds"); ok && v > 0 {
-		cfg.LongConnSeconds = int64(v)
-	}
-	if v, ok := numFrom(m, "heartbeat_max_bytes"); ok && v > 0 {
-		cfg.HeartbeatMaxBytes = int(v)
-	}
-	if v, ok := strFrom(m, "probe_token"); ok && v != "" {
-		// P0-3：空串忽略，避免前端留空时静默清空已设置的令牌。
-		cfg.ProbeToken = v
-	}
-	if v, ok := numFrom(m, "audit_retention_days"); ok && v > 0 {
-		cfg.AuditRetentionDays = int(v)
-	}
-	if v, ok := numFrom(m, "event_retention_days"); ok && v > 0 {
-		cfg.EventRetentionDays = int(v)
-	}
-	if v, ok := numFrom(m, "unarchived_offline_hours"); ok && v >= 0 {
-		cfg.UnarchivedOfflineHours = int(v)
-	}
-	if v, ok := numFrom(m, "archive_offline_seconds"); ok && v > 0 {
-		cfg.ArchiveOfflineSeconds = int64(v)
-	}
-	if v, ok := strFrom(m, "scan_ports"); ok && v != "" {
-		cfg.ScanPorts = v
-	}
-	if v, ok := strFrom(m, "scan_rate"); ok && v != "" {
-		cfg.ScanRate = v
-	}
-	// 自动发现（V1.4）
-	if v, ok := m["auto_discovery_enabled"].(bool); ok {
-		cfg.AutoDiscoveryEnabled = v
-	}
-	if v, ok := numFrom(m, "auto_discovery_sec"); ok {
-		cfg.AutoDiscoverySec = int64(v)
-	}
-	if v, ok := strFrom(m, "auto_discovery_method"); ok && v != "" {
-		cfg.AutoDiscoveryMethod = v
-	}
-	if v, ok := strFrom(m, "auto_discovery_cidrs"); ok {
-		// 逗号分隔的网段列表，如 "10.10.1.0/24,172.16.5.0/24"
-		var list []string
-		for _, p := range strings.Split(v, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				list = append(list, p)
-			}
+	// 配置修改走 Update：写锁内改副本，全部字段校验通过才整体替换。
+	//
+	// 原先直接写 s.d.Cfg 指向的结构体，有两个问题：
+	//  1. 无同步。读配置的还有 getConfig（另一个 HTTP 请求）和后台清理任务，是真实数据竞争。
+	//  2. 不原子。解析到第 3 个字段发现非法就 return，前两个字段已经改生效了，
+	//     留下"半套新配置"，而且这次修改还没落盘——重启后又变回去，最难查。
+	cfg, err := s.d.Cfg.Update(func(cfg *model.SystemConfig) error {
+		if v, ok := m["probe_enabled"].(bool); ok {
+			cfg.ProbeEnabled = v
 		}
-		if len(list) > 0 {
-			cfg.AutoDiscoveryCIDRs = list
+		if v, ok := m["capture_enabled"].(bool); ok {
+			cfg.CaptureEnabled = v
 		}
-	}
-	// V1.5 新网段自动跟随
-	if v, ok := m["auto_discovery_follow_discovered"].(bool); ok {
-		cfg.AutoDiscoveryFollowDiscovered = v
-	}
-	if v, ok := numFrom(m, "auto_discovery_max_cidrs"); ok {
-		cfg.AutoDiscoveryMaxCIDRs = int(v)
-	}
-	if v, ok := strFrom(m, "auto_discovery_exclude_cidrs"); ok {
-		var list []string
-		for _, p := range strings.Split(v, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				list = append(list, p)
-			}
+		if v, ok := listFrom(m, "capture_interfaces", "interfaces"); ok {
+			cfg.CaptureInterfaces = v
 		}
-		if len(list) > 0 {
-			cfg.AutoDiscoveryExcludeCIDRs = list
+		if v, ok := strFrom(m, "capture_bpf"); ok {
+			cfg.CaptureBPF = v
 		}
-	}
-	// 主动发现（1.2）
-	if v, ok := m["discover_enabled"].(bool); ok {
-		cfg.DiscoverEnabled = v
-	}
-	if v, ok := strFrom(m, "discover_profile"); ok && v != "" {
-		cfg.DiscoverProfile = v
-	}
-	if v, ok := numFrom(m, "discover_rate_pps"); ok && v >= 0 {
-		cfg.DiscoverRatePPS = int(v)
-	}
-	if v, ok := numFrom(m, "discover_concurrency"); ok && v > 0 {
-		cfg.DiscoverConcurrency = int(v)
-	}
-	if v, ok := numFrom(m, "discover_timeout_ms"); ok && v > 0 {
-		cfg.DiscoverTimeoutMS = int(v)
-	}
-	if v, ok := m["discover_fingerprint"].(bool); ok {
-		cfg.DiscoverFingerprint = v
-	}
-	if v, ok := numFrom(m, "discover_max_fingerprints"); ok && v > 0 {
-		cfg.DiscoverMaxFP = int(v)
-	}
-	if v, ok := strFrom(m, "discover_window"); ok {
-		// 允许清空（=全天），但填了就必须是合法窗口，否则会在半夜静默不扫描
-		if v == "" {
-			cfg.DiscoverWindow = ""
-		} else if _, werr := probe.ParseWindow(v); werr != nil {
-			fail(c, http.StatusBadRequest, werr.Error())
-			return
-		} else {
-			cfg.DiscoverWindow = v
+		if v, ok := numFrom(m, "aging_seconds"); ok && v > 0 {
+			cfg.AgingSeconds = int64(v)
 		}
-	}
-	if v, ok := numFrom(m, "discover_sec"); ok && v >= 0 {
-		cfg.DiscoverSec = int64(v)
-	}
-	if list, ok := listFrom(m, "discover_cidrs"); ok {
-		// 前端可能是 textarea 按行、也可能是逗号分隔的一行；统一拆开再存
-		out := make([]string, 0, len(list))
-		for _, item := range list {
-			for _, c := range strings.Split(item, ",") {
-				if c = strings.TrimSpace(c); c != "" {
-					out = append(out, c)
+		if v, ok := numFrom(m, "aggregate_threshold"); ok && v > 0 {
+			cfg.AggregateThreshold = int(v)
+		}
+		if v, ok := numFrom(m, "noise_bytes", "noise_min_bytes"); ok && v > 0 {
+			cfg.NoiseBytes = int64(v)
+		}
+		if v, ok := numFrom(m, "noise_packets", "noise_min_packets"); ok && v > 0 {
+			cfg.NoisePackets = int64(v)
+		}
+		if v, ok := numFrom(m, "noise_duration_sec"); ok && v > 0 {
+			cfg.NoiseDurationSec = int64(v)
+		}
+		if v, ok := numFrom(m, "reverse_proxy_hosts", "reverse_proxy_host_threshold"); ok && v > 0 {
+			cfg.ReverseProxyHosts = int(v)
+		}
+		if v, ok := numFrom(m, "long_conn_seconds"); ok && v > 0 {
+			cfg.LongConnSeconds = int64(v)
+		}
+		if v, ok := numFrom(m, "heartbeat_max_bytes"); ok && v > 0 {
+			cfg.HeartbeatMaxBytes = int(v)
+		}
+		if v, ok := strFrom(m, "probe_token"); ok && v != "" {
+			// P0-3：空串忽略，避免前端留空时静默清空已设置的令牌。
+			cfg.ProbeToken = v
+		}
+		if v, ok := numFrom(m, "audit_retention_days"); ok && v > 0 {
+			cfg.AuditRetentionDays = int(v)
+		}
+		if v, ok := numFrom(m, "event_retention_days"); ok && v > 0 {
+			cfg.EventRetentionDays = int(v)
+		}
+		if v, ok := numFrom(m, "unarchived_offline_hours"); ok && v >= 0 {
+			cfg.UnarchivedOfflineHours = int(v)
+		}
+		if v, ok := numFrom(m, "archive_offline_seconds"); ok && v > 0 {
+			cfg.ArchiveOfflineSeconds = int64(v)
+		}
+		if v, ok := strFrom(m, "scan_ports"); ok && v != "" {
+			cfg.ScanPorts = v
+		}
+		if v, ok := strFrom(m, "scan_rate"); ok && v != "" {
+			cfg.ScanRate = v
+		}
+		// 自动发现（V1.4）
+		if v, ok := m["auto_discovery_enabled"].(bool); ok {
+			cfg.AutoDiscoveryEnabled = v
+		}
+		if v, ok := numFrom(m, "auto_discovery_sec"); ok {
+			cfg.AutoDiscoverySec = int64(v)
+		}
+		if v, ok := strFrom(m, "auto_discovery_method"); ok && v != "" {
+			cfg.AutoDiscoveryMethod = v
+		}
+		if v, ok := strFrom(m, "auto_discovery_cidrs"); ok {
+			// 逗号分隔的网段列表，如 "10.10.1.0/24,172.16.5.0/24"
+			var list []string
+			for _, p := range strings.Split(v, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					list = append(list, p)
 				}
 			}
+			if len(list) > 0 {
+				cfg.AutoDiscoveryCIDRs = list
+			}
 		}
-		cfg.DiscoverCIDRs = out
+		// V1.5 新网段自动跟随
+		if v, ok := m["auto_discovery_follow_discovered"].(bool); ok {
+			cfg.AutoDiscoveryFollowDiscovered = v
+		}
+		if v, ok := numFrom(m, "auto_discovery_max_cidrs"); ok {
+			cfg.AutoDiscoveryMaxCIDRs = int(v)
+		}
+		if v, ok := strFrom(m, "auto_discovery_exclude_cidrs"); ok {
+			var list []string
+			for _, p := range strings.Split(v, ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					list = append(list, p)
+				}
+			}
+			if len(list) > 0 {
+				cfg.AutoDiscoveryExcludeCIDRs = list
+			}
+		}
+		// 主动发现（1.2）
+		if v, ok := m["discover_enabled"].(bool); ok {
+			cfg.DiscoverEnabled = v
+		}
+		if v, ok := strFrom(m, "discover_profile"); ok && v != "" {
+			cfg.DiscoverProfile = v
+		}
+		if v, ok := numFrom(m, "discover_rate_pps"); ok && v >= 0 {
+			cfg.DiscoverRatePPS = int(v)
+		}
+		if v, ok := numFrom(m, "discover_concurrency"); ok && v > 0 {
+			cfg.DiscoverConcurrency = int(v)
+		}
+		if v, ok := numFrom(m, "discover_timeout_ms"); ok && v > 0 {
+			cfg.DiscoverTimeoutMS = int(v)
+		}
+		if v, ok := m["discover_fingerprint"].(bool); ok {
+			cfg.DiscoverFingerprint = v
+		}
+		if v, ok := numFrom(m, "discover_max_fingerprints"); ok && v > 0 {
+			cfg.DiscoverMaxFP = int(v)
+		}
+		if v, ok := strFrom(m, "discover_window"); ok {
+			// 允许清空（=全天），但填了就必须是合法窗口，否则会在半夜静默不扫描
+			if v == "" {
+				cfg.DiscoverWindow = ""
+			} else if _, werr := probe.ParseWindow(v); werr != nil {
+				// 在闭包内返回 error 即整体回滚：这条配置非法时，同一请求里的其他字段也不生效
+				return werr
+			} else {
+				cfg.DiscoverWindow = v
+			}
+		}
+		if v, ok := numFrom(m, "discover_sec"); ok && v >= 0 {
+			cfg.DiscoverSec = int64(v)
+		}
+		if list, ok := listFrom(m, "discover_cidrs"); ok {
+			// 前端可能是 textarea 按行、也可能是逗号分隔的一行；统一拆开再存
+			out := make([]string, 0, len(list))
+			for _, item := range list {
+				for _, c := range strings.Split(item, ",") {
+					if c = strings.TrimSpace(c); c != "" {
+						out = append(out, c)
+					}
+				}
+			}
+			cfg.DiscoverCIDRs = out
+		}
+		// 会话表容量治理（V1.0）：改完立即生效，无需重启
+		if v, ok := numFrom(m, "session_max_count"); ok && v > 0 {
+			cfg.SessionMaxCount = int(v)
+		}
+		if v, ok := numFrom(m, "session_idle_seconds"); ok && v > 0 {
+			cfg.SessionIdleSeconds = int64(v)
+		}
+		if v, ok := numFrom(m, "session_max_age_seconds"); ok && v > 0 {
+			cfg.SessionMaxAgeSeconds = int64(v)
+		}
+		// 可观测性（V1.0）：日志级别改完立即生效（LevelVar），不需要重启。
+		// 日志格式与 /metrics 开关涉及 Handler / 路由注册，只能落盘等下次启动——
+		// 这里显式不处理，前端提交后回显仍是旧值，避免"看着改了其实没变"。
+		if v, ok := strFrom(m, "log_level"); ok && v != "" {
+			cfg.LogLevel = v
+		}
+		if v, ok := strFrom(m, "log_format"); ok && v != "" {
+			cfg.LogFormat = v
+		}
+		if v, ok := strFrom(m, "metrics_token"); ok && v != "" {
+			// 与 probe_token 同策略：空串忽略，避免前端留空把已设令牌清掉。
+			cfg.MetricsToken = v
+		}
+
+		return nil
+	})
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
 	}
-	// 速率上限立即生效：用户把它从 800 调到 100，不该等重启才变安全
-	if s.d.Scanner != nil && cfg.DiscoverRatePPS >= 0 {
-		s.d.Scanner.SetRate(cfg.DiscoverRatePPS)
-	}
-	// 会话表容量治理（V1.0）：改完立即生效，无需重启
-	if v, ok := numFrom(m, "session_max_count"); ok && v > 0 {
-		cfg.SessionMaxCount = int(v)
-	}
-	if v, ok := numFrom(m, "session_idle_seconds"); ok && v > 0 {
-		cfg.SessionIdleSeconds = int64(v)
-	}
-	if v, ok := numFrom(m, "session_max_age_seconds"); ok && v > 0 {
-		cfg.SessionMaxAgeSeconds = int64(v)
+
+	// 以下副作用统一在「配置已被接受」之后执行。
+	// 放在解析过程中会出现：校验失败的那次请求配置已回滚，运行时状态却已经改了
+	// （典型：速率上限那行在新值生效前就读了 cfg，或者日志级别被改掉）。
+	if s.d.Scanner != nil {
+		s.d.Scanner.SetEnabled(cfg.ProbeEnabled)
+		// 速率上限立即生效：用户把它从 800 调到 100，不该等重启才变安全。
+		// DiscoverRatePPS 允许为 0（= 不限速），所以不加 >0 判断。
+		if cfg.DiscoverRatePPS >= 0 {
+			s.d.Scanner.SetRate(cfg.DiscoverRatePPS)
+		}
 	}
 	if s.d.Aggregator != nil {
 		s.d.Aggregator.SetLimits(cfg.SessionMaxCount, cfg.SessionIdleSeconds, cfg.SessionMaxAgeSeconds)
 	}
-	// 可观测性（V1.0）：日志级别改完立即生效（LevelVar），不需要重启。
-	// 日志格式与 /metrics 开关涉及 Handler / 路由注册，只能落盘等下次启动——
-	// 这里显式不处理，前端提交后回显仍是旧值，避免"看着改了其实没变"。
-	if v, ok := strFrom(m, "log_level"); ok && v != "" {
-		cfg.LogLevel = v
-		logging.SetLevel(v)
-	}
-	if v, ok := strFrom(m, "log_format"); ok && v != "" {
-		cfg.LogFormat = v
-	}
-	if v, ok := strFrom(m, "metrics_token"); ok && v != "" {
-		// 与 probe_token 同策略：空串忽略，避免前端留空把已设令牌清掉。
-		cfg.MetricsToken = v
+	if cfg.LogLevel != "" {
+		logging.SetLevel(cfg.LogLevel)
 	}
 
 	// 联动拓扑引擎与检测器
-	s.d.Engine.UpdateConfig(*cfg)
-	s.d.Detector.UpdateConfig(*cfg)
+	if s.d.Engine != nil {
+		s.d.Engine.UpdateConfig(cfg)
+	}
+	if s.d.Detector != nil {
+		s.d.Detector.UpdateConfig(cfg)
+	}
 	if s.d.PersistConfig != nil {
-		if err := s.d.PersistConfig(*cfg); err != nil {
+		if err := s.d.PersistConfig(cfg); err != nil {
 			fail(c, http.StatusInternalServerError, "配置持久化失败: "+err.Error())
 			return
 		}
 	}
-	s.d.Reviewer.Audit(s.actor(c), "config_update", "system_config", "")
-	c.JSON(http.StatusOK, s.configToMap(cfg))
+	if s.d.Reviewer != nil {
+		s.d.Reviewer.Audit(s.actor(c), "config_update", "system_config", "")
+	}
+	c.JSON(http.StatusOK, s.configToMap(&cfg))
 }
 
 // ---------- 审计 ----------
@@ -1848,7 +1889,7 @@ func (s *Server) syncAssets() {
 // assetJSON 资产列表 DTO（含在线状态）。
 func (s *Server) assetJSON(a model.Asset) gin.H {
 	online := false
-	offlineSec := s.d.Cfg.ArchiveOfflineSeconds
+	offlineSec := s.cfg().ArchiveOfflineSeconds
 	if offlineSec <= 0 {
 		offlineSec = 600
 	}
@@ -1904,7 +1945,7 @@ func (s *Server) collectLedgerHosts() []ledger.Host {
 			}
 		}
 	}
-	offlineSec := s.d.Cfg.ArchiveOfflineSeconds
+	offlineSec := s.cfg().ArchiveOfflineSeconds
 	if offlineSec <= 0 {
 		offlineSec = 600
 	}
@@ -2057,14 +2098,14 @@ func (s *Server) listProxies(c *gin.Context) {
 
 func (s *Server) listAssets(c *gin.Context) {
 	s.syncAssetsThrottled() // 同步（带 5s 节流），保证新节点可见且不拖垮单连接
-	status := c.Query("status")
+	f := store.AssetFilter{Status: c.Query("status"), Keyword: queryKeyword(c)}
 	limit, offset := pageParams(c)
-	assets, err := s.d.Store.ListAssetsPaged(status, limit, offset)
+	assets, err := s.d.Store.ListAssetsPaged(f, limit, offset)
 	if err != nil {
 		internalError(c, err, "查询资产失败")
 		return
 	}
-	if total, cerr := s.d.Store.CountAssets(status); cerr == nil {
+	if total, cerr := s.d.Store.CountAssets(f); cerr == nil {
 		setListMeta(c, total, limit)
 	}
 	out := make([]gin.H, 0, len(assets))
@@ -2116,7 +2157,7 @@ func (s *Server) assetStats(c *gin.Context) {
 	}
 	// 直接遍历 model 而不是调 assetJSON：后者每条都构造一个 gin.H（map + 时间格式化），
 	// 1 万条资产就是 1 万个 map，而这里只需要一个布尔值。
-	offlineSec := s.d.Cfg.ArchiveOfflineSeconds
+	offlineSec := s.cfg().ArchiveOfflineSeconds
 	if offlineSec <= 0 {
 		offlineSec = 600
 	}
@@ -2221,15 +2262,18 @@ func (s *Server) deleteAsset(c *gin.Context) {
 // ---------- 端口记录（V1.2） ----------
 
 func (s *Server) listPorts(c *gin.Context) {
-	ip := c.Query("ip")
-	key := c.Query("node_key")
+	f := store.PortFilter{
+		IP:      c.Query("ip"),
+		NodeKey: c.Query("node_key"),
+		Keyword: queryKeyword(c),
+	}
 	limit, offset := pageParams(c)
-	ports, err := s.d.Store.ListPortsPaged(ip, key, limit, offset)
+	ports, err := s.d.Store.ListPortsPaged(f, limit, offset)
 	if err != nil {
 		internalError(c, err, "查询端口记录失败")
 		return
 	}
-	if total, cerr := s.d.Store.CountPorts(ip, key); cerr == nil {
+	if total, cerr := s.d.Store.CountPorts(f); cerr == nil {
 		setListMeta(c, total, limit)
 	}
 	type portJSON struct {
@@ -2272,7 +2316,7 @@ func (s *Server) scanPorts(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "缺少 target（IP 或 CIDR）")
 		return
 	}
-	if !probe.NmapAvailable(s.d.Cfg.NmapPath) {
+	if !probe.NmapAvailable(s.cfg().NmapPath) {
 		fail(c, http.StatusServiceUnavailable, "未检测到 nmap 命令，无法主动扫描（请在系统配置中设置 nmap_path）")
 		return
 	}
@@ -2285,7 +2329,8 @@ func (s *Server) scanPorts(c *gin.Context) {
 
 	// 后台执行（全端口扫描耗时长，不阻塞请求）
 	go func() {
-		records, err := probe.RunNmapScan(s.d.Cfg.NmapPath, body.Target, s.d.Cfg.ScanPorts, s.d.Cfg.ScanRate)
+		nc := s.cfg()
+		records, err := probe.RunNmapScan(nc.NmapPath, body.Target, nc.ScanPorts, nc.ScanRate)
 		s.scanMu.Lock()
 		defer s.scanMu.Unlock()
 		task.Done = time.Now()

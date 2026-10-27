@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"starmap/internal/api"
+	"starmap/internal/config"
 	"starmap/internal/detect"
 	"starmap/internal/model"
 	"starmap/internal/parser"
@@ -51,7 +52,7 @@ func newEnv(t *testing.T) *env {
 	scanner := probe.New(eng)
 	h := api.NewRouter(api.Deps{
 		Store: st, Engine: eng, Detector: det, Reviewer: rvw, Scanner: scanner,
-		Cfg: &cfg, Aggregator: agg, Version: "V1.0-test",
+		Cfg: config.NewBox(cfg), Aggregator: agg, Version: "V1.0-test",
 	})
 	return &env{h: h, st: st, t: t}
 }

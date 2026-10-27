@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"starmap/internal/auth"
+	"starmap/internal/config"
 	"starmap/internal/metrics"
 	"starmap/internal/model"
 	"starmap/internal/parser"
@@ -42,7 +43,7 @@ func newRouterWith(t *testing.T, cfg model.SystemConfig, role string, withMetric
 	}
 	return NewRouter(Deps{
 		Store: st, Engine: eng, Detector: nil, Reviewer: rvw, Scanner: scanner,
-		Cfg: &cfg, Aggregator: agg, Metrics: met,
+		Cfg: config.NewBox(cfg), Aggregator: agg, Metrics: met,
 		// 模拟"已认证且角色为 role"的请求上下文；生产代码不带这个中间件。
 		Middleware: []gin.HandlerFunc{func(c *gin.Context) {
 			if role != "" {

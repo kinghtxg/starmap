@@ -6,17 +6,31 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.3.0**（[1.3 发布说明](docs/RELEASE-1.3.md) · [1.2](docs/RELEASE-1.2.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.3.1**（[1.3.1 发布说明](docs/RELEASE-1.3.1.md) · [1.3.0](docs/RELEASE-1.3.md) · [1.2](docs/RELEASE-1.2.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-73.5%25-yellowgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-78.0%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
 
 </div>
+
+---
+
+> [!WARNING]
+> **默认不启用认证。** StarMap 的定位是内网工具：默认只监听 `127.0.0.1:8080`，且不自建账号体系
+> （合规裁定 K1，见 [AUTH-APSSO.md](docs/AUTH-APSSO.md)）——**启动即可读写全部数据**。
+>
+> 在把它接到任何非受信网络之前，至少做以下之一：
+>
+> 1. **前置反向代理做认证**，并配置 `trusted_proxies`（不配的话审计日志里所有操作人都会是代理 IP，登录限流也会把全网用户当成一个人）；
+> 2. **启用内置账号体系**：`auth.mode: local`（本地账号 + bcrypt）或对接 OIDC。
+>
+> 这是有意的默认值，不是疏漏——内网单机部署时先要求配账号，多数人会直接放弃。前提条件与威胁模型写在
+> [docs/SECURITY.md](docs/SECURITY.md) 的「2.1 默认无认证」与「8. 已知风险」两节，提交安全 issue 前请先读那两段。
 
 ---
 
@@ -281,6 +295,7 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/RELEASE-1.3.1.md](docs/RELEASE-1.3.1.md) — 1.3.1 发布说明（真分页 / 配置一致性 / 收口）
 - [docs/RELEASE-1.3.md](docs/RELEASE-1.3.md) — 1.3.0 发布说明（安全加固 / 容量护栏 / 文档）
 - [docs/RELEASE-1.2.md](docs/RELEASE-1.2.md) — 1.2.0 发布说明（主动发现）
 - [docs/RELEASE-1.0.md](docs/RELEASE-1.0.md) — 发布说明 + 上线就绪度评估 + 已知边界（部署前必读）
