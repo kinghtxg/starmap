@@ -19,7 +19,7 @@ jobs:
     name: Lint (gofmt / vet / staticcheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -37,12 +37,28 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # 静态检查（1.3.1 起真的会执行）。
+      #
+      # 此前写的是 `go install ...@2024.1.1 || true` 再接 `staticcheck || { echo warning }`：
+      # 那一版 staticcheck 依赖的 x/tools 用「负数常量做数组长度」的写法，在 Go 1.26 下
+      # 直接编译失败 → 安装失败被 `|| true` 吞掉 → 后面执行的其实是一个不存在的命令，
+      # 又被 `|| { echo warning }` 吞掉。结果是这个 job 永远绿、永远打印一条 warning，
+      # **一行代码都没检查过**。没有比"以为有防线"更糟的防线。
+      #
+      # 现在：装失败就是失败（不再静默跳过），检查出问题仍是 warning（还没做干净，
+      # 但至少能看见）。等告警清零后再转阻断。
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@2024.1.1 || true
-          "$(go env GOPATH)/bin/staticcheck" ./... || {
+          set -e
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          "$(go env GOPATH)/bin/staticcheck" -version
+          set +e
+          "$(go env GOPATH)/bin/staticcheck" ./...
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ]; then
             echo "::warning::staticcheck 发现问题（当前为警告，后续版本转阻断）"
-          }
+          fi
 
       # 依赖与标准库漏洞扫描（1.0.0 起阻断：当前为 0，出现新告警应视为发布阻断项）
       - name: govulncheck（可达漏洞扫描）
@@ -59,7 +75,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -80,7 +96,7 @@ jobs:
     name: Coverage & Fuzz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -97,7 +113,7 @@ jobs:
         run: bash scripts/coverage-gate.sh coverage.out "$MIN_COVERAGE"
 
       - name: 上传覆盖率
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage
           path: coverage.out
@@ -123,7 +139,7 @@ jobs:
           - { goos: windows, goarch: amd64 }
           - { goos: darwin, goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -139,7 +155,7 @@ jobs:
             -ldflags "-s -w -X starmap/internal/version.Version=${{ github.ref_name }} -X starmap/internal/version.Commit=${{ github.sha }}" \
             -o dist/starmap-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/starmap
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: starmap-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
