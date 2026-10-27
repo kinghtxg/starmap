@@ -180,6 +180,10 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 
 ## 快速开始
 
+不想自己编译？[Releases](https://github.com/kinghtxg/starmap/releases) 里直接下载
+`starmap-<os>-<arch>`（服务端）与 `starmap-probe-<os>-<arch>`（探针），
+覆盖 linux/amd64、linux/arm64、windows/amd64、darwin/arm64。
+
 ```bash
 # 构建（纯 Go，无需 CGO；版本号由 ldflags 注入）
 CGO_ENABLED=0 go build -trimpath \
