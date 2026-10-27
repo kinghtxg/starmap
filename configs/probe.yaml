@@ -1,0 +1,40 @@
+# StarMap 探针配置示例。完整说明见 docs/PROBE.md。
+# 用法：starmap-probe -config configs/probe.yaml
+# 优先级：内置默认值 < 本文件 < 命令行显式指定的参数。
+
+server: http://127.0.0.1:8080
+# 服务端配了 probe_token 就必须填，否则上报被拒（401）
+token: ""
+# 同一部署内必须唯一；留空则取主机名
+probe_id: ""
+name: ""
+# 位置会进拓扑归纳，写清楚"这台机器在看哪里"，不要写"未知"
+location: 机房A 核心镜像口
+
+# auto | afpacket | npcap | exec:<命令> | file:<路径>
+#   Linux  → afpacket（需 root 或 CAP_NET_RAW/CAP_NET_ADMIN）
+#   Windows→ npcap（需装 Npcap，管理员运行）
+#   其他   → exec:tcpdump
+source: auto
+# 留空自动挑。Windows 上按"有私网 IPv4"挑，比按描述文字可靠。
+# 用 starmap-probe -list-ifs 查看候选与各自的 IP。
+iface: ""
+
+# 会话增量多久上报一次。调小更实时、更费带宽；调大更省，但事件延迟变大。
+interval: 10s
+# 运行统计输出间隔。排查采集问题时用 -report 5s 临时覆盖。
+report: 60s
+
+# 单次 POST 的最大会话数 / 离线缓冲上限（条）。
+# 服务端不可达时先攒着，超上限才丢最旧的并把丢弃数打进日志。
+batch: 500
+buffer: 20000
+
+# 这两项必须与服务端配置保持一致，否则长连接/心跳的判定口径两边对不上。
+long_conn_seconds: 3600
+heartbeat_max_bytes: 64
+
+# 采集源结束即退出（回放 pcap 用）
+once: false
+# 只统计不上报（验证采集是否正常）
+dry_run: false

@@ -4,10 +4,12 @@
 
 APP        := starmap
 CMD        := ./cmd/starmap
+PROBE      := starmap-probe
+PROBE_CMD  := ./cmd/starmap-probe
 VERSION    := $(shell grep -oE 'Version = "[^"]+"' internal/version/version.go | head -1 | cut -d'"' -f2)
 COMMIT     := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS    := -s -w -X starmap/internal/version.Version=$(VERSION) -X starmap/internal/version.Commit=$(COMMIT)
-MIN_COVER  := 65
+MIN_COVER  := 72
 
 # staticcheck 不在 PATH 时可用 make lint STATICCHECK=/abs/path/staticcheck 覆盖
 STATICCHECK ?= staticcheck
@@ -19,7 +21,7 @@ BASE       ?= http://127.0.0.1:18097
 
 .PHONY: help
 help:
-	@echo "make build     构建单二进制"
+	@echo "make build     构建服务端 + 探针两个单文件"
 	@echo "make run       本地启动（监听 configs/config.yaml）"
 	@echo "make test      全量测试"
 	@echo "make race      竞态检测（需要 gcc/cgo）"
@@ -30,12 +32,20 @@ help:
 	@echo "make ui        前端交互冒烟（真浏览器，需已灌数据的实例）"
 	@echo "make ci        完整流水线（lint + race + cover）"
 	@echo "make release-check  发布前闸门（ci + ui）"
+	@echo "make e2e       端到端验收（上传 pcap 断言事件/拓扑/复核）"
+	@echo "make e2e-probe 探针验收（探针上报 vs 直接上传，事件必须对得上）"
 	@echo "make clean     清理产物"
 
 .PHONY: build
-build:
+build: build-probe
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(APP)$(shell go env GOEXE) $(CMD)
 	@echo "已构建 $(APP) $(VERSION)+$(COMMIT)"
+
+# 探针单独可构建：它的构建时间比服务端短得多，改采集后端时不用等整个 build。
+.PHONY: build-probe
+build-probe:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(PROBE)$(shell go env GOEXE) $(PROBE_CMD)
+	@echo "已构建 $(PROBE) $(VERSION)+$(COMMIT)"
 
 .PHONY: run
 run:
@@ -82,6 +92,14 @@ lint:
 	go vet ./...
 	$(MAKE) staticcheck
 
+.PHONY: e2e
+e2e:
+	bash scripts/e2e.sh
+
+.PHONY: e2e-probe
+e2e-probe:
+	bash scripts/e2e-probe.sh
+
 .PHONY: ci
 ci: lint race cover
 
@@ -103,5 +121,5 @@ release-check: ci ui
 
 .PHONY: clean
 clean:
-	rm -f coverage.out coverage-all.out coverage.html $(APP) $(APP).exe
+	rm -f coverage.out coverage-all.out coverage.html $(APP) $(APP).exe $(PROBE) $(PROBE).exe
 	rm -rf dist

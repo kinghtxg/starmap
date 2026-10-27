@@ -9,6 +9,67 @@
 > 远端现存 tag 只有 `v1.0.0`、`v1.1.0`、`v1.2.0` 与官网用的 `gh-pages` 分支。
 > 正式版本线里的 **1.3.0** 与那个已删除的开发期 tag 无关，是安全加固版本。
 
+## 1.4.0 (2026-10-27) — 独立探针：从"分析我拿到的包"到"能自己拿到包"
+
+主题：**补上数据来源这一环。**
+
+此前只有两条进数据的路：服务端自己开网卡抓（要 `-tags pcap` + CGO + libpcap，
+且只能装在能看见流量那一台），或人工上传 pcap（事后分析）。真实环境里
+需要看的流量分散在几十上百台机器上，而运维机上往往没有编译器、装不了 Wireshark。
+1.4.0 交付 `cmd/starmap-probe`：约 14MB 单文件，抓包 → 聚合成会话 → 只上报元数据。
+
+### 新增
+
+- **四种采集后端，全都不依赖 CGO**（`internal/agent`）
+  - `afpacket`：Linux `AF_PACKET` 原始套接字，纯 syscall；含 `PACKET_MR_PROMISC`
+    混杂模式（镜像口必需，缺了会"起来了但没数据"）。
+  - `npcap`：Windows 直连 `wpcap.dll`（`syscall.NewLazyDLL`），**不需要 Npcap SDK、
+    不需要 CGO、不需要 Wireshark**。刻意用轮询式 `pcap_next_ex` 而非回调式
+    `pcap_loop`——后者要把 Go 函数指针交给 C，非 cgo 做不到。
+  - `exec:`：任何往 stdout 吐 pcap 的命令（tcpdump/dumpcap/tshark）。
+  - `file:`：纯 Go（`pcapgo`）回放 pcap/pcapng。
+  - 四平台交叉编译全通（linux/amd64、linux/arm64、windows/amd64、darwin/arm64），
+    CI 每次构建 `starmap-probe-<os>-<arch>` 并随 release 发布。
+- **会话聚合复用服务端同一套 `parser.Aggregator`**
+  - 不自己写 TCP 粘合逻辑：两套实现必然分叉，症状是"探针在跑、拓扑也有节点、
+    就是不报警"，无报错无日志。复用同一实现从结构上消除这类 bug。
+- **上报 flows 而非 packets**，SNI / HTTP Host / JA3 / JA4 / XFF 全部贯通
+  - 字段丢失会让 `frp` / `clash` / `reverse_proxy` 三条规则集体静默失效，
+    因此验收方式是**对拍**：`scripts/e2e-probe.sh` 拿同一批 pcap 分别走
+    "探针上报"和"直接上传"，落在两个干净实例上，事件矩阵必须完全一致。
+- **上报不丢数据**：有界离线队列（默认 20000 条）+ 指数退避（1s→30s 封顶）
+  - 退避不用 `time.Sleep`：它跑在一秒一跳的 ticker 里，sleep 会吞掉下一次 tick，
+    实际间隔从 2s 涨到 3s、5s……表现为"服务端恢复了，探针还在傻等"。
+  - 发送期间被 `trim` 的批次不会二次误删：先摘出队列再发，失败则放回队首。
+    （原写法"发完再按 n 切一刀"会切掉另一批从未发出过的会话——静默数据缺口。）
+- **收尾顺序**：停采集 → 等读协程退出 → 冲会话增量 → 冲上报队列
+  - 反过来会丢最后一段数据，且不留任何痕迹。
+- **可排障**
+  - `-report <dur>` 输出 `frames / packets / sessions_sent / active`，链路卡在
+    哪一段一眼可见；`-dry-run` 只统计不上报。
+  - 启动探 `/api/health`，不通直接 WARN，不让人去查抓包。
+  - `-list-ifs` 在 Windows 下按 **IP** 列网卡：本机真正连业务网的那块网卡
+    `Description` 是空字符串，按描述选必然选错，症状正是"能起、日志正常、frames=0"。
+  - exec 后端 stderr 支持 GBK 转码（中文 Windows 的 cmd.exe 输出），
+    15s 内收不到 pcap 头即报错退出而非永久卡住。
+- **配置文件** `-config probe.yaml`，优先级 `内置默认 < 配置文件 < 命令行显式参数`
+  （`flag.Visit` 实现，配置值不会被 flag 默认值盖掉）。
+  样例 `configs/probe.yaml`，手册 `docs/PROBE.md`。
+
+### 修复
+
+- **`multi_net` 把 IPv6 链路本地地址当成网段**（真实流量回归）
+  - `IsPrivate` 认 `fe80::/10`，`Subnet24` 又按 `/64` 聚合，导致**任何双栈主机**
+    都被判成"一机两网"，且是 `high` 级。接上真实局域网后第一个冒出来的就是它。
+  - 已在网段维度排除 `169.254/16` 与 `fe80::/10`；附负向验证（去掉过滤后测试立即变红）。
+  - 误报比漏报更伤：值班的人被这类事件刷几天，后面真事件就不看了。
+
+### 已知边界
+
+不解密 TLS；看不见不流经它的流量（需镜像口/分光器或装在被监控主机上）；
+混杂模式需 `CAP_NET_ADMIN`；Windows 非原生服务（需计划任务或 NSSM）；
+不支持配置热加载；探针到服务端为 HTTP（跨不可信网段请走反代加 TLS）。
+
 ## 1.3.1 (2026-10-27) — 收口：真分页、配置一致性、安全的失败方式
 
 主题：**把 1.3.0 留下的"护栏式妥协"换成真答案。**

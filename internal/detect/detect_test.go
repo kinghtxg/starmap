@@ -429,6 +429,44 @@ func TestMultiNetNoTrigger(t *testing.T) {
 	}
 }
 
+// 链路本地地址不能算网段（V1.4.1 真实流量回归）。
+//
+// 起因：把探针接进真实局域网后，第一个冒出来的 high 级事件就是这个——
+// 一台普通双栈主机同时有 192.168.31.x 和 fe80::xxx，被 cidr24 当成两个
+// 网段，于是全站几乎所有设备都成了"一机两网"。
+// 链路本地地址是每块网卡各自的本地地址，跟"接入了几张网"没有关系。
+func TestMultiNetIgnoresLinkLocal(t *testing.T) {
+	d, eng, _ := newTestDetector(t, fullCfg())
+	eng.SetDomains([]model.NetDomain{{Name: "prod", CIDRs: []string{"192.168.0.0/16"}}})
+	setSessions(d, eng,
+		bigSession("192.168.31.20", "8.8.8.8", "aa:bb:cc:60:00:03", 9301, base),
+		bigSession("fe80::1c2d:3e4f:5a6b:7c8d", "8.8.8.8", "aa:bb:cc:60:00:03", 9302, base),
+		bigSession("169.254.10.20", "8.8.8.8", "aa:bb:cc:60:00:03", 9303, base),
+	)
+	created, _ := d.Evaluate()
+	for _, ev := range created {
+		if ev.Type == model.EventTypeMultiNet {
+			t.Fatalf("链路本地地址不应计入网段维度，实际 evidence=%v", ev.Evidence)
+		}
+	}
+}
+
+// TestIsLinkLocalAddr 边界：链路本地范围内的都算，相邻的不算。
+func TestIsLinkLocalAddr(t *testing.T) {
+	yes := []string{"fe80::1", "fe80::1c2d:3e4f:5a6b:7c8d", "169.254.10.20", "FE80::ABCD"}
+	no := []string{"192.168.31.20", "10.0.0.1", "8.8.8.8", "fd00::1", "2001:db8::1", ""}
+	for _, ip := range yes {
+		if !isLinkLocalAddr(ip) {
+			t.Errorf("%q 应判为链路本地", ip)
+		}
+	}
+	for _, ip := range no {
+		if isLinkLocalAddr(ip) {
+			t.Errorf("%q 不应判为链路本地", ip)
+		}
+	}
+}
+
 // ---------- 白名单抑制 ----------
 
 func TestWhitelistSuppression(t *testing.T) {

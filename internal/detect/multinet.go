@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 
@@ -45,6 +46,16 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 		subnets := map[string]bool{}
 		for _, ip := range n.IPs {
 			if !topology.IsPrivate(ip) {
+				continue
+			}
+			// 跳过链路本地地址（IPv4 169.254/16、IPv6 fe80::/10）。
+			//
+			// 链路本地地址不是"网段"，是每块网卡各自一段的本地地址：一台再普通
+			// 不过的双栈主机都同时有 192.168.1.x 和 fe80::xxx，把它算进网段维度，
+			// 等于把全站绝大多数设备判成"一机两网"——而且是 high 级。
+			// 接入真实流量实测时第一个冒出来的就是这条误报，比漏报更伤：
+			// 值班的人被这种事件刷几天，后面真事件就不看了。
+			if isLinkLocalAddr(ip) {
 				continue
 			}
 			if c := topology.Subnet24(ip); c != "" {
@@ -121,6 +132,16 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
 	return out
+}
+
+// isLinkLocalAddr 判断是否链路本地地址（IPv4 169.254/16、IPv6 fe80::/10）。
+// 这类地址按网卡各自分配，不构成"网段"，不能拿来判定一机两网。
+func isLinkLocalAddr(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 func sortedKeys(m map[string]bool) []string {

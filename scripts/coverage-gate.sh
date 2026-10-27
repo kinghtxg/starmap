@@ -46,6 +46,11 @@ CORE_TARGETS=(
   # 1.2 主动发现：扫描/指纹/编排是这一版的核心逻辑，别让它靠 api 包的平均分掩护
   "starmap/internal/probe:75"
   "starmap/internal/discover:75"
+  # 1.4 独立探针。门槛比其他包低，原因不是"它不重要"，而是它的代码里有两块
+  # 平台互斥的采集后端：npcap 只在 Windows 编、afpacket 只在 Linux 编。
+  # 一次测试永远只能跑其中一个，另一个在任何平台都是 0 分；门槛按这个上限定，
+  # 否则就变成"谁写跨平台代码谁被扣分"，反过来逼人把后端塞进同一个文件。
+  "starmap/internal/agent:60"
 )
 
 for target in "${CORE_TARGETS[@]}"; do

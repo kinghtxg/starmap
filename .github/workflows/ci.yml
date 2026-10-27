@@ -151,9 +151,13 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
-          go build -trimpath \
-            -ldflags "-s -w -X starmap/internal/version.Version=${{ github.ref_name }} -X starmap/internal/version.Commit=${{ github.sha }}" \
+          ld="-s -w -X starmap/internal/version.Version=${{ github.ref_name }} -X starmap/internal/version.Commit=${{ github.sha }}"
+          go build -trimpath -ldflags "$ld" \
             -o dist/starmap-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/starmap
+          # 探针必须一起出：它才是真正跑在内网各处的那个程序，
+          # 只发服务端不给探针，用户拿到 release 还是得自己配编译环境。
+          go build -trimpath -ldflags "$ld" \
+            -o dist/starmap-probe-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/starmap-probe
 
       - uses: actions/upload-artifact@v5
         with:

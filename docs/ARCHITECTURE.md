@@ -150,6 +150,44 @@
 **为什么探针要带 MAC**：没有 MAC 时只能按 IP 建节点，DHCP 换址会产生"幽灵设备"。
 MAC 是唯一能把"同一台机器换了地址"认出来的锚点。
 
+### 3.3.1 探针本体（1.4.0）
+
+**代码**：`cmd/starmap-probe/` + `internal/agent/`
+
+上面 3.3 说的是"服务端怎么接"，这里说的是"数据怎么来"。探针是独立程序，
+不依赖服务端进程，单文件约 14MB。
+
+```
+Source(采集) ──Frame──> gopacket 解码 ──PacketInfo──> parser.Aggregator
+                                                            │ Drain(now)
+                                                            ▼
+                                                      MapSessions → []Flow
+                                                            │
+                                                            ▼
+                                              有界队列 ──POST──> /api/ingest/probe
+```
+
+三个刻意的设计决定：
+
+1. **采集后端一律不碰 CGO**（`source_*.go`）。`afpacket`（Linux 原始套接字）、
+   `npcap`（Windows 直连 `wpcap.dll`）、`exec`（外部命令吐 pcap）、`file`（回放）。
+   需要 gcc 才能构建的探针，在多数内网里就永远装不上。
+2. **聚合复用 `parser.Aggregator`**，不自己写一套粘合逻辑。两套实现必然分叉，
+   症状是"探针在跑、拓扑也有节点、就是不报警"——无报错、无日志。
+3. **上报 flows 而非 packets**，SNI / JA3 / JA4 / XFF 必须贯通到 `probeFlow`，
+   否则三条外联规则会集体静默失效。验收方式是 `scripts/e2e-probe.sh` 的对拍。
+
+**平台差异（各自一个文件，互斥 build tag）**：
+
+| 文件 | tag | 要点 |
+|---|---|---|
+| `source_afpacket_linux.go` | `linux` | `PACKET_MR_PROMISC` 开混杂（镜像口必需）；内层循环一次取空内核缓冲再 sleep；fd 由采集协程自己关（外面 close 可能被别的 socket 复用） |
+| `source_npcap_windows.go` | `windows` | 轮询式 `pcap_next_ex`（回调式需要 cgo 导出）；句柄由采集协程关（外面关会 use-after-free）；`pcap_findalldevs` 走 `pcap_addr` 链表取 IP |
+| `source_exec_unix.go` / `_windows.go` | `!windows` / `windows` | 进程组/进程树整体终止，否则 `sh -c "a | b"` 会留孤儿；Windows 用 `SysProcAttr.CmdLine` 接管整条命令行（`cmd.exe` 不认 os/exec 的引号转义） |
+
+**收尾顺序**（`agent.teardown`）：停采集 → 等读协程退出 → 冲会话增量 → 冲上报队列。
+反过来会丢最后一段数据且不留痕迹。
+
 ### 3.4 解析层
 
 **代码**：`internal/parser/`
@@ -654,7 +692,9 @@ frame-ancestors 'none'; base-uri 'none'; form-action 'self'
 
 ```
 cmd/starmap/main.go          装配：配置 → 存储 → 引擎 → 检测 → 路由 → 后台循环
+cmd/starmap-probe/main.go    独立探针：参数/配置解析 → 采集源选择 → agent.Run
 internal/
+  agent/        探针内核：采集后端（afpacket/npcap/exec/file）+ 会话上报 + 离线队列
   api/          HTTP 层（路由/权限/校验/分页/安全中间件/各业务 handler）
   auth/         可选认证：本地账号（bcrypt）+ OIDC（PKCE）+ 会话 + 登录限流
   config/       配置加载与默认值合并

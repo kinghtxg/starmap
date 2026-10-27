@@ -58,7 +58,7 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 
 ### 流量驱动的资产发现
 
-- **三路数据接入**：PCAP/PCAPNG 离线导入、多网卡实时抓包（`-tags pcap`）、远端探针上报，统一汇入同一流水线。
+- **三路数据接入**：PCAP/PCAPNG 离线导入、多网卡实时抓包（`-tags pcap`）、**独立探针上报**（单文件、无 CGO），统一汇入同一流水线。
 - **拓扑自动测绘（自生长）**：同 MAC 多 IP 合并、`/24` 子网聚合（可下钻）、公网按 `/24` 聚合为外部节点、边老化灰度、降噪、NAT 修复。
 - **异常不隐藏（风险锚点）**：中/高风险节点不参与网段聚合，始终单独呈现（红色虚环）；跨网归属另画虚线归属边，双归属主机会同时连到两个网段聚合节点——**一机两网在拓扑上直接可见**。
 - **七层转发还原（XFF）**：经 nginx / HAProxy / SLB / API 网关转发的请求，被动侧只看得到代理 IP；解析 `X-Forwarded-For` / `X-Real-IP` / RFC 7239 `Forwarded`，把**代理背后被遮蔽的真实客户端**还原成独立节点（紫色虚线表示"经代理转发"），代理节点不参与聚合。这些客户端同样进入资产库与台账对照。
@@ -91,6 +91,31 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
   已知主机降频（已在拓扑里的 IP 只扫高价值端口，把速率预算留给"从没见过"的地址——账外资产只可能出现在那里）。
 - **发现即入账**：结果写入端口记录（含指纹）并让活跃主机进入拓扑，避免"资产列表里有、拓扑图上看不见"的割裂。
 - **开关默认关闭**：端口扫描会在目标侧留下大量连接记录，与 ARP/ICMP 探活是两种授权风险，因此独立开关。
+
+### 独立探针（1.4.0）
+
+前面两块解决"看得见什么"，这一块解决"**怎么看得到**"：探针是一个约 14MB 的
+单文件程序，扔在一台能看见流量的机器上就能跑，**不需要 gcc、不需要 libpcap、
+不需要 Wireshark**。
+
+- **四种采集后端，全都不碰 CGO**：Linux `AF_PACKET` 原始套接字（纯 syscall）、
+  Windows 直连 `wpcap.dll`（纯 syscall，有 Npcap 就能跑）、`exec:` 任何往 stdout
+  吐 pcap 的命令、`file:` 回放。`go build ./cmd/starmap-probe` 一条命令出单文件，
+  四平台交叉编译全通。
+- **只上报会话元数据**：五元组、字节数、SNI / HTTP Host / JA3 / JA4 / XFF，
+  不上报任何载荷。所以可以铺很多个，而不用搬抓包文件。
+- **会话聚合复用服务端同一套 `parser.Aggregator`**：探针算出的会话和服务端
+  算出的必须一致——两套聚合逻辑必然分叉，最后表现为"探针有数据、规则不触发"，
+  没有报错、只能人肉对数才能发现。
+- **上报失败不丢数据**：有界离线队列 + 指数退避（1s→30s），服务端重启、网络
+  抖动期间先攒着，超上限才丢最旧的并把丢弃条数打进日志。
+- **收尾顺序是对的**：停采集 → 等读协程退出 → 冲会话增量 → 冲上报队列。
+  反过来（先冲再停）会静默丢最后一段数据。
+- **排障有抓手**：`-report 5s` 打 `frames / packets / sessions_sent / active`
+  四个数，链路卡在哪一段一眼可见；`-dry-run` 不上报只验证采集；`-list-ifs`
+  Windows 下按 **IP** 列网卡（描述为空的网卡也能选对）。
+
+部署见 **[docs/PROBE.md](docs/PROBE.md)**；配置样例 `configs/probe.yaml`。
 
 ### 风险特征打标（仅标签）
 
@@ -158,7 +183,7 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 ```bash
 # 构建（纯 Go，无需 CGO；版本号由 ldflags 注入）
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-s -w -X starmap/internal/version.Version=1.1.0" \
+  -ldflags "-s -w -X starmap/internal/version.Version=1.4.0" \
   -o starmap ./cmd/starmap
 
 # 查版本
@@ -191,6 +216,15 @@ go run testdata/gen_pcap.go
 # 端到端验收（构建→起服务→上传 PCAP→断言事件/拓扑/复核/去重）
 bash scripts/e2e.sh
 
+# 探针验收：同一份 pcap 走"探针上报"和"直接上传"两条路，事件必须对得上
+bash scripts/e2e-probe.sh
+
+# 探针构建与试跑
+go build ./cmd/starmap-probe            # 单文件，无 CGO
+./starmap-probe -list-ifs               # 看网卡（Windows 显示 IP）
+./starmap-probe -source auto -dry-run -report 5s -verbose   # 验证采集
+./starmap-probe -config configs/probe.yaml                  # 正式上报
+
 # 全功能 API 冒烟测试（需先启动服务）
 python3 scripts/smoke_test.py
 
@@ -208,7 +242,14 @@ sudo bash scripts/deploy.sh
 curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pcap
 ```
 
-**探针上报**：任意内网主机向 `POST /api/ingest/probe` 上报会话元数据，与抓包/PCAP 共用同一条流水线：
+**探针上报**：用 `starmap-probe`（推荐，部署见 [docs/PROBE.md](docs/PROBE.md)）：
+
+```bash
+./starmap-probe -source npcap -iface "\Device\NPF_{...}" \
+  -server http://192.168.31.100:8080 -location "核心交换机镜像" -config 可选
+```
+
+也可以自己写采集脚本，向 `POST /api/ingest/probe` 上报会话元数据，与抓包/PCAP 共用同一条流水线：
 
 ```json
 {
@@ -300,6 +341,8 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/PROBE.md](docs/PROBE.md) — **探针部署手册**（1.4.0）：四种采集后端、systemd/Windows 服务、权限、排障手册
+- [docs/RELEASE-1.4.md](docs/RELEASE-1.4.md) — 1.4.0 发布说明（独立探针）
 - [docs/RELEASE-1.3.1.md](docs/RELEASE-1.3.1.md) — 1.3.1 发布说明（真分页 / 配置一致性 / 收口）
 - [docs/RELEASE-1.3.md](docs/RELEASE-1.3.md) — 1.3.0 发布说明（安全加固 / 容量护栏 / 文档）
 - [docs/RELEASE-1.2.md](docs/RELEASE-1.2.md) — 1.2.0 发布说明（主动发现）
