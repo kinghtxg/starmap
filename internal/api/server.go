@@ -23,6 +23,7 @@ import (
 	"starmap/internal/config"
 	"starmap/internal/detect"
 	"starmap/internal/discover"
+	"starmap/internal/geo"
 	"starmap/internal/ingest"
 	"starmap/internal/ledger"
 	"starmap/internal/logging"
@@ -32,6 +33,7 @@ import (
 	"starmap/internal/probe"
 	"starmap/internal/review"
 	"starmap/internal/store"
+	"starmap/internal/ti"
 	"starmap/internal/topology"
 	"starmap/internal/version"
 	"starmap/web"
@@ -94,6 +96,17 @@ type Server struct {
 	assetMu       sync.Mutex
 	assetSyncing  bool
 	lastAssetSync time.Time
+
+	// 白名单短缓存（V1.5）：拓扑每次刷新都要判断"这些节点是否已加白"，
+	// 逐个查库没必要；但改完白名单要能立刻生效，所以 TTL 只取 2 秒。
+	wlMu      sync.Mutex
+	wlEntries []model.WhitelistEntry
+	wlAt      time.Time
+
+	// 威胁情报客户端（V1.5）：配置可在运行期改，指纹变了就重建客户端。
+	tiMu sync.Mutex
+	tiC  *ti.Client
+	tiFP string
 }
 
 // scanTask 主动端口扫描任务状态。
@@ -111,6 +124,14 @@ type scanTask struct {
 func NewRouter(d Deps) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// 节点 ID 里带 "/"：ext:8.8.8.0/24、subnet:10.0.0.0/24。前端用 encodeURIComponent
+	// 编码成 %2F 传过来，但 Gin 默认按「已解码」的 URL.Path 路由，%2F 会变回 "/"
+	// 而多切出一段，于是 /api/nodes/ext%3A8.8.8.0%2F24 直接 404。
+	//
+	// 开 RawPath 后 %2F 只作数据不作分隔符，取到的 c.Param 仍是解码后的
+	// "ext:8.8.8.0/24"。这只影响"转义后与默认转义不同"的请求，普通路径行为不变。
+	r.UseRawPath = true
+	r.UnescapePathValues = true
 	s := &Server{d: d, scanTasks: map[string]*scanTask{}, discTasks: map[string]*discoverTask{}}
 	if s.d.Version == "" {
 		s.d.Version = version.String()
@@ -170,6 +191,9 @@ func NewRouter(d Deps) *gin.Engine {
 		ro.GET("/ledger/diff", s.ledgerDiff)
 		ro.GET("/proxies", s.listProxies)
 		ro.GET("/probes", s.listProbes)
+		// 本地情报库（V1.5）
+		ro.GET("/intel", s.listIntel)
+		ro.GET("/intel/stats", s.intelStats)
 		// 注意：/api/auth/me 由 internal/auth 独占注册（未启用认证时也返回 admin），
 		// 这里绝不能再注册一次——Gin 对同一 method+path 重复注册会直接 panic。
 
@@ -189,6 +213,13 @@ func NewRouter(d Deps) *gin.Engine {
 		rw.POST("/ports/scan", s.scanPorts)
 		rw.POST("/discover/run", s.discoverRun)
 		rw.POST("/ledger/import", s.ledgerImport)
+		// 威胁情报查询：语义上是"读"，但会把公网地址发给第三方服务并消耗配额，
+		// 所以不放给 viewer（巡检/审计账号没有对外披露的授权）。
+		rw.GET("/nodes/:id/ti", s.lookupTI)
+		// 情报推送：机器到机器，凭 intel_push_token（handler 内强制校验，
+		// 未配令牌直接 403）。放在 rw 组是为了与探针上报保持一致的鉴权模型；
+		// 若部署开了 APSSO（auth.mode=apss），需把该路径加入 auth.public_paths。
+		rw.POST("/intel/push", s.pushIntel)
 
 		// ---- 管理：改配置、删数据 ----
 		adm.PUT("/config", s.putConfig)
@@ -197,6 +228,7 @@ func NewRouter(d Deps) *gin.Engine {
 		adm.DELETE("/assets/:key", s.deleteAsset)
 		adm.DELETE("/ledger", s.clearLedger)
 		adm.DELETE("/probes/:id", s.deleteProbe)
+		adm.DELETE("/intel/:indicator", s.deleteIntel)
 	}
 
 	// 指标导出：Prometheus 抓取口。鉴权策略见 metricsGuard。
@@ -239,7 +271,7 @@ func (s *Server) corsMiddleware() gin.HandlerFunc {
 			}
 		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Probe-Token")
+		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Probe-Token,X-Intel-Token")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -404,9 +436,51 @@ type nodeJSON struct {
 	Location   string   `json:"Location,omitempty"` // 归属位置（探针位置归纳，V1.3）
 	Anchor     bool     `json:"Anchor,omitempty"`   // 风险锚点：未参与网段聚合（V1.6）
 	Members    int      `json:"Members,omitempty"`  // 聚合节点包含主机数（V1.6）
+
+	// 设备身份（V1.5）：后端按被动证据识别出的角色与服务画像
+	Role         string   `json:"Role,omitempty"`
+	Roles        []string `json:"Roles,omitempty"`
+	Services     []string `json:"Services,omitempty"`
+	Ports        []int    `json:"Ports,omitempty"`
+	InboundPeers int      `json:"InboundPeers,omitempty"`
+	GatewayFor   int      `json:"GatewayFor,omitempty"`
+
+	// 系统栈与软件（V1.5 深化）：TTL 指纹 + 明文 HTTP 观测
+	TTL      int      `json:"TTL,omitempty"`
+	OSHint   string   `json:"OSHint,omitempty"`
+	Software []string `json:"Software,omitempty"`
+
+	// 端口使用（V1.9）：OutPorts 是它主动连出去的对方端口，InPorts 是别人连它用的端口。
+	// 与 Ports 的差别见 model.PortUse 的注释——Ports 是角色推断用的窄口径，
+	// 这两个是给人看的全量现场证据（含公网与高端口）。
+	OutPorts []model.PortUse `json:"OutPorts,omitempty"`
+	InPorts  []model.PortUse `json:"InPorts,omitempty"`
+
+	// 安全视图（V1.5）：NodeKey 供白名单引用；Overseas/TunnelSuspect 是"事实"，
+	// Highlight 才是"要不要标红外置"的结论（白名单会把它压掉）。
+	NodeKey       string `json:"NodeKey,omitempty"`
+	Overseas      bool   `json:"Overseas,omitempty"`
+	TunnelSuspect bool   `json:"TunnelSuspect,omitempty"`
+	Whitelisted   bool   `json:"Whitelisted,omitempty"`
+	Highlight     bool   `json:"Highlight,omitempty"`
+
+	// 本地情报命中（V1.5）。Verdict 为空 = 库里没有这条记录，
+	// 与"判定为 clean"是两件事：前者是不知道，后者是知道它没问题。
+	IntelVerdict string   `json:"IntelVerdict,omitempty"`
+	IntelScore   int      `json:"IntelScore,omitempty"`
+	IntelTags    []string `json:"IntelTags,omitempty"`
 }
 
 func toNodeJSON(n *model.Node) nodeJSON {
+	return buildNodeJSON(n, nil)
+}
+
+// buildNodeJSON 构造前端节点契约；wl 用于标记"该设备已被加白"。
+//
+// 为什么白名单要出现在节点上：拓扑会把国外/隧道/风险设备标红外置，
+// 而用户加白的语义就是"这台是已知资产，别再用红色催我"。事件侧的白名单
+// 只解决"这条不再报"，解决不了"这台别再红"。
+func buildNodeJSON(n *model.Node, wl []model.WhitelistEntry) nodeJSON {
 	id := topology.APINodeID(n)
 	labels := n.Labels
 	if labels == nil {
@@ -416,6 +490,15 @@ func toNodeJSON(n *model.Node) nodeJSON {
 	if ips == nil {
 		ips = []string{}
 	}
+	whitelisted := detect.MatchNodeWhitelist(wl, n)
+	tunnel := topology.IsTunnelSuspect(n)
+	// 标红的门槛：确认国外 / 疑似隧道 / 中高风险，且未被加白。
+	// 注意 Overseas 是"事实"，不因加白而改写——加白只是不再催办，不是改变观测结果。
+	// 情报命中（malicious/suspicious）与"国外/隧道/风险"同级：都是"请你看这里"。
+	intelBad := n.IntelVerdict == model.VerdictMalicious || n.IntelVerdict == model.VerdictSuspicious
+	highlight := !whitelisted &&
+		(n.Overseas || tunnel || intelBad ||
+			n.RiskLevel == model.RiskMid || n.RiskLevel == model.RiskHigh)
 	return nodeJSON{
 		ID:         id,
 		NumID:      n.ID,
@@ -431,7 +514,92 @@ func toNodeJSON(n *model.Node) nodeJSON {
 		Location:   n.Location,
 		Anchor:     n.Anchor,
 		Members:    n.Members,
+
+		Role:         n.Role,
+		Roles:        n.Roles,
+		Services:     n.Services,
+		Ports:        n.Ports,
+		InboundPeers: n.InboundPeers,
+		GatewayFor:   n.GatewayFor,
+
+		TTL:      n.TTL,
+		OSHint:   n.OSHint,
+		Software: n.Software,
+		OutPorts: n.OutPorts,
+		InPorts:  n.InPorts,
+
+		NodeKey:       n.NodeKey,
+		Overseas:      n.Overseas,
+		TunnelSuspect: tunnel,
+		Whitelisted:   whitelisted,
+		Highlight:     highlight,
+
+		IntelVerdict: n.IntelVerdict,
+		IntelScore:   n.IntelScore,
+		IntelTags:    n.IntelTags,
 	}
+}
+
+// whitelistEntries 取白名单（2 秒短缓存）。
+//
+// 拓扑快照要逐节点判断"是否已加白"，逐个查库会变成 N 次查询；
+// 整表缓存又会让人改完白名单看不到效果。2 秒是这两者之间的折中。
+func (s *Server) whitelistEntries() []model.WhitelistEntry {
+	s.wlMu.Lock()
+	defer s.wlMu.Unlock()
+	if time.Since(s.wlAt) < 2*time.Second {
+		return s.wlEntries
+	}
+	entries, err := s.d.Store.ListWhitelist()
+	if err != nil {
+		return s.wlEntries // 读不到就沿用上次，不阻塞出图
+	}
+	s.wlEntries = entries
+	s.wlAt = time.Now()
+	return entries
+}
+
+// invalidateWhitelist 让白名单缓存立即失效。
+//
+// 加白/解白的用户动作是"看着红点消失"来验证的：2 秒缓存会让刚加完白的设备
+// 在下一帧仍然是红的，用户第一反应是"没生效"，接着就会去反复点。
+func (s *Server) invalidateWhitelist() {
+	s.wlMu.Lock()
+	s.wlAt = time.Time{}
+	s.wlMu.Unlock()
+}
+
+// tiClient 返回威胁情报客户端；配置指纹变化（运行期改了端点/密钥）时重建。
+func (s *Server) tiClient() *ti.Client {
+	cfg := s.cfg()
+	want := ti.Config{
+		Enabled:      cfg.TIEnabled,
+		Endpoint:     cfg.TIEndpoint,
+		APIKey:       cfg.TIAPIKey,
+		TimeoutMS:    cfg.TITimeoutMS,
+		CacheSeconds: cfg.TICacheSeconds,
+	}
+	// 用 \x00 分隔，避免 endpoint/key 内容互换后拼出同一个指纹
+	fp := fmt.Sprintf("%v\x00%s\x00%s\x00%d\x00%d",
+		want.Enabled, want.Endpoint, want.APIKey, want.TimeoutMS, want.CacheSeconds)
+	s.tiMu.Lock()
+	defer s.tiMu.Unlock()
+	if s.tiC == nil || s.tiFP != fp {
+		s.tiC = ti.New(want)
+		s.tiFP = fp
+	}
+	return s.tiC
+}
+
+// primaryNodeIP 取节点用于情报查询的地址（外部聚合节点存的是 /24，取网络地址）。
+func primaryNodeIP(n *model.Node) string {
+	for _, ip := range n.IPs {
+		if i := strings.IndexByte(ip, '/'); i >= 0 {
+			return ip[:i]
+		}
+		return ip
+	}
+	return ""
 }
 
 type edgeJSON struct {
@@ -464,15 +632,19 @@ func toEdgeJSON(e topology.VisibleEdge) edgeJSON {
 
 func (s *Server) topologySnapshot(c *gin.Context) {
 	snap := s.d.Engine.Snapshot()
+	// 情报结论批量补一次（不是每节点查一次库）。Snapshot 返回的是副本，可安全改写。
+	s.annotateIntel(snap.Nodes)
+	wl := s.whitelistEntries()
 	nodes := make([]nodeJSON, 0, len(snap.Nodes))
 	for i := range snap.Nodes {
-		nodes = append(nodes, toNodeJSON(&snap.Nodes[i]))
+		nodes = append(nodes, buildNodeJSON(&snap.Nodes[i], wl))
 	}
 	vedges := s.d.Engine.SnapshotEdgePairs()
 	edges := make([]edgeJSON, 0, len(vedges))
 	for _, e := range vedges {
 		edges = append(edges, toEdgeJSON(e))
 	}
+	cfg := s.cfg()
 	c.JSON(http.StatusOK, gin.H{
 		"Nodes": nodes,
 		"Edges": edges,
@@ -483,6 +655,11 @@ func (s *Server) topologySnapshot(c *gin.Context) {
 			"ActiveEdges": snap.Stats.ActiveEdges,
 			"TotalBytes":  snap.Stats.TotalBytes,
 		},
+		// 归属判定的依据要能自证：数据从哪来、覆盖多少段、什么时候生成的。
+		// 用户看到"国外"标红时，第一反应就是"你凭什么说它是国外"。
+		"Geo": geo.Info(),
+		// 前端据此决定详情面板里要不要露"查询威胁情报"的入口
+		"TI":          gin.H{"configured": cfg.TIEnabled && cfg.TIEndpoint != ""},
 		"GeneratedAt": snap.GeneratedAt.UTC().Format(time.RFC3339),
 	})
 }
@@ -512,10 +689,12 @@ func (s *Server) subnetSnapshot(c *gin.Context) {
 		fail(c, http.StatusNotFound, "网段不存在或未聚合: "+cidr)
 		return
 	}
+	s.annotateIntel(snap.Nodes)
+	wl := s.whitelistEntries()
 	nodes := make([]nodeJSON, 0, len(snap.Nodes))
 	have := make(map[string]bool, len(snap.Nodes))
 	for i := range snap.Nodes {
-		nj := toNodeJSON(&snap.Nodes[i])
+		nj := buildNodeJSON(&snap.Nodes[i], wl)
 		have[nj.ID] = true
 		nodes = append(nodes, nj)
 	}
@@ -530,7 +709,7 @@ func (s *Server) subnetSnapshot(c *gin.Context) {
 	// 否则下钻视图里指向外部的边因端点不存在被前端丢弃，跨网归属与出口方向都看不见。
 	nodeCount := snap.Stats.NodeCount
 	for _, ctx := range s.d.Engine.SubnetContextNodes(cidr, ends) {
-		nj := toNodeJSON(&ctx)
+		nj := buildNodeJSON(&ctx, wl)
 		if have[nj.ID] {
 			continue
 		}
@@ -563,16 +742,18 @@ func (s *Server) nodeDetail(c *gin.Context) {
 			fail(c, http.StatusNotFound, "节点不存在: "+id)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"Node": toNodeJSON(n), "Peers": s.peersOf(topology.APINodeID(n))})
+		s.annotateIntelOne(n)
+		c.JSON(http.StatusOK, gin.H{"Node": buildNodeJSON(n, s.whitelistEntries()), "Peers": s.peersOf(topology.APINodeID(n))})
 	case "subnet":
 		snap := s.d.Engine.SubnetSnapshot(cidr)
 		if len(snap.Nodes) == 0 {
 			fail(c, http.StatusNotFound, "网段不存在或未聚合: "+cidr)
 			return
 		}
+		s.annotateIntel(snap.Nodes)
 		members := make([]nodeJSON, 0, len(snap.Nodes))
 		for i := range snap.Nodes {
-			members = append(members, toNodeJSON(&snap.Nodes[i]))
+			members = append(members, buildNodeJSON(&snap.Nodes[i], s.whitelistEntries()))
 		}
 		vedges := s.d.Engine.SubnetVisibleEdges(cidr)
 		edges := make([]edgeJSON, 0, len(vedges))
@@ -581,7 +762,7 @@ func (s *Server) nodeDetail(c *gin.Context) {
 		}
 		agg := model.Node{IPs: []string{cidr}, Labels: []string{topology.LabelSubnetAgg}}
 		c.JSON(http.StatusOK, gin.H{
-			"Node":    toNodeJSON(&agg),
+			"Node":    buildNodeJSON(&agg, nil),
 			"Members": members,
 			"Edges":   edges,
 		})
@@ -591,7 +772,8 @@ func (s *Server) nodeDetail(c *gin.Context) {
 			fail(c, http.StatusNotFound, "外部聚合节点不存在: "+cidr)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"Node": toNodeJSON(n), "Peers": s.peersOf(topology.ExternalNodeID(cidr))})
+		s.annotateIntelOne(n)
+		c.JSON(http.StatusOK, gin.H{"Node": buildNodeJSON(n, s.whitelistEntries()), "Peers": s.peersOf(topology.ExternalNodeID(cidr))})
 	default:
 		fail(c, http.StatusBadRequest, "非法节点 ID: "+id)
 	}
@@ -821,6 +1003,7 @@ func (s *Server) createWhitelist(c *gin.Context) {
 		return
 	}
 	w.ID = id
+	s.invalidateWhitelist()
 	s.d.Reviewer.Audit(s.actor(c), "whitelist_create", w.Kind+":"+w.Value, body.Note)
 	// 已有 pending 事件命中 → 自动 false_positive（§5）
 	suppressed, _ := s.d.Reviewer.SuppressByWhitelist(*w, "api")
@@ -850,6 +1033,7 @@ func (s *Server) updateWhitelist(c *gin.Context) {
 		internalError(c, err, "服务内部错误")
 		return
 	}
+	s.invalidateWhitelist()
 	s.d.Reviewer.Audit(s.actor(c), "whitelist_update", w.Kind+":"+w.Value, body.Note)
 	suppressed, _ := s.d.Reviewer.SuppressByWhitelist(*w, "api")
 	c.JSON(http.StatusOK, gin.H{"Entry": toWhitelistJSON(w), "Suppressed": suppressed})
@@ -865,6 +1049,7 @@ func (s *Server) deleteWhitelist(c *gin.Context) {
 		internalError(c, err, "服务内部错误")
 		return
 	}
+	s.invalidateWhitelist()
 	s.d.Reviewer.Audit(s.actor(c), "whitelist_delete", strconv.FormatInt(id, 10), "")
 	c.Status(http.StatusNoContent)
 }
@@ -1061,20 +1246,23 @@ func (s *Server) ingestProbe(c *gin.Context) {
 			accepted++
 		}
 	}
-	// 2) flows → 合成上下行报文进聚合器（统一流水线）
-	for _, f := range report.Flows {
+	// 2) flows → 会话快照直接校准聚合器（绝对值语义，见 parser.IngestAbs）
+	//
+	// 这里曾经把 flows 折算成合成报文塞进 Ingest，而 Ingest 是加法语义：
+	// 探针每 5 秒把同一条会话的累计值重发一遍，服务端就再累加一遍。
+	// 一条 3MB 的连接报 300 次就是 900MB，整库能被撑到几百 GB，
+	// 而界面上只是"流量很大"，没有任何告警。
+	for i := range report.Flows {
+		f := &report.Flows[i]
 		if f.Location == "" {
 			f.Location = location
 		}
-		up, down := f.toPackets(baseTs)
-		if up == nil {
+		af := f.toAbsFlow(baseTs)
+		if af == nil {
 			continue
 		}
 		if s.d.Aggregator != nil {
-			s.d.Aggregator.Ingest(up)
-			if down != nil {
-				s.d.Aggregator.Ingest(down)
-			}
+			s.d.Aggregator.IngestAbs(af)
 			accepted++
 		}
 	}
@@ -1123,15 +1311,22 @@ type probeFlow struct {
 	IsLongConn          bool   `json:"is_long_conn"`
 	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms"`
 	Location            string `json:"location"`
+	// 设备身份证据（V1.5）：TTL 与明文 HTTP 头，探针侧解析、服务端直接采用。
+	StartTTL   int    `json:"start_ttl"`
+	UserAgent  string `json:"user_agent"`
+	HTTPServer string `json:"http_server"`
 	// 七层转发链（V1.8）：探针自己做 HTTP 解析时可直接上报，优先级高于载荷反解。
 	XFF     []string `json:"xff"`
 	XRealIP string   `json:"x_real_ip"`
 }
 
-// toPackets 将 flow 转成合成上下行报文（长度按字节量折算，保留时间戳）。
-func (f *probeFlow) toPackets(baseTs time.Time) (*parser.PacketInfo, *parser.PacketInfo) {
+// toAbsFlow 把上报的 flow 转成聚合器的绝对值输入。
+//
+// 刻意不再折算成合成报文：报文的语义是「这一段新增了多少字节」，
+// 而探针报的是「这条会话到现在一共多少字节」，两者混用会随上报次数成倍放大。
+func (f *probeFlow) toAbsFlow(baseTs time.Time) *parser.AbsFlow {
 	if f.SrcIP == "" || f.DstIP == "" {
-		return nil, nil
+		return nil
 	}
 	first := baseTs
 	last := baseTs
@@ -1145,44 +1340,40 @@ func (f *probeFlow) toPackets(baseTs time.Time) (*parser.PacketInfo, *parser.Pac
 	if proto == "" {
 		proto = "tcp"
 	}
-	mkPkt := func(src string, srcPort uint16, dst string, dstPort uint16, length int64, ts time.Time) *parser.PacketInfo {
-		return &parser.PacketInfo{
-			Timestamp: ts,
-			SrcMAC:    f.MAC,
-			DstMAC:    f.DstMAC,
-			SrcIP:     src,
-			DstIP:     dst,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			Proto:     proto,
-			Length:    int(length),
-			// 预解析会话元数据直接贯通（修复探针 TLS 指纹丢失）
-			SNI:                 f.SNI,
-			HTTPHost:            f.HTTPHost,
-			JA3:                 f.JA3,
-			JA4:                 f.JA4,
-			IsLongConn:          f.IsLongConn,
-			HeartbeatIntervalMs: f.HeartbeatIntervalMs,
-			Location:            f.Location,
-			XFF:                 f.XFF,
-			XRealIP:             f.XRealIP,
-		}
+	return &parser.AbsFlow{
+		SrcIP:   f.SrcIP,
+		DstIP:   f.DstIP,
+		SrcPort: f.SrcPort,
+		DstPort: f.DstPort,
+		Proto:   proto,
+		MAC:     f.MAC,
+		DstMAC:  f.DstMAC,
+
+		BytesUp:   f.BytesUp,
+		BytesDown: f.BytesDown,
+		Packets:   f.Packets,
+
+		FirstSeen: first,
+		LastSeen:  last,
+
+		// TTL 描述的是"会话发起方"的系统栈，只有上行方向才有意义
+		StartTTL: f.StartTTL,
+
+		// 预解析会话元数据直接贯通（修复探针 TLS 指纹丢失）
+		SNI:        f.SNI,
+		HTTPHost:   f.HTTPHost,
+		JA3:        f.JA3,
+		JA4:        f.JA4,
+		UserAgent:  f.UserAgent,
+		HTTPServer: f.HTTPServer,
+
+		IsLongConn:          f.IsLongConn,
+		HeartbeatIntervalMs: f.HeartbeatIntervalMs,
+
+		Location: f.Location,
+		XFF:      f.XFF,
+		XRealIP:  f.XRealIP,
 	}
-	upLen := f.BytesUp
-	if upLen <= 0 {
-		upLen = f.Packets * 400 // 无字节数时粗略折算，避免被降噪吞掉
-	}
-	up := mkPkt(f.SrcIP, f.SrcPort, f.DstIP, f.DstPort, upLen, first)
-	var down *parser.PacketInfo
-	if f.BytesDown > 0 {
-		down = mkPkt(f.DstIP, f.DstPort, f.SrcIP, f.SrcPort, f.BytesDown, last)
-		down.SrcMAC, down.DstMAC = f.DstMAC, f.MAC
-	} else if last.After(first) {
-		// 保活：用 1 字节小包携带 LastSeen，让聚合器算出时长
-		down = mkPkt(f.DstIP, f.DstPort, f.SrcIP, f.SrcPort, 1, last)
-		down.SrcMAC, down.DstMAC = f.DstMAC, f.MAC
-	}
-	return up, down
 }
 
 // ---------- 数据接入 ----------
@@ -1442,6 +1633,18 @@ func (s *Server) configToMap(cfg *model.SystemConfig) gin.H {
 		"log_format":        cfg.LogFormat,
 		"metrics_enabled":   cfg.MetricsEnabled && s.d.Metrics != nil,
 		"metrics_token_set": cfg.MetricsToken != "", // 同样不回显明文
+		// 威胁情报（V1.5）：API Key 只回显"是否已设"，避免配置页被截图带走
+		"ti_enabled":       cfg.TIEnabled,
+		"ti_endpoint":      cfg.TIEndpoint,
+		"ti_api_key_set":   cfg.TIAPIKey != "",
+		"ti_timeout_ms":    cfg.TITimeoutMS,
+		"ti_cache_seconds": cfg.TICacheSeconds,
+		// 本地情报库（V1.5）：令牌只回显"是否已设"，条数由 /api/intel/stats 给
+		"intel_push_token_set": cfg.IntelPushToken != "",
+		"intel_retention_days": cfg.IntelRetentionDays,
+		// 归属判定依据（只读）：前端要能回答"你凭什么说它是国外"
+		"geo_ranges": geo.Info().Ranges,
+		"geo_source": geo.Info().Source,
 	}
 }
 
@@ -1694,6 +1897,48 @@ func (s *Server) putConfig(c *gin.Context) {
 		if v, ok := strFrom(m, "metrics_token"); ok && v != "" {
 			// 与 probe_token 同策略：空串忽略，避免前端留空把已设令牌清掉。
 			cfg.MetricsToken = v
+		}
+		// 威胁情报（V1.5）
+		if v, ok := strFrom(m, "ti_endpoint"); ok {
+			// 允许清空（= 不接外部情报），但填了就必须是 http(s) 地址：
+			// 配成 `8.8.8.8:8080` 这种省略 scheme 的写法，http.Get 会直接报
+			// "unsupported protocol scheme"，错误信息落在详情面板上很像程序 bug。
+			v = strings.TrimSpace(v)
+			if v != "" && !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+				return errors.New("威胁情报接口地址必须以 http:// 或 https:// 开头")
+			}
+			cfg.TIEndpoint = v
+		}
+		if v, ok := strFrom(m, "ti_api_key"); ok && v != "" {
+			// 空串忽略：前端回显的是 ti_api_key_set 布尔值，输入框本来就留空，
+			// 若按空串覆盖，用户每改一次超时就把密钥清掉了。
+			cfg.TIAPIKey = v
+		}
+		if v, ok := m["ti_enabled"].(bool); ok {
+			cfg.TIEnabled = v
+		}
+		if v, ok := numFrom(m, "ti_timeout_ms"); ok && v > 0 {
+			// 上限 30s：威胁情报查询是用户在详情面板里等结果的同步请求，
+			// 再长就该改成后台任务，而不是让浏览器转圈两分钟。
+			if v > 30000 {
+				return errors.New("威胁情报超时不能超过 30000 毫秒")
+			}
+			cfg.TITimeoutMS = int(v)
+		}
+		if v, ok := numFrom(m, "ti_cache_seconds"); ok && v > 0 {
+			// 必须 >0：0 的语义是"不缓存"，但零值也是"没填"，两者无法区分；
+			// 想实时查用 ?refresh=1 强制刷新即可，不需要把缓存关掉。
+			cfg.TICacheSeconds = int(v)
+		}
+		if cfg.TIEnabled && cfg.TIEndpoint == "" {
+			return errors.New("启用威胁情报回源前必须填写接口地址（ti_endpoint）")
+		}
+		if v, ok := strFrom(m, "intel_push_token"); ok && v != "" {
+			// 与 probe_token 同策略：空串忽略，避免前端留空把已设令牌清掉。
+			cfg.IntelPushToken = v
+		}
+		if v, ok := numFrom(m, "intel_retention_days"); ok && v >= 0 {
+			cfg.IntelRetentionDays = int(v)
 		}
 
 		return nil

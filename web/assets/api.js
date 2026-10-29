@@ -66,6 +66,12 @@
     topology: () => req('GET', '/api/topology'),
     subnets: () => req('GET', '/api/subnets'),
     node: (id) => req('GET', '/api/nodes/' + encodeURIComponent(id)),
+    // 节点情报（V1.5）：本地优先，本地没有才回源。
+    // refresh=true 跳过本地直接问情报平台（人主动点"刷新"时才用）。
+    tiLookup: (id, refresh) =>
+      req('GET', '/api/nodes/' + encodeURIComponent(id) + '/ti' + (refresh ? '?refresh=1' : '')),
+    // 本地情报库：条数 / 判定分布 / 来源 / 最后入库时间
+    intelStats: () => req('GET', '/api/intel/stats'),
     stats: () => req('GET', '/api/stats'),
     health: () => req('GET', '/api/health'),
     // 事件

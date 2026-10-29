@@ -59,6 +59,54 @@ type Node struct {
 	Anchor bool `json:"anchor,omitempty"`
 	// Members 聚合节点包含的主机台数（仅聚合虚拟节点有效），用于在图上标出网段体量（V1.6）。
 	Members int `json:"members,omitempty"`
+
+	// ---- 设备身份（V1.5 识别能力，同样是快照派生、不落库）----
+	//
+	// 拓扑原本只能回答"有这么一台机器、它和谁有流量"，回答不了"这台是什么设备"。
+	// 接入真实网络后立刻暴露：192.168.31.1 是路由器、192.168.31.20 是 NAS，
+	// 图上却长得一模一样；而设备身份缺失时，误报也没有常识可以纠正
+	// （路由器整天发 mDNS 被标"一机两网"，NAS 整天上网被标"反向代理"）。
+	//
+	// Role 主角色，取值见 topology.RoleXxx；Roles 为全部命中的角色，
+	// 一台设备可以既是网关又是 DNS 服务器，这个字段保留"既…又…"的事实，
+	// 而不是强行归成一类。
+	Role         string   `json:"role,omitempty"`
+	Roles        []string `json:"roles,omitempty"`
+	Services     []string `json:"services,omitempty"`      // 形如 445/smb，仅含被动观测到的入向服务端口
+	Ports        []int    `json:"ports,omitempty"`         // 上述端口（排序后），便于前端筛选
+	InboundPeers int      `json:"inbound_peers,omitempty"` // 主动连过它的对端数（上限 128）
+	GatewayFor   int      `json:"gateway_for,omitempty"`   // 有多少台主机把它当公网出口首跳
+
+	// TTL 观测到的最大初始 TTL。直接展示原始值而不是藏起来，是因为它同时受
+	// 操作系统默认值和转发跳数影响：内网直连看到 64/128 基本可以信任，
+	// 跨多个网段看到 60 就不能反推成 Linux。
+	TTL int `json:"ttl,omitempty"`
+	// OSHint 由 TTL 与 HTTP 明文 UA 共同推断出的系统栈提示（非结论）。
+	// 空串表示"没有足够证据"，前端显示"未知"而不是硬填一个系统名。
+	OSHint string `json:"os_hint,omitempty"`
+	// Software 从明文 HTTP 观测到的软件标识（Server 头、UA 摘要），
+	// 这是"这台机器装的是什么"最直接的证据：nginx/1.18.0、群晖 DSM、海康 Web。
+	// HTTPS 看不到这一层，因此为空不代表没有软件。
+	Software []string `json:"software,omitempty"`
+
+	// OutPorts / InPorts 端口使用统计（V1.9），回答"它连过对方哪些端口""谁连过它"。
+	// 与 Ports 的区别：Ports 只含"作为服务端被访问、且在服务端口表里"的端口（角色推断用），
+	// 这里含全部方向、全部端口（含公网与高端口），是给人看的现场证据。
+	OutPorts []PortUse `json:"out_ports,omitempty"`
+	InPorts  []PortUse `json:"in_ports,omitempty"`
+
+	// Overseas 该节点不属于中国大陆地址段（geo 包判定，仅 IPv4 公网地址）。
+	// 这是"强告警"的输入：拓扑上会把国外主机与疑似隧道主机一起标红外置，
+	// 因为它们是数据外流最典型的两条路径。判定不出（内网/IPv6/数据缺失）时
+	// 保持 false —— 宁可漏标，也不能把国内地址误标成红色。
+	Overseas bool `json:"overseas,omitempty"`
+
+	// IntelVerdict / IntelScore 来自本地情报库的命中结论（V1.5）。
+	// 空串 = 没有情报（不解释成"安全"——没数据和安全是两件事）。
+	// 情报命中会参与标红，但只是**结论**的一部分：加白仍然能把红色压掉。
+	IntelVerdict string   `json:"intel_verdict,omitempty"`
+	IntelScore   int      `json:"intel_score,omitempty"`
+	IntelTags    []string `json:"intel_tags,omitempty"`
 }
 
 // Edge 拓扑链路
@@ -72,6 +120,23 @@ type Edge struct {
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	Active    bool      `json:"active"`
+}
+
+// PortUse 一个端口的使用统计（快照派生，不落库）。
+//
+// 存在的理由：拓扑原来只能回答"谁和谁有流量"，回答不了"走的是哪个端口"。
+// 而端口恰恰是判断一台机器在干什么最便宜的证据——连 445 是 SMB、连 3306 是数据库、
+// 连 443 既可能是正常上网也可能是隧道。缺了这一层，用户点开一台主机只能看到一个 IP。
+type PortUse struct {
+	Port int `json:"port"`
+	// Proto 首次观测到该端口时所在会话的传输层协议（tcp/udp）。
+	Proto string `json:"proto,omitempty"`
+	// Sessions 观测到的会话数（同一会话的重复上报只算一次）。
+	Sessions int `json:"sessions,omitempty"`
+	// Peers 用过该端口的不同对端数量（上限 8，再多也只显示 8）。
+	Peers int `json:"peers,omitempty"`
+	// Bytes 该端口上累计观测到的字节数（会话上下行之和）。
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // TopoStats 拓扑统计
@@ -131,22 +196,28 @@ func itoa(i int) string {
 
 // Session 会话（内存聚合结果，可持久化）
 type Session struct {
-	FiveTuple           FiveTuple `json:"five_tuple"`
-	MAC                 string    `json:"mac"`
-	DstMAC              string    `json:"dst_mac,omitempty"` // 客户端方向目的 MAC（首跳网关推断用）
-	StartTTL            int       `json:"start_ttl"`
-	FirstSeen           time.Time `json:"first_seen"`
-	LastSeen            time.Time `json:"last_seen"`
-	BytesUp             int64     `json:"bytes_up"`
-	BytesDown           int64     `json:"bytes_down"`
-	Packets             int64     `json:"packets"`
-	SNI                 string    `json:"sni,omitempty"`
-	HTTPHost            string    `json:"http_host,omitempty"`
-	JA3                 string    `json:"ja3,omitempty"`
-	JA4                 string    `json:"ja4,omitempty"`
-	IsLongConn          bool      `json:"is_long_conn"`
-	HeartbeatIntervalMs int64     `json:"heartbeat_interval_ms,omitempty"`
-	Closed              bool      `json:"closed"`
+	FiveTuple FiveTuple `json:"five_tuple"`
+	MAC       string    `json:"mac"`
+	DstMAC    string    `json:"dst_mac,omitempty"` // 客户端方向目的 MAC（首跳网关推断用）
+	StartTTL  int       `json:"start_ttl"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	BytesUp   int64     `json:"bytes_up"`
+	BytesDown int64     `json:"bytes_down"`
+	Packets   int64     `json:"packets"`
+	SNI       string    `json:"sni,omitempty"`
+	HTTPHost  string    `json:"http_host,omitempty"`
+	// UserAgent / HTTPServer 来自明文 HTTP 报文（V1.5 识别能力）。
+	// UA 说明发起方是什么软件/系统，Server 头说明服务端跑的是什么软件——
+	// 这是被动侧能拿到的、最接近"设备到底是什么"的直接证据。
+	// 两者只在未加密的 HTTP 里可见，TLS 流量拿不到，因此为空不代表没有。
+	UserAgent           string `json:"user_agent,omitempty"`
+	HTTPServer          string `json:"http_server,omitempty"`
+	JA3                 string `json:"ja3,omitempty"`
+	JA4                 string `json:"ja4,omitempty"`
+	IsLongConn          bool   `json:"is_long_conn"`
+	HeartbeatIntervalMs int64  `json:"heartbeat_interval_ms,omitempty"`
+	Closed              bool   `json:"closed"`
 	// Location 来源探针的位置（用于按探针位置归纳拓扑，V1.3）；ProbeID 为来源探针标识。
 	Location string `json:"location,omitempty"`
 	ProbeID  string `json:"probe_id,omitempty"`
@@ -288,6 +359,72 @@ type SystemConfig struct {
 	DiscoverWindow      string   `json:"discover_window" yaml:"discover_window"`                     // 允许扫描的时间窗口，如 "22:00-06:00"，空=全天
 	DiscoverSec         int64    `json:"discover_sec" yaml:"discover_sec"`                           // 周期扫描间隔秒（0=仅手动触发）
 	DiscoverCIDRs       []string `json:"discover_cidrs" yaml:"discover_cidrs"`                       // 周期扫描的目标网段
+
+	// ---- 威胁情报（V1.5）：本地库 + 回源 ----
+	//
+	// 拓扑把"国外主机 / 疑似隧道 / 中高风险"标红外置后，下一步必然要问
+	// "这台到底有没有问题"。所以情报有两条通路，缺一不可：
+	//
+	//  1. **推送**：自有情报平台定期把全量/增量数据推进来，落在本地库。
+	//     同一条记录重复推送时以最新版本覆盖（版本号优先，其次数据时间），
+	//     旧版本不会覆盖新版本——否则一次乱序重放就能把新情报洗回旧结论。
+	//  2. **回源**：本地没命中时，用自有 API 现查，查到写回本地库。
+	//
+	// 回源是**外发**行为，所以硬约束保留：只许查公网地址，内网地址一律不外发。
+	// 本地库查询不涉及外发，内网 IOC 照样能命中（失陷主机正是要看内网）。
+	IntelPushToken     string `json:"intel_push_token" yaml:"intel_push_token"`         // 推送鉴权（不回显明文）
+	IntelRetentionDays int    `json:"intel_retention_days" yaml:"intel_retention_days"` // 本地情报保留天数，0=不清
+	TIEnabled          bool   `json:"ti_enabled" yaml:"ti_enabled"`                     // 回源总开关（默认关）
+	TIEndpoint         string `json:"ti_endpoint" yaml:"ti_endpoint"`                   // 支持 {ip} 占位，否则追加 ?ip=
+	TIAPIKey           string `json:"ti_api_key" yaml:"ti_api_key"`                     // 不回显明文（API 只给 ti_api_key_set）
+	TITimeoutMS        int    `json:"ti_timeout_ms" yaml:"ti_timeout_ms"`               // 单次回源超时，默认 5000
+	TICacheSeconds     int    `json:"ti_cache_seconds" yaml:"ti_cache_seconds"`         // 回源结果在本地库的有效期，默认 3600
+}
+
+// ---------- 本地情报库（V1.5） ----------
+
+// 情报结论。四个值就是全部语义：
+//
+//	malicious/suspicious → 参与标红
+//	clean                → 明确无问题（仍然不是"放行"的理由，只是没有坏消息）
+//	unknown              → 有记录但判不出来，按"没情报"对待
+const (
+	VerdictMalicious  = "malicious"
+	VerdictSuspicious = "suspicious"
+	VerdictClean      = "clean"
+	VerdictUnknown    = "unknown"
+)
+
+// IntelRecord 一条本地情报记录。以 Indicator 为唯一键（同一地址只保留最新版本）。
+type IntelRecord struct {
+	Indicator  string    `json:"indicator"`         // 规范化后的 IP / CIDR / 域名
+	Kind       string    `json:"kind"`              // ip | cidr | domain
+	Verdict    string    `json:"verdict"`           // malicious | suspicious | clean | unknown
+	Score      int       `json:"score"`             // 0-100，来源自定，用于排序/展示
+	Tags       []string  `json:"tags,omitempty"`    // 家族/类型标签，如 c2、scanner
+	Source     string    `json:"source,omitempty"`  // 数据来源（推送方标识，或 remote）
+	Version    int64     `json:"version,omitempty"` // 情报侧版本号，单调递增时优先用它判新旧
+	UpdatedAt  time.Time `json:"updated_at"`        // 情报侧的数据时间（不是入库时间）
+	ReceivedAt time.Time `json:"received_at"`       // 我方入库时间
+	// ExpiresAt 仅回源写入的记录有值：到期后允许再次回源，
+	// 避免"查过一次 clean 就永远不再问"（情报会变，结论也会变）。
+	// 推送数据为 nil（长期有效，由保留期统一清理）。
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Raw       string     `json:"raw,omitempty"` // 原始记录，排查"凭什么判黑"用
+}
+
+// Intel ingest 统计：推送方要能一眼看出"这次到底生效了多少条"。
+type IntelIngestStat struct {
+	Received  int `json:"received"`
+	Inserted  int `json:"inserted"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"` // 同版本重复推送
+	Stale     int `json:"stale"`     // 比库里旧，已拒绝（乱序/重放保护）
+	// Conflict 版本与时间都相同、但结论不同——已拒绝。
+	// "同一个版本"必须对应"同一个结论"，否则等于允许在不留痕的情况下改写已发布的判定
+	// （把 malicious 悄悄改成 clean 是洗白，反过来是诬告）。要让新结论生效就升版本号。
+	Conflict int `json:"conflict"`
+	Invalid  int `json:"invalid"` // 地址或字段非法
 }
 
 // ---------- 主机资产库（V1.2） ----------

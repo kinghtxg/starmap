@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,10 +35,13 @@ type PacketInfo struct {
 
 	// 预解析会话元数据（探针上报已带 SNI/JA3/JA4 等，无需再从 Payload 反解）。
 	// 修复：探针 flows 合成报文时此前丢弃这些字段，导致 frp/clash/reverse_proxy 规则失效。
-	SNI                 string
-	HTTPHost            string
-	JA3                 string
-	JA4                 string
+	SNI      string
+	HTTPHost string
+	JA3      string
+	JA4      string
+	// 设备身份证据（V1.5）：探针已解析的明文 HTTP 头，直接采用。
+	UserAgent           string
+	HTTPServer          string
 	IsLongConn          bool
 	HeartbeatIntervalMs int64
 	// XFF / XRealIP 七层转发链（V1.8）。探针若已解析可直接上报，优先级高于载荷反解。
@@ -243,28 +247,86 @@ func parseExtension(info *ClientHelloInfo, et uint16, d []byte) {
 
 // ---------- HTTP Host 提取 ----------
 
-// ExtractHTTPHost 从 HTTP 请求载荷中提取 Host 头；非 HTTP 请求返回空串。
-func ExtractHTTPHost(payload []byte) string {
+// ---------- HTTP 元数据提取 ----------
+
+// httpMethods HTTP 请求行首词白名单。
+// 只认这些词，避免把任意以 "XXX " 开头的二进制载荷当 HTTP 解析。
+var httpMethods = [][]byte{
+	[]byte("GET "), []byte("POST "), []byte("PUT "), []byte("DELETE "),
+	[]byte("HEAD "), []byte("OPTIONS "), []byte("PATCH "), []byte("CONNECT "),
+	[]byte("TRACE "),
+}
+
+// maxHTTPMetaTries 单会话 HTTP 元数据解析次数上限。
+const maxHTTPMetaTries = 8
+
+// HTTPMeta 明文 HTTP 报文里能提取到的身份线索（V1.5 识别能力）。
+//
+// 为什么值得单独提出来：端口只能说明"这里有个服务在听"，而 Server 头和 UA
+// 能直接说出"这是群晖 DSM / nginx / 海康 Web"和"对面是 Windows 还是 iPhone"。
+// 这是被动侧能拿到的、最接近设备身份的原始证据，且不需要任何主动探测。
+type HTTPMeta struct {
+	IsRequest bool   // true=请求，false=应答
+	Host      string // 请求的 Host 头
+	UserAgent string // 客户端 UA（仅请求）
+	Server    string // 服务端软件（仅应答）
+	PoweredBy string // X-Powered-By（仅应答，常用来暴露 PHP/ASP.NET 版本）
+}
+
+// ParseHTTPMeta 解析一段 HTTP 载荷，返回其中的身份线索；非 HTTP 载荷返回 nil。
+//
+// 请求与应答都解析，但字段分开给：UA 只属于请求方、Server 只属于应答方。
+// 把两者混成一个"指纹"会得出"这台服务器跑的是 Chrome"这种荒唐结论。
+func ParseHTTPMeta(payload []byte) *HTTPMeta {
 	if len(payload) < 16 {
-		return ""
+		return nil
 	}
-	// 快速判断常见 HTTP 方法，避免误解析
-	prefixes := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
-	ok := false
-	for _, p := range prefixes {
-		if bytes.HasPrefix(payload, []byte(p)) {
-			ok = true
+	// 应答：以 "HTTP/1." 开头。Textual status line 必须在最前面，可据此判定方向。
+	if bytes.HasPrefix(payload, []byte("HTTP/1.")) {
+		resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(payload)), nil)
+		if err != nil {
+			return nil
+		}
+		m := &HTTPMeta{
+			Server:    strings.TrimSpace(resp.Header.Get("Server")),
+			PoweredBy: strings.TrimSpace(resp.Header.Get("X-Powered-By")),
+		}
+		if m.Server == "" && m.PoweredBy == "" {
+			return nil
+		}
+		return m
+	}
+	isReq := false
+	for _, p := range httpMethods {
+		if bytes.HasPrefix(payload, p) {
+			isReq = true
 			break
 		}
 	}
-	if !ok {
-		return ""
+	if !isReq {
+		return nil
 	}
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(payload)))
 	if err != nil {
-		return ""
+		return nil
 	}
-	return req.Host
+	m := &HTTPMeta{
+		IsRequest: true,
+		Host:      req.Host,
+		UserAgent: strings.TrimSpace(req.Header.Get("User-Agent")),
+	}
+	if m.Host == "" && m.UserAgent == "" {
+		return nil
+	}
+	return m
+}
+
+// ExtractHTTPHost 从 HTTP 请求载荷中提取 Host 头；非 HTTP 请求返回空串。
+func ExtractHTTPHost(payload []byte) string {
+	if m := ParseHTTPMeta(payload); m != nil && m.IsRequest {
+		return m.Host
+	}
+	return ""
 }
 
 // ---------- 会话聚合 ----------
@@ -290,6 +352,9 @@ type sessionState struct {
 	lastTs     time.Time
 	helloDone  bool
 	hostDone   bool
+	uaDone     bool // 已取到请求 UA
+	srvDone    bool // 已取到应答 Server/X-Powered-By
+	metaTries  int  // HTTP 元数据解析尝试次数（上限 maxHTTPMetaTries）
 	fwdDone    bool // 已解析过转发头（XFF/X-Real-IP），只解析首批 HTTP 载荷
 	dirty      bool // 自上次抽取以来有更新（增量下发）
 	emitted    bool // 已被抽出过（用于判定首次落库）
@@ -467,6 +532,15 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 		ses.HTTPHost = p.HTTPHost
 		st.hostDone = true
 	}
+	// 探针已解析的明文 HTTP 身份头，优先级高于载荷反解（同一会话只解一次）。
+	if p.UserAgent != "" {
+		ses.UserAgent = p.UserAgent
+		st.uaDone = true
+	}
+	if p.HTTPServer != "" {
+		ses.HTTPServer = p.HTTPServer
+		st.srvDone = true
+	}
 	if p.JA3 != "" {
 		ses.JA3 = p.JA3
 		st.helloDone = true
@@ -508,11 +582,34 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 			ses.JA4 = JA4("t", ch.Version, ch.SNI != "", ch.Ciphers, ch.Extensions, ch.SigAlgs, ch.ALPN)
 		}
 	}
-	// HTTP Host
-	if p.Proto == "tcp" && !st.hostDone && ses.HTTPHost == "" && len(p.Payload) > 0 {
-		if host := ExtractHTTPHost(p.Payload); host != "" {
-			st.hostDone = true
-			ses.HTTPHost = host
+	// HTTP 元数据：Host / User-Agent / Server。
+	//
+	// 重试有上限：一次请求不带 UA、一次应答不带 Server 都很常见（HTTP/1.0、
+	// 精简的嵌入式 Web 服务），不能一次没拿到就认为永远拿不到；但也不能对每个
+	// 报文都重试——一条 6 小时的 keep-alive 连接有上百万个报文，逐个反解 HTTP
+	// 会把解析线程吃满。取前几次报文作为"这个会话长什么样"的样本。
+	if p.Proto == "tcp" && len(p.Payload) > 0 && st.metaTries < maxHTTPMetaTries &&
+		!(st.hostDone && st.uaDone && st.srvDone) {
+		st.metaTries++
+		if m := ParseHTTPMeta(p.Payload); m != nil {
+			if m.Host != "" && ses.HTTPHost == "" {
+				ses.HTTPHost = m.Host
+				st.hostDone = true
+			}
+			if m.UserAgent != "" && ses.UserAgent == "" {
+				ses.UserAgent = m.UserAgent
+				st.uaDone = true
+			}
+			if m.Server != "" && ses.HTTPServer == "" {
+				ses.HTTPServer = m.Server
+				st.srvDone = true
+			}
+			// X-Powered-By 只有服务端应答才有，且经常比 Server 头更具体
+			// （nginx 不暴露 PHP，但 PHP/7.4.3 会写在 X-Powered-By 里）。
+			if m.PoweredBy != "" && ses.HTTPServer == "" {
+				ses.HTTPServer = m.PoweredBy
+				st.srvDone = true
+			}
 		}
 	}
 	// 七层转发链（V1.8）：探针已解析的直接采用，否则从 HTTP 载荷反解。

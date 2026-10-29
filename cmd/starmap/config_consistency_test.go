@@ -82,6 +82,14 @@ var configKeyToField = map[string]string{
 	"log_level":     "LogLevel",
 	"log_format":    "LogFormat",
 	"metrics_token": "MetricsToken",
+	// 威胁情报（V1.5）
+	"ti_enabled":           "TIEnabled",
+	"ti_endpoint":          "TIEndpoint",
+	"ti_api_key":           "TIAPIKey",
+	"ti_timeout_ms":        "TITimeoutMS",
+	"ti_cache_seconds":     "TICacheSeconds",
+	"intel_push_token":     "IntelPushToken",
+	"intel_retention_days": "IntelRetentionDays",
 }
 
 // 请求键里的别名（前端历史键名），不单独对应字段，不参与恢复校验。

@@ -226,14 +226,41 @@ func TestLooksRandomSNI(t *testing.T) {
 
 // ---------- 反代 ----------
 
+// rpSessions 构造"一台内网服务器作为**服务端**承载 n 个不同 Host"的会话集。
+//
+// 方向是 客户端 → 服务器：反代的特征是一个入口 IP 上终止多个站点的请求。
+// 反过来（本机作为客户端访问 n 个外网站点）是普通上网，绝不能算反代。
 func rpSessions(n int) []*model.Session {
 	var ss []*model.Session
 	for i := 0; i < n; i++ {
-		s := bigSession("192.168.1.10", fmt.Sprintf("198.51.100.%d", i+1), "aa:bb:cc:30:00:01", uint16(7000+i), base)
+		s := bigSession(fmt.Sprintf("192.168.1.%d", 60+i), "192.168.1.10", "", uint16(7000+i), base)
 		s.HTTPHost = fmt.Sprintf("site%d.example.com", i)
 		ss = append(ss, s)
 	}
 	return ss
+}
+
+// 客户端上网不能被当成反代（V1.4.1 真实流量回归）。
+//
+// 起因：接进真实局域网后，值班主机（一台普通 PC）被判"对外映射 Host 33 个"，
+// 名单里全是 bilibili / 微软 / 百度网盘 —— 它只是在浏览网页。
+// 根因是规则按"源 IP"统计 SNI：一台客户端访问几十个站点，SNI 天然各不相同。
+// 反代必须发生在服务端方向。
+func TestReverseProxyIgnoresClientSideTraffic(t *testing.T) {
+	d, eng, _ := newTestDetector(t, fullCfg()) // 阈值 10
+	var ss []*model.Session
+	for i := 0; i < 40; i++ {
+		s := bigSession("192.168.1.10", fmt.Sprintf("198.51.100.%d", i+1), "aa:bb:cc:30:00:02", uint16(7100+i), base)
+		s.SNI = fmt.Sprintf("cdn%d.example.net", i)
+		ss = append(ss, s)
+	}
+	setSessions(d, eng, ss...)
+	created, _ := d.Evaluate()
+	for _, ev := range created {
+		if ev.Type == model.EventTypeReverseProxy {
+			t.Fatalf("客户端访问 %d 个外网站点不是反代特征，不应触发：%s", len(ss), ev.Detail)
+		}
+	}
 }
 
 func TestReverseProxyTrigger(t *testing.T) {
@@ -451,18 +478,82 @@ func TestMultiNetIgnoresLinkLocal(t *testing.T) {
 	}
 }
 
-// TestIsLinkLocalAddr 边界：链路本地范围内的都算，相邻的不算。
-func TestIsLinkLocalAddr(t *testing.T) {
-	yes := []string{"fe80::1", "fe80::1c2d:3e4f:5a6b:7c8d", "169.254.10.20", "FE80::ABCD"}
-	no := []string{"192.168.31.20", "10.0.0.1", "8.8.8.8", "fd00::1", "2001:db8::1", ""}
+// 通配域不能制造"跨域"证据（V1.4.1 真实流量回归）。
+//
+// 起因：默认网络域里 internet = 0.0.0.0/0，是"其余所有地址"的兜底桶。
+// 只要对端是任意私网地址（哪怕在未配置的 10.x 段），matchDomain 都会返回
+// internet，于是节点自己的 prod + 对端的 internet 就凑成"跨两个域"→ high。
+// 一台只会 ping 内网设备的路由器因此被判"一机两网"。
+func TestMultiNetIgnoresCatchAllDomain(t *testing.T) {
+	d, eng, st := newTestDetector(t, fullCfg())
+	domains := []model.NetDomain{
+		{Name: "internet", CIDRs: []string{"0.0.0.0/0"}},
+		{Name: "prod", CIDRs: []string{"192.168.0.0/16"}},
+	}
+	eng.SetDomains(domains)
+	for i := range domains {
+		st.CreateDomain(&domains[i])
+	}
+	// 192.168.31.1 属 prod；对端 10.9.9.9 未配置任何实域，只被 0.0.0.0/0 兜底
+	setSessions(d, eng,
+		bigSession("192.168.31.1", "10.9.9.9", "aa:bb:cc:70:00:01", 9401, base),
+	)
+	created, _ := d.Evaluate()
+	for _, ev := range created {
+		if ev.Type == model.EventTypeMultiNet {
+			t.Fatalf("仅被通配域兜底命中不算跨域，不应触发 multi_net，实际 evidence=%v", ev.Evidence)
+		}
+	}
+}
+
+// 多播/广播对端不是"另一张网"（V1.4.1 真实流量回归）。
+//
+// 起因：路由器的全部流量就是 mDNS(224.0.0.251) 和 SSDP(239.255.255.x)，
+// 这些地址被 IsPrivate 认成内网、又被 0.0.0.0/0 通配域匹配成 internet，
+// 于是"一台路由器 = 跨 internet + prod 两个域 = 一机两网 high"。
+// 而且它们本来就不该进拓扑：那不是设备，是一群接收者。
+func TestMultiNetIgnoresMulticastPeers(t *testing.T) {
+	d, eng, st := newTestDetector(t, fullCfg())
+	domains := []model.NetDomain{
+		{Name: "internet", CIDRs: []string{"0.0.0.0/0"}},
+		{Name: "prod", CIDRs: []string{"192.168.0.0/16"}},
+	}
+	eng.SetDomains(domains)
+	for i := range domains {
+		st.CreateDomain(&domains[i])
+	}
+	setSessions(d, eng,
+		bigSession("192.168.31.1", "224.0.0.251", "aa:bb:cc:70:00:02", 9411, base),
+		bigSession("192.168.31.1", "239.255.255.250", "aa:bb:cc:70:00:02", 9412, base),
+		bigSession("192.168.31.1", "192.168.31.255", "aa:bb:cc:70:00:02", 9413, base),
+	)
+	created, _ := d.Evaluate()
+	for _, ev := range created {
+		if ev.Type == model.EventTypeMultiNet {
+			t.Fatalf("多播/广播对端不应触发 multi_net，实际 evidence=%v", ev.Evidence)
+		}
+	}
+	if n := eng.NodeByIP("224.0.0.251"); n != nil {
+		t.Fatal("多播地址不应进入拓扑")
+	}
+}
+
+// TestIsAuxPeer 边界：非设备地址（链路本地/多播/广播/回环）都算，正常单播不算。
+func TestIsAuxPeer(t *testing.T) {
+	yes := []string{
+		"fe80::1", "fe80::1c2d:3e4f:5a6b:7c8d", "169.254.10.20", "FE80::ABCD",
+		"224.0.0.251", "239.255.255.250", "ff02::fb", "192.168.31.255",
+		"255.255.255.255", "127.0.0.1", "::1",
+	}
+	no := []string{"192.168.31.20", "10.0.0.1", "8.8.8.8", "fd00::1", "2001:db8::1", "192.168.31.254"}
 	for _, ip := range yes {
-		if !isLinkLocalAddr(ip) {
-			t.Errorf("%q 应判为链路本地", ip)
+		if !isAuxPeer(ip) {
+			t.Errorf("%q 应判为非设备地址", ip)
 		}
 	}
 	for _, ip := range no {
-		if isLinkLocalAddr(ip) {
-			t.Errorf("%q 不应判为链路本地", ip)
+		if isAuxPeer(ip) {
+			t.Errorf("%q 不应判为非设备地址", ip)
 		}
 	}
 }

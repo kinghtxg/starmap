@@ -118,7 +118,11 @@ func BenchmarkAllNodes10k(b *testing.B) {
 
 // TestSnapshotScaleBudget 规模预算守卫：1 万节点规模下，单次全量快照必须远快于
 // 2 秒的同步周期，否则同步循环会自我堆积（跑不完一轮就该跑下一轮了）。
-// 阈值取 300ms，是实测值的 10 倍以上余量 —— 只拦数量级恶化，不拦正常抖动。
+//
+// 阈值取 1s，只拦数量级恶化，不拦正常抖动。这个数字是实测校准过的，不是拍的：
+// 开发机本地稳定 220ms；同一份代码放到网络盘（SMB）上跑是 700ms——同一段纯内存运算，
+// 差 3 倍完全来自运行环境。原来写 300ms 时余量只有 1.36 倍，换台机器/换个盘就误报，
+// 而它真正要拦的是"接近 2s 让同步开始堆积"，1s 仍然留了一半余量。
 //
 // -race 下速度会掉 5~10 倍，耗时断言必然误报，因此跳过（见 raceEnabled）。
 func TestSnapshotScaleBudget(t *testing.T) {
@@ -141,8 +145,8 @@ func TestSnapshotScaleBudget(t *testing.T) {
 	if len(snap.Nodes) == 0 || len(edges) == 0 {
 		t.Fatalf("快照为空：nodes=%d edges=%d", len(snap.Nodes), len(edges))
 	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("1 万节点全量快照耗时 %v，超过 300ms 预算（同步周期 2s）", elapsed)
+	if elapsed > time.Second {
+		t.Fatalf("1 万节点全量快照耗时 %v，超过 1s 预算（同步周期 2s）", elapsed)
 	}
 	t.Logf("1 万节点快照：%d 显示节点 / %d 显示边，耗时 %v",
 		len(snap.Nodes), len(edges), elapsed)

@@ -65,6 +65,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   heartbeat_interval_ms INTEGER NOT NULL DEFAULT 0,
   closed INTEGER NOT NULL DEFAULT 0
 );
+-- session_offsets：增量基准（V1.5.1）。
+-- 与 sessions 表刻意分开：sessions 是「首次见到这条会话」的历史记录（只插一次），
+-- 字节数停在首见那一刻；而重启后要用的是「关库前最后一次看到的累计值」。
+-- 用历史表当增量基准，重启时基准偏小，仍在持续的会话会被整笔再算一次——
+-- 这正是"重启几次 1.6GB 变 750GB"的来源。这里是运行态状态表，按五元组覆盖写。
+CREATE TABLE IF NOT EXISTS session_offsets (
+  five_tuple TEXT PRIMARY KEY,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  packets INTEGER NOT NULL DEFAULT 0,
+  first_seen DATETIME,
+  last_seen DATETIME
+);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   type TEXT NOT NULL,
@@ -164,6 +176,22 @@ CREATE TABLE IF NOT EXISTS ledger (
   created_at DATETIME NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_ip ON ledger(ip);
+CREATE TABLE IF NOT EXISTS intel_iocs (
+  indicator   TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL DEFAULT 'ip',
+  verdict     TEXT NOT NULL DEFAULT 'unknown',
+  score       INTEGER NOT NULL DEFAULT 0,
+  tags        TEXT NOT NULL DEFAULT '[]',
+  source      TEXT NOT NULL DEFAULT '',
+  intel_ver   INTEGER NOT NULL DEFAULT 0,
+  updated_at  DATETIME NOT NULL,
+  received_at DATETIME NOT NULL,
+  expires_at  DATETIME,
+  raw         TEXT NOT NULL DEFAULT ''
+);
+-- 标红要按"命中即红旗"批量取，按 verdict + 数据时间倒序能只扫需要的行
+CREATE INDEX IF NOT EXISTS idx_intel_verdict ON intel_iocs(verdict, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intel_received ON intel_iocs(received_at);
 `
 
 // Open 打开（不存在则创建）SQLite 数据库并建表。
@@ -739,6 +767,112 @@ func (s *Store) ListSessions() ([]model.Session, error) {
 		out = append(out, ses)
 	}
 	return out, rows.Err()
+}
+
+// SessionOffset 一条会话的累计计数与最后活跃时间。
+//
+// 存在的理由是"重启不能把流量算两遍"：引擎对边的字节是按**增量**累加的
+// （探针每几秒上报一次累计值），而增量依赖"上次看到多少"。进程重启后这个
+// "上次"如果丢了，同一条仍在持续的会话就会被当成新会话整笔再加一次——
+// 重启几次，图上的 1.6GB 就变成 750GB。数字大了没人发现，因为界面上只是一个更大的数。
+type SessionOffset struct {
+	Bytes     int64
+	Packets   int64
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+// SessionOffsets 返回最近 since 之后活跃过的会话的累计计数，键为 FiveTuple.Key()。
+//
+// 读的是 session_offsets（运行态状态表），不是 sessions（历史表）。
+// 历史表只在会话首次出现时插一行，字节数停在首见那一刻；拿它当增量基准，
+// 重启后基准偏小，仍在持续的会话会被整笔再算一次。
+//
+// 时间过滤刻意放在 Go 侧：这些 DATETIME 列里存的是 RFC3339 文本（带 7 位小数秒），
+// 而驱动把 time.Time 参数绑成 Go 自己的 "2006-01-02 15:04:05 -0700 MST" 格式，
+// 两者字符串比较毫无意义（实测 `last_seen >= ?` 一条都匹配不到）；
+// julianday() 对这种 7 位小数秒的存储值直接返回 NULL。
+func (s *Store) SessionOffsets(since time.Time) (map[string]SessionOffset, error) {
+	rows, err := s.db.Query(
+		`SELECT five_tuple, bytes, packets, first_seen, last_seen FROM session_offsets`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]SessionOffset, 1024)
+	for rows.Next() {
+		var ft string
+		var total, packets int64
+		var first, last time.Time
+		if err := rows.Scan(&ft, &total, &packets, &first, &last); err != nil {
+			return nil, err
+		}
+		if !last.IsZero() && last.Before(since) {
+			continue
+		}
+		out[ft] = SessionOffset{Bytes: total, Packets: packets, FirstSeen: first, LastSeen: last}
+	}
+	return out, rows.Err()
+}
+
+// SaveSessionOffsets 覆盖写入增量基准（按五元组 upsert）。
+//
+// 键直接用 FiveTuple.Key()：写入方手里就是这个键，读回来也用同一个键，
+// 中间不再经过 JSON 反序列化，少一层"存进去和取出来不是同一个东西"的机会。
+func (s *Store) SaveSessionOffsets(rows map[string]SessionOffset) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(
+		`INSERT INTO session_offsets(five_tuple,bytes,packets,first_seen,last_seen) VALUES(?,?,?,?,?)
+		 ON CONFLICT(five_tuple) DO UPDATE SET bytes=excluded.bytes, packets=excluded.packets,
+		 first_seen=excluded.first_seen, last_seen=excluded.last_seen`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for k, o := range rows {
+		if _, err := stmt.Exec(k, o.Bytes, o.Packets, o.FirstSeen, o.LastSeen); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// PruneSessionOffsets 清掉过期基准：会话早就结束了，留着只会让表一直长。
+func (s *Store) PruneSessionOffsets(before time.Time) error {
+	rows, err := s.db.Query(`SELECT five_tuple, last_seen FROM session_offsets`)
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for rows.Next() {
+		var k string
+		var last time.Time
+		if err := rows.Scan(&k, &last); err != nil {
+			rows.Close()
+			return err
+		}
+		// 时间比较同样放在 Go 侧，理由见 SessionOffsets。
+		if !last.IsZero() && last.Before(before) {
+			stale = append(stale, k)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, k := range stale {
+		if _, err := s.db.Exec(`DELETE FROM session_offsets WHERE five_tuple=?`, k); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---------- RiskEvent CRUD ----------

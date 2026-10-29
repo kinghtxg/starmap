@@ -48,14 +48,14 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 			if !topology.IsPrivate(ip) {
 				continue
 			}
-			// 跳过链路本地地址（IPv4 169.254/16、IPv6 fe80::/10）。
+			// 跳过"非网段"地址（链路本地、多播、广播）。
 			//
 			// 链路本地地址不是"网段"，是每块网卡各自一段的本地地址：一台再普通
 			// 不过的双栈主机都同时有 192.168.1.x 和 fe80::xxx，把它算进网段维度，
 			// 等于把全站绝大多数设备判成"一机两网"——而且是 high 级。
 			// 接入真实流量实测时第一个冒出来的就是这条误报，比漏报更伤：
 			// 值班的人被这种事件刷几天，后面真事件就不看了。
-			if isLinkLocalAddr(ip) {
+			if isAuxPeer(ip) {
 				continue
 			}
 			if c := topology.Subnet24(ip); c != "" {
@@ -72,7 +72,15 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 		nodes[n.ID] = n
 	}
 
-	// ---- B. 域维度：沿用会话侧跨域统计（补充手工配置的业务域） ----
+	// ---- B. 域维度：跨"已配置的业务域" ----
+	// 两条硬约束，缺一条这条规则在真实网络里就退化成"人人都是有罪"：
+	//
+	//  1. 对端必须是真实单播设备。mDNS(224.0.0.251)、SSDP(239.255.255.x)、
+	//     网段广播(.255)、回环这些地址会被 0.0.0.0/0 通配域一口吞下，判成
+	//     "命中了 internet 域"，于是任何一台会发 mDNS 的设备都成了"跨域"。
+	//     实测：路由器 192.168.31.1 全图只有两条 mDNS 边，却被判 high 一机两网。
+	//  2. 必须是非通配域。internet=0.0.0.0/0 只是"其余所有地址"的兜底桶，不是
+	//     一条真实网络边界；拿它当跨域的一半证据，等于自我证明。
 	for i := range rc.sessions {
 		s := &rc.sessions[i]
 		node := rc.internalNodeOf(s)
@@ -80,18 +88,23 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 			continue
 		}
 		peer := s.FiveTuple.DstIP
-		if peer == s.FiveTuple.SrcIP || !topology.IsPrivate(peer) {
+		if peer == s.FiveTuple.SrcIP || !topology.IsPrivate(peer) || isAuxPeer(peer) {
 			continue
 		}
-		peerDomain := rc.d.Engine.MatchDomain(peer)
-		if peerDomain == "" {
+		peerDomain, ones := rc.d.Engine.MatchDomainPrefix(peer)
+		if peerDomain == "" || ones == 0 {
 			continue
 		}
 		h := get(node.ID)
 		nodes[node.ID] = node
 		h.domains[peerDomain] = true
-		if node.Domain != "" {
-			h.domains[node.Domain] = true
+	}
+
+	// 节点自身归属域只在"非通配"时才算进跨域集合，
+	// 否则一个节点自己就可能凑出 {internet, internet} 这种假跨域。
+	for id, node := range nodes {
+		if d := ownBusinessDomain(rc.d.Engine, node); d != "" {
+			get(id).domains[d] = true
 		}
 	}
 
@@ -134,14 +147,34 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 	return out
 }
 
-// isLinkLocalAddr 判断是否链路本地地址（IPv4 169.254/16、IPv6 fe80::/10）。
-// 这类地址按网卡各自分配，不构成"网段"，不能拿来判定一机两网。
-func isLinkLocalAddr(ipStr string) bool {
+// isAuxPeer 判断地址是否"不构成一个对端设备"：多播、广播、回环、未指定，
+// 以及链路本地地址（IPv4 169.254/16、IPv6 fe80::/10）。
+//
+// 判定"一机两网"时，这类地址既不是一个网段，也不是一个业务对端。它们唯一的
+// 共同点是会被 0.0.0.0/0 通配域匹配上，从而伪造出"跨域"证据。
+func isAuxPeer(ipStr string) bool {
+	if topology.IsAuxAddr(ipStr) {
+		return true
+	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		return false
+		return true
 	}
-	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	return ip.IsLinkLocalUnicast()
+}
+
+// ownBusinessDomain 返回节点自身归属的**业务域**（通配域不算）。
+// 节点可能挂了多个地址（v4/v6 双栈、多网卡），取第一个命中了实域的结果。
+func ownBusinessDomain(e *topology.Engine, n *model.Node) string {
+	for _, ip := range n.IPs {
+		if !topology.IsPrivate(ip) || isAuxPeer(ip) {
+			continue
+		}
+		if name, ones := e.MatchDomainPrefix(ip); name != "" && ones > 0 {
+			return name
+		}
+	}
+	return ""
 }
 
 func sortedKeys(m map[string]bool) []string {

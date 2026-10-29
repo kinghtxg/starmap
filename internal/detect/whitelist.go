@@ -37,6 +37,54 @@ func matchNodeDimension(value string, ev *model.RiskEvent, node *model.Node) boo
 	return value == strconv.FormatInt(ev.NodeID, 10)
 }
 
+// MatchNodeWhitelist 判断**节点本身**是否被白名单覆盖（不看事件）。
+//
+// 为什么需要单独一个入口：事件侧的白名单解决"这件事不再报"，但拓扑视图要回答的是
+// "这台设备还要不要标红外置"。二者判据应该一致——用户在白名单里加了一条 IP/CIDR，
+// 期望的是"这台设备是已知已知资产，别再给我标红"，而不是只去掉某一条事件。
+//
+// 只认 node/ip/cidr 三种 kind：host 维度是域名，天然对不上一个设备；
+// 事件相关的证据字段这里没有也不该有。
+func MatchNodeWhitelist(entries []model.WhitelistEntry, node *model.Node) bool {
+	if node == nil {
+		return false
+	}
+	for _, w := range entries {
+		switch strings.ToLower(w.Kind) {
+		case "node":
+			if node.NodeKey != "" && w.Value == node.NodeKey {
+				return true
+			}
+			// 兼容 V1.0 的 node:<数字 id> 条目
+			if w.Value == strconv.FormatInt(node.ID, 10) {
+				return true
+			}
+		case "ip":
+			for _, ip := range node.IPs {
+				if ip == w.Value {
+					return true
+				}
+			}
+		case "cidr":
+			_, ipnet, err := net.ParseCIDR(w.Value)
+			if err != nil {
+				continue
+			}
+			for _, ip := range node.IPs {
+				// 外部聚合节点存的是 "8.8.8.0/24"，先取网络地址再做包含判断，
+				// 否则 net.ParseIP 直接返回 nil，"白名单一条 /24"永远不生效。
+				if i := strings.IndexByte(ip, '/'); i >= 0 {
+					ip = ip[:i]
+				}
+				if ipnet.Contains(net.ParseIP(ip)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // MatchWhitelist 单条匹配。
 func MatchWhitelist(w model.WhitelistEntry, ev *model.RiskEvent, node *model.Node) bool {
 	switch strings.ToLower(w.Kind) {

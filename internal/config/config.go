@@ -31,6 +31,16 @@ func Default() model.SystemConfig {
 		ProbeToken:         "",  // §10.7：默认不校验
 		AuditRetentionDays: 90,  // §10.8：审计日志保留 90 天
 		EventRetentionDays: 180, // 风险事件保留 180 天（只清已处置的）
+		// 威胁情报（V1.5）：本地库 + 回源。
+		// 默认关回源——回源是外发，把目标 IP 交给外部系统必须是显式动作。
+		// 本地库永远可用（推送进来就能查，不外发）。
+		IntelPushToken:     "",
+		IntelRetentionDays: 90, // 90 天前的结论不再代表风险，留着只会让红点变成噪音
+		TIEnabled:          false,
+		TIEndpoint:         "",
+		TIAPIKey:           "",
+		TITimeoutMS:        5000,
+		TICacheSeconds:     3600,
 		Auth:               auth.Default(),
 		// 主机资产库（V1.2）
 		UnarchivedOfflineHours: 72,  // 未归档主机离线 72h 自动清理
@@ -241,6 +251,27 @@ func Load(path string) (model.SystemConfig, error) {
 	// 布尔开关直接采用文件值（默认均为 false）
 	cfg.ProbeEnabled = fileCfg.ProbeEnabled
 	cfg.CaptureEnabled = fileCfg.CaptureEnabled
+	// 威胁情报（V1.5）：开关取文件值，其余字段判空合并——空串/0 表示"沿用默认"，
+	// 避免只写了一行 ti_enabled 的配置文件把默认超时和缓存时长清成 0。
+	cfg.TIEnabled = fileCfg.TIEnabled
+	if fileCfg.TIEndpoint != "" {
+		cfg.TIEndpoint = fileCfg.TIEndpoint
+	}
+	if fileCfg.TIAPIKey != "" {
+		cfg.TIAPIKey = fileCfg.TIAPIKey
+	}
+	if fileCfg.TITimeoutMS != 0 {
+		cfg.TITimeoutMS = fileCfg.TITimeoutMS
+	}
+	if fileCfg.TICacheSeconds != 0 {
+		cfg.TICacheSeconds = fileCfg.TICacheSeconds
+	}
+	if fileCfg.IntelPushToken != "" {
+		cfg.IntelPushToken = fileCfg.IntelPushToken
+	}
+	if fileCfg.IntelRetentionDays != 0 {
+		cfg.IntelRetentionDays = fileCfg.IntelRetentionDays
+	}
 	// 可选账号系统 / APSSO（K2）：结构体字段靠 auth.Merge 逐项判空合并。
 	//
 	// 这一行曾经缺失，后果是「在 config.yaml 里写 auth.mode: local 完全没用，

@@ -88,9 +88,11 @@ func edgeKeyOf(e *model.Edge) edgeKey {
 
 // 会话幂等摄入状态（同一会话可能多次 Ingest，只累计增量）
 type sessState struct {
-	packets  int64
-	bytes    int64
-	lastSeen time.Time
+	packets   int64
+	bytes     int64
+	firstSeen time.Time // 会话最初被看到的时间，用于识别"五元组被复用"
+	lastSeen  time.Time
+	dirty     bool // 自上次落盘以来有变化（增量基准按需覆盖写）
 }
 
 // Engine 拓扑生长引擎（并发安全）
@@ -102,6 +104,13 @@ type Engine struct {
 	noiseBytes       int64
 	noisePackets     int64
 	noiseDurationSec int64
+	// sessionMaxAge 单会话最长存活（秒）。启动恢复增量基准时按它取窗口：
+	// 比它更老的会话不会再被上报，字节早已算进边里，留在内存只是白占。
+	sessionMaxAge int64
+	// sessionDirty 标记"有会话增量基准待落盘"，避免每 2s 全表扫一遍 e.sessions。
+	sessionDirty bool
+	// lastPrune 上次清理过期基准的时间（10 分钟一次足够）。
+	lastPrune time.Time
 
 	nextNodeID int64
 	nextEdgeID int64
@@ -114,6 +123,21 @@ type Engine struct {
 	edges   map[edgeKey]*model.Edge
 
 	gatewayMAC map[int64]string // 节点 → 首跳网关 MAC（NAT 修复/多网融合"同路由"）
+
+	// 设备身份识别的原始证据（V1.5）。只在内存里滚，重启后随新流量快速重建：
+	// 它们是"当前这台设备在干什么"，比"历史上有过什么"更有意义，不落库反而更准。
+	ports        map[int64]map[uint16]bool     // 节点 → 作为服务端被访问过的端口
+	inboundPeers map[int64]map[string]struct{} // 节点 → 主动连过它的对端 IP（上限 inboundPeerCap）
+	seenSrc      map[int64]bool                // 本进程内观测到主动发过流量的节点（判定"终端"需正面证据）
+	inboundSeen  map[int64]bool                // 曾观测到有人连它（含重启后从端口库恢复的证据）
+	ttlSeen      map[int64]int                 // 节点 → 观测到的最大初始 TTL（系统栈指纹）
+	software     map[int64]map[string]bool     // 节点 → 明文 HTTP 观测到的软件标识
+
+	// 端口使用统计（V1.9）：回答"这台主机连过对方的哪些端口""谁连过它哪些端口"。
+	// 与上面的 ports 是两件事：ports 只记"作为服务端被访问的服务端口"，用于推断角色；
+	// 这里记全部方向上的端口使用（含公网、含高端口），用于给"点开一台机器"提供可读的答案。
+	outUse map[int64]map[uint16]*portUse
+	inUse  map[int64]map[uint16]*portUse
 
 	subnetMembers map[string]map[int64]bool // 内网 /24 CIDR → 成员节点集合
 	aggregated    map[string]bool           // 已聚合的 /24（迟滞：一旦聚合不因回落而拆分）
@@ -135,6 +159,7 @@ func New(cfg model.SystemConfig) *Engine {
 		noiseBytes:       cfg.NoiseBytes,
 		noisePackets:     cfg.NoisePackets,
 		noiseDurationSec: cfg.NoiseDurationSec,
+		sessionMaxAge:    cfg.SessionMaxAgeSeconds,
 		nextNodeID:       1,
 		nextEdgeID:       1,
 		nodes:            map[int64]*model.Node{},
@@ -144,6 +169,14 @@ func New(cfg model.SystemConfig) *Engine {
 		extAggr:          map[string]int64{},
 		edges:            map[edgeKey]*model.Edge{},
 		gatewayMAC:       map[int64]string{},
+		ports:            map[int64]map[uint16]bool{},
+		inboundPeers:     map[int64]map[string]struct{}{},
+		seenSrc:          map[int64]bool{},
+		inboundSeen:      map[int64]bool{},
+		ttlSeen:          map[int64]int{},
+		software:         map[int64]map[string]bool{},
+		outUse:           map[int64]map[uint16]*portUse{},
+		inUse:            map[int64]map[uint16]*portUse{},
 		subnetMembers:    map[string]map[int64]bool{},
 		aggregated:       map[string]bool{},
 		sessions:         map[string]*sessState{},
@@ -165,6 +198,9 @@ func New(cfg model.SystemConfig) *Engine {
 	if e.noiseDurationSec <= 0 {
 		e.noiseDurationSec = 2
 	}
+	if e.sessionMaxAge <= 0 {
+		e.sessionMaxAge = 21600
+	}
 	return e
 }
 
@@ -184,6 +220,9 @@ func (e *Engine) UpdateConfig(cfg model.SystemConfig) {
 	}
 	if cfg.NoiseDurationSec > 0 {
 		e.noiseDurationSec = cfg.NoiseDurationSec
+	}
+	if cfg.SessionMaxAgeSeconds > 0 {
+		e.sessionMaxAge = cfg.SessionMaxAgeSeconds
 	}
 	if cfg.AggregateThreshold > 0 && cfg.AggregateThreshold != e.aggThreshold {
 		e.aggThreshold = cfg.AggregateThreshold
@@ -209,7 +248,12 @@ func (e *Engine) AttachStore(st *store.Store) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.persist = st
-	return e.restoreLocked()
+	if err := e.restoreLocked(); err != nil {
+		return err
+	}
+	// 节点恢复完了才能按 NodeKey 关联端口库（身份画像跨重启恢复，见 identify.go）。
+	e.restoreServiceEvidenceLocked()
+	return nil
 }
 
 // restoreLocked 恢复拓扑到内存并重建索引（IP/MAC/NodeKey → 节点、ID → 节点）。
@@ -269,6 +313,25 @@ func (e *Engine) restoreLocked() error {
 	if maxEdgeID >= e.nextEdgeID {
 		e.nextEdgeID = maxEdgeID + 1
 	}
+
+	// 会话增量基准（V1.5 修复）：边的字节是"探针两次上报之间的增量"累加出来的，
+	// 增量要减掉上一次看到的值。重启后如果这个基准丢了，仍在持续的会话会被当成新会话
+	// 整笔再加一次——重启几次，1.6GB 就变成 750GB，而且界面上只是一个更大的数字，
+	// 没有任何地方会报错。这里把最近活跃会话的累计值接回来，增量才算得对。
+	//
+	// 恢复失败不影响启动：宁可少一部分增量基准（个别会话重启后多算一次），
+	// 也不能因为一次查询失败让整个服务起不来。
+	if offs, oerr := e.persist.SessionOffsets(time.Now().Add(-time.Duration(e.sessionMaxAge) * time.Second)); oerr == nil {
+		for k, o := range offs {
+			e.sessions[k] = &sessState{
+				bytes:     o.Bytes,
+				packets:   o.Packets,
+				firstSeen: o.FirstSeen,
+				lastSeen:  o.LastSeen,
+			}
+		}
+	}
+
 	// 库内数据即最新快照，恢复本身不产生写回
 	e.dirtyNodes = map[int64]bool{}
 	e.dirtyEdges = map[edgeKey]bool{}
@@ -280,7 +343,7 @@ func (e *Engine) restoreLocked() error {
 func (e *Engine) Flush() error {
 	e.mu.Lock()
 	st := e.persist
-	if st == nil || (len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0) {
+	if st == nil || (len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0 && !e.sessionDirty) {
 		e.mu.Unlock()
 		return nil
 	}
@@ -307,8 +370,24 @@ func (e *Engine) Flush() error {
 		edgeKeys = append(edgeKeys, k)
 		edges = append(edges, store.EdgeUpsert{Edge: *ed, SrcKey: nodeKeyFor(src), DstKey: nodeKeyFor(dst)})
 	}
+	// 会话增量基准：只在变化时覆盖写（V1.5.1）。
+	// 这是"重启不翻倍"唯一依赖的运行态数据：丢了它就等于把仍在持续的会话
+	// 整笔再算一次，而界面上只会看到一个更大的数字。
+	offs := make(map[string]store.SessionOffset, len(e.sessions))
+	if e.sessionDirty {
+		for k, ss := range e.sessions {
+			if ss == nil || !ss.dirty {
+				continue
+			}
+			offs[k] = store.SessionOffset{
+				Bytes: ss.bytes, Packets: ss.packets,
+				FirstSeen: ss.firstSeen, LastSeen: ss.lastSeen,
+			}
+		}
+	}
 	e.dirtyNodes = map[int64]bool{}
 	e.dirtyEdges = map[edgeKey]bool{}
+	e.sessionDirty = false
 	e.mu.Unlock()
 
 	if len(nodes) > 0 {
@@ -323,7 +402,38 @@ func (e *Engine) Flush() error {
 			return err
 		}
 	}
+	if len(offs) > 0 {
+		// 写失败不重试：下一轮 Ingest 会把这些会话重新标脏，最多丢 2s 的基准精度。
+		// 重试反而会把整批 upsert 拖到下一轮，代价大于收益。
+		if err := st.SaveSessionOffsets(offs); err != nil {
+			return err
+		}
+		for k := range offs {
+			if ss := e.sessions[k]; ss != nil {
+				ss.dirty = false
+			}
+		}
+		e.pruneOffsets(st)
+	}
 	return nil
+}
+
+// pruneOffsets 定期清掉早已结束的会话基准（表不能跟着会话数无限长）。
+// 每 10 分钟一次即可：基准过期一两分钟没有影响，脏数据堆一年才有害。
+func (e *Engine) pruneOffsets(st *store.Store) {
+	now := time.Now()
+	e.mu.Lock()
+	if !e.lastPrune.IsZero() && now.Sub(e.lastPrune) < 10*time.Minute {
+		e.mu.Unlock()
+		return
+	}
+	e.lastPrune = now
+	maxAge := time.Duration(e.sessionMaxAge) * time.Second
+	if maxAge <= 0 {
+		maxAge = 6 * time.Hour
+	}
+	e.mu.Unlock()
+	_ = st.PruneSessionOffsets(now.Add(-maxAge))
 }
 
 // remarkDirty 写库失败时把脏集合放回去，等待下一轮重试（避免单次抖动丢失拓扑）。
@@ -375,6 +485,42 @@ func IsPrivate(ipStr string) bool {
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
+// IsAuxAddr 判断是否为"非设备地址"：多播、广播、回环、未指定。
+//
+// 这类地址代表的是"一群接收者"或"本机自己"，不是网络里的一台设备。把它们建成拓扑
+// 节点，等于往图里塞垃圾：接入真实流量实测时，129 个节点里有二十多个是
+// 224.0.0.251（mDNS）、239.255.255.x（SSDP）、ff02::fb、192.168.31.255（网段广播）
+// 这种"不存在的设备"，而且它们还会被当成"外部节点"参与 /24 聚合、计入外部资产数。
+//
+// 注意：这里**不**包含链路本地单播（fe80::/10、169.254/16）——那不是多播也不广播，
+// 是网卡上的真实地址，只是靠 MAC 合并进节点即可，不能整条会话丢掉。
+func IsAuxAddr(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+		return true
+	}
+	// 受限广播 255.255.255.255，以及 /24 的网段广播 x.x.x.255。
+	// 后者严格说需要掩码才能判定（/23 里 .255 可以是主机地址），但拓扑只做展示过滤、
+	// 不影响会话统计与检测，按 /24 兜一层就够，且能挡住绝大多数广播噪音。
+	if v4 := ip.To4(); v4 != nil {
+		return v4[3] == 255
+	}
+	return false
+}
+
+// isGroupMAC 判断是否组播/广播 MAC（首字节最低位为 1）。
+// 广播 MAC 会出现在 DHCP/ARP 这类会话的目的地址上，它不是一台能当网关的设备。
+func isGroupMAC(mac string) bool {
+	b, err := net.ParseMAC(mac)
+	if err != nil || len(b) == 0 {
+		return false
+	}
+	return b[0]&0x01 == 1
+}
+
 func cidr24(ipStr string) string {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
@@ -396,6 +542,13 @@ func (e *Engine) Ingest(s *model.Session) {
 	if s == nil || s.FiveTuple.SrcIP == "" || s.FiveTuple.DstIP == "" {
 		return
 	}
+	// 非设备地址（多播/广播/回环）不建节点、不建边。
+	// 必须在建节点之前拦掉：nodeForLocked 在降噪判定之前就会造节点，
+	// 而 mDNS/SSDP 这类会话字节数小、存在感低，正好卡在降噪阈值下，
+	// 结果"边没有、节点留下了"——图上凭空多出一批 224.0.0.251 之类的幽灵节点。
+	if IsAuxAddr(s.FiveTuple.SrcIP) || IsAuxAddr(s.FiveTuple.DstIP) {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -406,6 +559,18 @@ func (e *Engine) Ingest(s *model.Session) {
 		e.sessions[key] = st
 	}
 	totalBytes := s.BytesUp + s.BytesDown
+	// 五元组复用（V1.5.1）：同一个客户端端口重新发起连接时，聚合器那边是一条新会话，
+	// 累计值从 0 重新长。这时如果还按"比上次小就当成 0 增量"处理，这条新连接的全部
+	// 流量会被旧连接的峰值一直压住——要等它超过旧值才会重新计入，常见结果是整段消失。
+	// 判据必须是两个条件同时成立：FirstSeen 前移 **且** 累计值变小。
+	// 只看 FirstSeen 会误伤——有些采集路径每次上报都拿"现在"当 FirstSeen，
+	// 那样每次上报都会被判成新连接，流量直接翻倍，比原来的 bug 更糟。
+	// st.firstSeen 为零时（刚启动、恢复不到首次时间）一律不判定，否则会把已计入的
+	// 历史流量整笔再加一次——那正是重启翻倍的来源。
+	if !st.lastSeen.IsZero() && !st.firstSeen.IsZero() &&
+		s.FirstSeen.After(st.firstSeen) && totalBytes < st.bytes {
+		st.bytes, st.packets = 0, 0
+	}
 	deltaBytes := totalBytes - st.bytes
 	deltaPackets := s.Packets - st.packets
 	if deltaBytes < 0 {
@@ -418,6 +583,11 @@ func (e *Engine) Ingest(s *model.Session) {
 	st.bytes = totalBytes
 	st.packets = s.Packets
 	st.lastSeen = s.LastSeen
+	st.dirty = true
+	e.sessionDirty = true
+	if st.firstSeen.IsZero() || (!s.FirstSeen.IsZero() && s.FirstSeen.Before(st.firstSeen)) {
+		st.firstSeen = s.FirstSeen
+	}
 
 	now := s.LastSeen
 	if now.IsZero() {
@@ -445,10 +615,31 @@ func (e *Engine) Ingest(s *model.Session) {
 
 	// 首跳网关推断：内网 → 公网 会话的客户端方向 DstMAC 即网关 MAC
 	if IsPrivate(s.FiveTuple.SrcIP) && !IsPrivate(s.FiveTuple.DstIP) && s.DstMAC != "" {
-		if s.DstMAC != s.MAC { // 非本机直连
+		// 排除非本机直连，也排除广播/多播 MAC（那不是一台设备）
+		if s.DstMAC != s.MAC && !isGroupMAC(s.DstMAC) {
 			e.gatewayMAC[srcID] = s.DstMAC
+			// 为网关 MAC 建（或复用）节点：被动侧看不到网关的 IP，
+			// 只有这个 MAC 能证明"中间确实有一台设备在转发"。
+			e.gatewayNodeLocked(s.DstMAC, now)
 		}
 	}
+
+	e.seenSrc[srcID] = true
+
+	// 设备身份证据（V1.5）：谁在给谁提供服务。
+	// 放在降噪之前——"有没有人连它的 445"是身份问题，与这条会话有多少字节无关，
+	// 一次 SMB 协商只有几百字节，正好卡在降噪阈值以下，放后面会整段漏掉。
+	e.observeServiceLocked(srcID, dstID, s)
+
+	// 系统栈 / 软件证据（V1.5）：TTL 与明文 HTTP 头。
+	// 同样在降噪之前——一个 HTTP 应答可能只有 200 字节、活不到 1 秒，
+	// 但 "Server: nginx/1.18.0" 是这台机器身份的唯一直接证据。
+	e.observeStackLocked(srcID, dstID, s)
+
+	// 端口使用（V1.9）：也放在降噪之前。
+	// "它连过对方 443"和这条会话有多少字节无关——一次 TLS 握手几百字节就被降噪丢了，
+	// 而用户点开机器最想知道的正是这个端口。降噪只该影响"画不画这条线"。
+	e.observePortUseLocked(srcID, dstID, s, first, deltaBytes)
 
 	// ---- 降噪（SPEC §10.3）：三条件同时满足 → 不建边 ----
 	duration := s.LastSeen.Sub(s.FirstSeen).Seconds()
@@ -691,26 +882,41 @@ func contains(ss []string, v string) bool {
 // matchDomainLocked 按网络域 CIDR 匹配节点归属。
 // 最长前缀优先：避免 0.0.0.0/0 之类的宽域遮蔽更精确的域（如 prod 192.168.0.0/16）。
 func (e *Engine) matchDomainLocked(ip string) string {
+	name, _ := e.matchDomainExLocked(ip)
+	return name
+}
+
+// matchDomainExLocked 匹配网络域并同时返回命中 CIDR 的前缀长度。
+//
+// 前缀长度是"这条匹配有多可信"的度量：0 表示只被 0.0.0.0/0 这类**通配域**兜底命中。
+// 通配域不是一条真实网络边界，只是"其余所有地址"的垃圾桶——拿它当"跨域"的证据，
+// 等于任何一对地址都能凑成两个域。
+func (e *Engine) matchDomainExLocked(ip string) (name string, ones int) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
-		return ""
+		return "", -1
 	}
-	best := ""
-	bestOnes := -1
+	best, bestOnes := "", -1
 	for _, d := range e.domains {
 		for _, c := range d.CIDRs {
 			_, ipnet, err := net.ParseCIDR(c)
 			if err != nil || !ipnet.Contains(parsed) {
 				continue
 			}
-			ones, _ := ipnet.Mask.Size()
-			if ones > bestOnes {
-				bestOnes = ones
-				best = d.Name
+			if o, _ := ipnet.Mask.Size(); o > bestOnes {
+				bestOnes, best = o, d.Name
 			}
 		}
 	}
-	return best
+	return best, bestOnes
+}
+
+// MatchDomainPrefix 查询 IP 命中的网络域及其 CIDR 前缀长度（detect 模块使用）。
+// 域名为空表示未命中任何域；ones == 0 表示仅被通配域（0.0.0.0/0、::/0）兜底命中。
+func (e *Engine) MatchDomainPrefix(ip string) (string, int) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.matchDomainExLocked(ip)
 }
 
 // SetDomains 设置网络域并重算全部节点归属（domains CRUD 联动）。
@@ -788,6 +994,9 @@ func (e *Engine) GetNode(id int64) *model.Node {
 	defer e.mu.RUnlock()
 	if n, ok := e.nodes[id]; ok {
 		cp := *n
+		// 单节点查询同样带上身份字段，否则 /api/nodes/:id（详情面板）里
+		// 角色与服务是空的，而列表视图有——同一台设备两处说法不一致。
+		e.annotateIdentity(&cp, e.gatewayCountLocked())
 		return &cp
 	}
 	return nil
@@ -891,6 +1100,14 @@ func (e *Engine) removeNodeLocked(id int64) bool {
 		}
 	}
 	delete(e.gatewayMAC, id)
+	delete(e.ports, id)
+	delete(e.inboundPeers, id)
+	delete(e.seenSrc, id)
+	delete(e.inboundSeen, id)
+	delete(e.ttlSeen, id)
+	delete(e.software, id)
+	delete(e.outUse, id)
+	delete(e.inUse, id)
 	delete(e.nodes, id)
 	delete(e.dirtyNodes, id)
 	if e.persist != nil {
@@ -1057,6 +1274,7 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 	defer e.mu.RUnlock()
 
 	var nodes []model.Node
+	gw := e.gatewayCountLocked()
 	for _, n := range e.nodes {
 		if !hasLabel(n, LabelExternalAg) {
 			// 内网节点：若所属 /24 已聚合则隐藏——但风险锚点例外（V1.6）
@@ -1073,6 +1291,7 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 		}
 		cp := *n
 		cp.Anchor = isRiskAnchor(n)
+		e.annotateIdentity(&cp, gw)
 		nodes = append(nodes, cp)
 	}
 
@@ -1276,7 +1495,8 @@ func (e *Engine) SnapshotEdgePairs() []VisibleEdge {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	out := e.visibleEdgesLocked()
-	return append(out, e.ownershipEdgesLocked(out)...)
+	out = append(out, e.ownershipEdgesLocked(out)...)
+	return append(out, e.gatewayEdgesLocked(out)...)
 }
 
 func (e *Engine) visibleEdgesLocked() []VisibleEdge {
@@ -1344,6 +1564,9 @@ type VisibleEdge struct {
 
 // EdgeKindOwner 归属关联边。
 const EdgeKindOwner = "owner"
+
+// EdgeKindGateway 出网路径边：主机 → 首跳网关（V1.5）。
+const EdgeKindGateway = "gateway"
 
 // ownershipEdgesLocked 生成风险锚点的网段归属边（调用方需持有 e.mu）。
 // 仅对以自身身份可见的节点生成；若该节点与目标网段之间已有真实流量边，则跳过以免重线。
@@ -1418,10 +1641,12 @@ func (e *Engine) SubnetSnapshot(cidr string) model.TopoSnapshot {
 	defer e.mu.RUnlock()
 	set := e.subnetMembers[cidr]
 	nodes := make([]model.Node, 0, len(set))
+	gw := e.gatewayCountLocked()
 	for id := range set {
 		if n, ok := e.nodes[id]; ok {
 			cp := *n
 			cp.Anchor = isRiskAnchor(n)
+			e.annotateIdentity(&cp, gw)
 			nodes = append(nodes, cp)
 		}
 	}

@@ -252,16 +252,24 @@ func Clash(srcIP, srcMAC string) ([]byte, error) {
 	return w.Bytes()
 }
 
-// ReverseProxy ④反代特征：单内网 IP 产生 12 个不同 Host 的 HTTP 请求（阈值 10）。
+// ReverseProxy ④反代特征：多台客户端访问**同一台内网服务器**，Host 各不相同（阈值 10）。
+//
+// 方向必须是"客户端 → 内网服务器"。这里曾经反过来构造：单台内网主机向公网
+// 203.0.113.80 发起 12 个不同 Host 的请求——那描述的是一台电脑在浏览网页，
+// 而规则当时按"源 IP"统计 SNI，于是把它当成了反代。夹具和规则一起错，
+// 测试就一直"通过"，直到接进真实网络才在值班主机上炸出来。
 func ReverseProxy(srcIP, srcMAC string) ([]byte, error) {
 	w := &Writer{}
-	dstIP := "203.0.113.80"
+	// srcIP 扮演同一台内网反代服务器，被下列客户端访问
+	const serverMAC = "02:00:00:00:00:01"
 	for i := 1; i <= 12; i++ {
+		clientIP := fmt.Sprintf("10.40.1.%d", i)
+		clientMAC := fmt.Sprintf("02:00:00:0a:28:%02x", i)
 		sport := uint16(53000 + i)
 		host := fmt.Sprintf("app%02d.internal-sites.example.org", i)
 		t0 := Base.Add(time.Duration(i*10) * time.Second)
-		w.TCP(t0, srcMAC, gwMAC, srcIP, dstIP, sport, 80, 0x10, HTTPGet(host))
-		w.TCP(t0.Add(500*time.Millisecond), "02:00:00:00:00:01", srcMAC, dstIP, srcIP, 80, sport, 0x10,
+		w.TCP(t0, clientMAC, gwMAC, clientIP, srcIP, sport, 80, 0x10, HTTPGet(host))
+		w.TCP(t0.Add(500*time.Millisecond), serverMAC, clientMAC, srcIP, clientIP, 80, sport, 0x10,
 			[]byte("HTTP/1.1 200 OK\r\nContent-Length: 400\r\n\r\n"+string(make([]byte, 400))))
 	}
 	return w.Bytes()

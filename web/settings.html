@@ -73,12 +73,27 @@ var FIELDS = [
   { key: 'discover_sec', alias: '', label: '周期扫描间隔（秒）', type: 'number', desc: '0=仅手动触发；如 21600 表示每 6 小时自动扫一轮', group: '资产与扫描' },
   { key: 'discover_cidrs', alias: '', label: '周期扫描网段', type: 'list', desc: '每行一个网段，如 10.10.1.0/24；仅当间隔 > 0 时生效', group: '资产与扫描' },
 
+  { key: 'intel_push_token', alias: '', label: '情报推送令牌', type: 'secret', set: 'intel_push_token_set', desc: '自有情报平台向 POST /api/intel/push 推送数据时的鉴权令牌（请求头 X-Intel-Token）。留空 = 不接收推送：情报是「结论」，匿名可写等于允许别人把任意地址标黑或洗白（不会回显明文）', group: '威胁情报' },
+  { key: 'intel_retention_days', alias: '', label: '本地情报保留天数', type: 'number', desc: '默认 90。情报是会过期的结论：一条过期的「恶意」一直留着，那台机器就永远标红，红点也就不值钱了。0 表示不清理', group: '威胁情报' },
+  { key: 'ti_enabled', alias: '', label: '启用回源查询', type: 'bool', desc: '本地库没有记录时，向情报平台 API 现查一次并写回本地。这是外发行为：只查公网地址，内网地址一律不发出去', group: '威胁情报' },
+  { key: 'ti_endpoint', alias: '', label: '回源接口地址', type: 'text', desc: '如 https://ti.example.com/api/lookup?ip={ip}。支持 {ip} 占位；不写占位则自动追加 ?ip=', group: '威胁情报' },
+  { key: 'ti_api_key', alias: '', label: '回源 API Key', type: 'secret', set: 'ti_api_key_set', desc: '以 Authorization: Bearer 发送（不会回显明文）', group: '威胁情报' },
+  { key: 'ti_timeout_ms', alias: '', label: '回源超时（毫秒）', type: 'number', desc: '默认 5000，上限 30000。再长就该改成后台任务了', group: '威胁情报' },
+  { key: 'ti_cache_seconds', alias: '', label: '回源结果有效期（秒）', type: 'number', desc: '默认 3600。回源结果会写进本地库，到期后允许再次回源——避免「查过一次 clean 就永远不再问」', group: '威胁情报' },
+
   { key: 'listen_addr', alias: 'http_listen', label: 'HTTP 监听地址', type: 'text', desc: '如 127.0.0.1:18080；修改后需重启服务生效', group: '服务与安全' },
   { key: 'audit_retention_days', alias: '', label: '审计日志保留天数', type: 'number', desc: '默认 90 天，0 表示不清理', group: '服务与安全' },
   { key: 'event_retention_days', alias: '', label: '风险事件保留天数', type: 'number', desc: '默认 180 天，只清理已处置的事件（待处置的告警不会因过期被删除）', group: '服务与安全' }
 ];
 
-var READONLY = { db_path: '数据库路径', probe_token_set: '探针令牌已设置' };
+var READONLY = {
+  db_path: '数据库路径',
+  probe_token_set: '探针令牌已设置',
+  intel_push_token_set: '情报推送令牌已设置',
+  ti_api_key_set: '回源 API Key 已设置',
+  geo_ranges: '归属判定地址段数',
+  geo_source: '归属判定数据来源'
+};
 var config = null;
 
 function valueOf(f) {
@@ -87,16 +102,53 @@ function valueOf(f) {
   return undefined;
 }
 
+var intel = null;
+
 function load() {
   var el = document.getElementById('form');
   el.innerHTML = '<div class="sm-card"><div class="sm-card-bd">' + UI.loadingHTML('正在加载配置…') + '</div></div>';
-  return API.getConfig().then(function (cfg) {
-    config = cfg || {};
+  // 情报库概况与配置一起取：只显示「回源已开启」但库里 0 条，是最典型的
+  // 「以为对接上了其实没通」——两个数字放在同一屏才能立刻看出来。
+  return Promise.all([
+    API.getConfig(),
+    API.intelStats().catch(function () { return null; })
+  ]).then(function (res) {
+    config = res[0] || {};
+    intel = res[1];
     render();
   }).catch(function (e) {
     config = null;
     el.innerHTML = '<div class="sm-card"><div class="sm-card-bd">' + UI.errorHTML(e) + '</div></div>';
   });
+}
+
+/* 本地情报库概况卡片：条数 / 判定分布 / 来源 / 最后入库时间 */
+function intelCardHTML() {
+  if (!intel) return '';
+  var bv = intel.by_verdict || {};
+  var src = intel.sources || {};
+  var chips = Object.keys(bv).map(function (k) {
+    var label = { malicious: '恶意', suspicious: '可疑', clean: '无问题', unknown: '未知' }[k] || k;
+    return '<span class="sm-chip">' + UI.esc(label) + ' ' + bv[k] + '</span>';
+  }).join('');
+  var srcTxt = Object.keys(src).map(function (k) { return k + ' ' + src[k]; }).join(' · ');
+  var empty = !intel.total;
+  return '<section class="sm-card" style="animation:sm-fade-up 240ms var(--sm-ease) both">' +
+    '<div class="sm-card-hd"><h2>本地情报库</h2>' +
+    '<span class="sm-badge' + (empty ? '' : ' is-ok') + '">' + (intel.total || 0) + ' 条</span></div>' +
+    '<div class="sm-card-bd"><div class="sm-stack-sm">' +
+    (empty
+      ? '<div class="sm-alert is-info"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+        '<div class="sm-alert-body">库里还没有数据。请让情报平台带 <code>X-Intel-Token</code> 向 ' +
+        '<code>POST /api/intel/push</code> 推送，或在下方配置回源接口让系统按需现查。</div></div>'
+      : '<div class="sm-row is-center" style="gap:6px;flex-wrap:wrap">' + chips + '</div>' +
+        '<div class="sm-kv"><div class="sm-kv-k">来源</div><div class="sm-kv-v">' + UI.esc(srcTxt || '-') + '</div></div>' +
+        '<div class="sm-kv"><div class="sm-kv-k">最后入库</div><div class="sm-kv-v">' +
+        UI.esc(intel.last_received_at ? UI.fmtTime(intel.last_received_at) : '-') + '</div></div>' +
+        '<div class="sm-kv"><div class="sm-kv-k">最早数据</div><div class="sm-kv-v">' +
+        UI.esc(intel.oldest_updated_at ? UI.fmtTime(intel.oldest_updated_at) : '-') +
+        ' <span class="sm-t-3" style="font-size:11px">超过保留期会被自动清理</span></div></div>') +
+    '</div></div></section>';
 }
 
 function render() {
@@ -118,8 +170,10 @@ function render() {
       '</div></div></section>';
   }).join('');
 
+  html += intelCardHTML();
+
   var used = {};
-  FIELDS.forEach(function (f) { used[f.key] = true; if (f.alias) used[f.alias] = true; });
+  FIELDS.forEach(function (f) { used[f.key] = true; if (f.alias) used[f.alias] = true; if (f.set) used[f.set] = true; });
   Object.keys(READONLY).forEach(function (k) { used[k] = true; });
   var rest = {};
   Object.keys(config).forEach(function (k) { if (!used[k]) rest[k] = config[k]; });
@@ -159,7 +213,7 @@ function fieldHTML(f) {
       desc + '</div>';
   }
   if (f.type === 'secret') {
-    var set = config.probe_token_set === true;
+    var set = config[f.set || 'probe_token_set'] === true;
     return '<div>' + head +
       '<input type="password" class="sm-input sm-w-auto" id="' + id + '" autocomplete="new-password" ' +
       'placeholder="' + (set ? '已设置，留空表示不修改' : '留空表示不校验') + '">' +

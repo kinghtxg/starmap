@@ -187,6 +187,25 @@ function bindTopo() {
     UI.tip.show(
       '<b>' + UI.esc(nodeLabel(n)) + '</b>' +
       '<div class="sm-tip-row"><span>类型</span><span>' + UI.esc(SM.Topo.typeLabel(nodeType(n))) + '</span></div>' +
+      ((n.Roles || []).length
+        ? '<div class="sm-tip-row"><span>角色</span><span>' + UI.esc(n.Roles.map(SM.Topo.roleLabel).join(' / ')) + '</span></div>'
+        : '') +
+      ((n.Services || []).length
+        ? '<div class="sm-tip-row"><span>服务</span><span>' + UI.esc(n.Services.join(', ')) + '</span></div>'
+        : '') +
+      ((n.OutPorts || []).length
+        ? '<div class="sm-tip-row"><span>连出端口</span><span>' + portBrief(n.OutPorts) + '</span></div>'
+        : '') +
+      ((n.InPorts || []).length
+        ? '<div class="sm-tip-row"><span>入向端口</span><span>' + portBrief(n.InPorts) + '</span></div>'
+        : '') +
+      (n.OSHint || n.TTL
+        ? '<div class="sm-tip-row"><span>系统栈</span><span>' + UI.esc((n.OSHint || '未识别') + (n.TTL ? ' · TTL ' + n.TTL : '')) + '</span></div>'
+        : '') +
+      ((n.Software || []).length
+        ? '<div class="sm-tip-row"><span>软件</span><span>' + UI.esc(n.Software.join(', ')) + '</span></div>'
+        : '') +
+      (n.GatewayFor ? '<div class="sm-tip-row"><span>出口</span><span>' + n.GatewayFor + ' 台设备经此上网</span></div>' : '') +
       '<div class="sm-tip-row"><span>风险</span><span>' + UI.esc(UI.riskLabel(lv)) + '</span></div>' +
       '<div class="sm-tip-row"><span>网络域</span><span>' + UI.esc(n.Domain || '-') + '</span></div>' +
       '<div class="sm-tip-row"><span>最后活跃</span><span>' + UI.esc(UI.fmtAgo(n.LastSeen)) + '</span></div>' +
@@ -221,6 +240,14 @@ function bindTopo() {
         p.x, p.y);
       return;
     }
+    if (e.Kind === 'gateway' || e.Protocol === 'gateway') {
+      UI.tip.show(
+        '<b>' + UI.esc(nodeLabel(nodeCache[p.a] || { ID: p.a })) + ' &rarr; ' + UI.esc(nodeLabel(nodeCache[p.b] || { ID: p.b })) + '</b>' +
+        '<div class="sm-tip-row"><span>类型</span><span>出网路径</span></div>' +
+        '<div style="margin-top:4px;opacity:.7">该主机的公网流量以这台设备为下一跳。网关的 IP 在被动侧不可见，此节点由以太网头的 MAC 推断而来</div>',
+        p.x, p.y);
+      return;
+    }
     UI.tip.show(
       '<b>' + UI.esc(nodeLabel(nodeCache[p.a] || { ID: p.a })) + ' &harr; ' + UI.esc(nodeLabel(nodeCache[p.b] || { ID: p.b })) + '</b>' +
       '<div class="sm-tip-row"><span>协议</span><span>' + UI.esc(e.Protocol || '-') + '</span></div>' +
@@ -250,9 +277,57 @@ function nodeType(n) {
   // 带 xff-proxy 标签的节点是七层转发设备。按连接度数推断时它常被判成"终端"，
   // 详情里写「终端」会把人往"普通主机被代理"的反方向带，这里优先按标签定型。
   if ((n.Labels || []).indexOf('xff-proxy') >= 0) return 'proxy';
-  // 普通节点的设备类型来自拓扑布局判定（按连接度数推断），不再一律显示"未知设备"
+  // 后端基于端口/首跳/服务画像识别出的设备角色优先于"按连线数量猜"（V1.5）
+  if (n.Role && topo && SM.Topo.roleType(n.Role)) return SM.Topo.roleType(n.Role);
+  // 没有角色信息时退回连接度推断
   if (topo) return topo.typeOf(String(n.ID));
   return 'unknown';
+}
+
+/* ---------- 端口展示 ---------- */
+/* 端口 → 常见用途。只是"提示"，不是断言：443 上跑的也可以不是 HTTPS，
+ * 所以端口号永远原样显示，用途作为后缀小字，且未收录的端口直接不显示名字。 */
+var PORT_NAMES = {
+  21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'dns', 67: 'dhcp', 80: 'http',
+  110: 'pop3', 123: 'ntp', 135: 'rpc', 139: 'smb', 143: 'imap', 161: 'snmp', 389: 'ldap',
+  443: 'https', 445: 'smb', 515: 'lpd', 548: 'afp', 631: 'ipp', 873: 'rsync',
+  1433: 'mssql', 1521: 'oracle', 3306: 'mysql', 3389: 'rdp', 5000: 'synology',
+  5432: 'pgsql', 5900: 'vnc', 6379: 'redis', 8080: 'http-alt', 8081: 'http-alt',
+  8443: 'https-alt', 8888: 'http-alt', 9200: 'es', 11211: 'memcached', 27017: 'mongo'
+};
+function portName(p) { return PORT_NAMES[p] || ''; }
+
+/* portBrief 悬浮卡用的一行摘要：最多 4 个，多了给"+N"，不让人在悬浮卡里滚动。
+ * 注意字段是小写：后端 model.PortUse 的 JSON tag 是 port/proto/sessions/peers/bytes，
+ * 写成 p.Port 会静默得到 undefined（不报错，只在界面上显示 "undefined"）。 */
+function portBrief(list) {
+  if (!list || !list.length) return '';
+  var sep = '<span class="sm-t-3" style="opacity:.45"> · </span>';
+  var shown = list.slice(0, 4).map(function (p) {
+    var nm = portName(p.port);
+    return '<span class="sm-mono">' + p.port + '</span>' +
+      (nm ? '<span class="sm-t-3" style="font-size:10px">/' + nm + '</span>' : '') +
+      ((p.sessions || 0) > 1 ? ' <span class="sm-t-3" style="font-size:10px">×' + p.sessions + '</span>' : '');
+  }).join(sep);
+  var more = list.length - 4;
+  return shown + (more > 0 ? ' <span class="sm-t-3">+' + more + '</span>' : '');
+}
+
+/* portTableHTML 详情面板用的端口清单：端口 / 用途 / 协议 / 会话 / 对端 / 流量。 */
+function portTableHTML(list, empty) {
+  if (!list || !list.length) return '<div class="sm-t-3" style="font-size:12px">' + empty + '</div>';
+  return '<div class="sm-stack-sm">' + list.map(function (p) {
+    var nm = portName(p.port);
+    var meta = [];
+    if (p.proto) meta.push(p.proto);
+    if (p.sessions) meta.push(p.sessions + ' 次');
+    if (p.peers) meta.push(p.peers + ' 个对端');
+    if (p.bytes) meta.push(UI.fmtBytes(p.bytes));
+    return '<div class="sm-row is-center" style="justify-content:space-between;padding:5px 8px;background:var(--sm-bg-alt);border-radius:3px">' +
+      '<span class="sm-mono" style="font-size:12px">' + p.port +
+      (nm ? ' <span class="sm-t-3" style="font-size:11px">' + nm + '</span>' : '') + '</span>' +
+      '<span class="sm-t-3" style="font-size:11px">' + UI.esc(meta.join(' · ')) + '</span></div>';
+  }).join('') + '</div>';
 }
 
 /* ---------- 节点详情 ---------- */
@@ -273,6 +348,32 @@ function showDetail(id) {
       kv('节点 ID', '<span class="sm-mono">' + UI.esc(n.ID) + '</span>') +
       kv('IP 地址', (n.IPs || []).length ? (n.IPs || []).map(function (i) { return '<div class="sm-mono">' + UI.esc(i) + '</div>'; }).join('') : '-') +
       kv('MAC 地址', n.MAC ? '<span class="sm-mono">' + UI.esc(n.MAC) + '</span>' : '-') +
+      kv('设备角色', (n.Roles || []).length
+        ? '<div class="sm-chips">' + n.Roles.map(function (r) {
+          return '<span class="sm-badge is-brand">' + UI.esc(SM.Topo.roleLabel(r)) + '</span>';
+        }).join('') + '</div>'
+        : '<span class="sm-t-3">未识别</span>') +
+      kv('开放服务', (n.Services || []).length
+        ? '<div class="sm-chips">' + n.Services.map(function (s) {
+          return '<span class="sm-chip sm-mono">' + UI.esc(s) + '</span>';
+        }).join('') + '</div>'
+        : ((n.InPorts || []).length
+          // 有入向端口但没有一个是已知服务端口。这时候再说"未观测到入向服务"就是错的——
+          // 面板下面一行明明白白列着"别人连过它的 9750"，同一屏自己跟自己矛盾。
+          ? '<span class="sm-t-3">没有已知服务端口；被连过的端口见下方「入向」</span>'
+          : '<span class="sm-t-3">未观测到入向服务（终端/哑设备）</span>')) +
+      kv('系统栈', n.OSHint
+        ? UI.esc(n.OSHint) + (n.TTL ? ' <span class="sm-t-3">(TTL ' + n.TTL + ')</span>' : '')
+        : (n.TTL ? '未识别 <span class="sm-t-3">(TTL ' + n.TTL + ')</span>' : '<span class="sm-t-3">无证据</span>')) +
+      ((n.Software || []).length
+        ? kv('软件指纹', '<div class="sm-chips">' + n.Software.map(function (s) {
+          return '<span class="sm-chip sm-mono">' + UI.esc(s) + '</span>';
+        }).join('') + '</div><div class="sm-t-3" style="margin-top:4px">来源：明文 HTTP 的 Server / User-Agent，加密流量不可见</div>')
+        : '') +
+      (n.InboundPeers
+        ? kv('入向连接', n.InboundPeers + ' 个对端主动连过该设备' + (n.InboundPeers >= 128 ? '（已封顶）' : ''))
+        : '') +
+      (n.GatewayFor ? kv('公网出口', '为 ' + n.GatewayFor + ' 台设备提供首跳网关') : '') +
       kv('归属网络域', n.Domain ? '<span class="sm-badge is-brand">' + UI.esc(n.Domain) + '</span>' : '-') +
       kv('风险等级', UI.riskTag(n.RiskLevel)) +
       kv('在线状态', n.Active === false
@@ -284,6 +385,21 @@ function showDetail(id) {
       kv('首次发现', UI.fmtTime(n.FirstSeen)) +
       kv('最后活跃', UI.fmtTime(n.LastSeen)) +
       '</div>';
+
+    /* 端口：点开一台机器最常问的两个问题就是"它连了谁"和"连的什么端口"。
+     * 出向/入向分开列，不合并成一个"端口列表"——同一个 443 在两侧的含义完全相反：
+     * 出向 443 是"它在访问别人的网站"，入向 443 是"别人在访问它"。 */
+    h += '<div class="sm-divider"></div>' +
+      '<div class="sm-label" style="margin-bottom:8px">连接对方端口 · 出向' +
+      ((n.OutPorts || []).length ? '（' + n.OutPorts.length + '）' : '') + '</div>' +
+      portTableHTML(n.OutPorts, '未观测到该设备主动发起的会话') +
+      '<div class="sm-label" style="margin:12px 0 8px">被对方连接端口 · 入向' +
+      ((n.InPorts || []).length ? '（' + n.InPorts.length + '）' : '') + '</div>' +
+      portTableHTML(n.InPorts, '未观测到指向该设备的入向会话') +
+      (((n.OutPorts || []).length || (n.InPorts || []).length)
+        ? '<div class="sm-t-3" style="font-size:11px;margin-top:6px">来自本次运行观测到的会话；重启后随新流量重建。' +
+          '端口用途为常见约定，不代表该端口上跑的就是这个服务。</div>'
+        : '');
 
     if (resp.Members && resp.Members.length) {
       h += '<div class="sm-divider"></div><div class="sm-label" style="margin-bottom:8px">聚合成员（' + resp.Members.length + '）</div>' +
@@ -322,6 +438,47 @@ function showDetail(id) {
         }).join('') + '</div>' +
         '<div class="sm-t-3" style="font-size:11px;margin-top:6px">这些设备被动侧看不到直连流量，只能靠 XFF 还原</div>';
     }
+    /* V1.5 安全核查：为什么这台是红的，以及"能不能就地查一下"。
+     * 红点如果不解释自己，用户看两天就不信了；能解释、能追查、能加白消红，
+     * 这张图才敢长期挂在墙上。 */
+    var verdict = n.IntelVerdict || '';
+    h += '<div class="sm-divider"></div><div class="sm-label" style="margin-bottom:8px">安全核查</div>' +
+      '<div class="sm-stack-sm">' +
+      kv('归属地', n.Overseas
+        ? '<span class="sm-badge is-danger">国外</span>'
+        : '<span class="sm-t-3">国内 / 未判定</span>') +
+      kv('疑似隧道', n.TunnelSuspect
+        ? '<span class="sm-badge is-danger">是</span> <span class="sm-t-3" style="font-size:11px">命中 frp/clash 类特征</span>'
+        : '<span class="sm-t-3">否</span>') +
+      kv('情报结论', verdict
+        ? intelTagHTML(verdict, n.IntelScore) +
+          ((n.IntelTags || []).length
+            ? ' <span class="sm-t-3" style="font-size:11px">' + UI.esc((n.IntelTags || []).join(' / ')) + '</span>'
+            : '')
+        : '<span class="sm-t-3">本地情报库无记录</span>') +
+      kv('白名单', n.Whitelisted
+        ? '<span class="sm-badge">已加白（不再标红）</span>'
+        : '<span class="sm-t-3">未加白</span>') +
+      '</div>';
+
+    // 只有能查到东西的节点才给查询入口：网段聚合节点没有单一 IP，查了也只会报错
+    if ((n.IPs || []).length && !isAggNode(n)) {
+      h += '<div class="sm-row" style="gap:6px;margin-top:10px;flex-wrap:wrap">' +
+        '<button class="sm-btn is-sm" data-act="intel" data-id="' + UI.escAttr(n.ID) + '" data-mode="local">查询情报</button>' +
+        (snapshot && snapshot.TI && snapshot.TI.configured
+          ? '<button class="sm-btn is-sm" data-act="intel" data-id="' + UI.escAttr(n.ID) + '" data-mode="refresh">回源刷新</button>'
+          : '') +
+        (!n.Whitelisted
+          ? '<button class="sm-btn is-sm" data-act="wl" data-v="' + UI.escAttr(primaryIPOf(n)) + '">加入白名单</button>'
+          : '') +
+        '</div>' +
+        '<div class="sm-hint" id="intelResult" style="font-size:11px;margin-top:8px">' +
+        (snapshot && snapshot.TI && snapshot.TI.configured
+          ? '本地没有记录时会自动向情报平台查询（只查公网地址）'
+          : '未配置回源接口，只能查本地情报库') +
+        '</div>';
+    }
+
     if ((n.Labels || []).indexOf('xff-client') >= 0) {
       h += '<div class="sm-alert is-info" style="margin-top:12px"><span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
         '<div class="sm-alert-body">该设备只能通过 X-Forwarded-For 还原得知（位于七层代理之后），网内未观测到它的直连流量。</div></div>';
@@ -332,6 +489,52 @@ function showDetail(id) {
     body.innerHTML = UI.errorHTML(e);
   });
 }
+/* 情报结论 → 徽标。四个判定对应四种语气：
+ * malicious/suspicious 是"要处理"，clean 是"查过了没问题"，unknown 是"有记录但判不出来"。 */
+function intelTagHTML(v, score) {
+  var cls = v === 'malicious' ? 'is-danger' : (v === 'suspicious' ? 'is-warn' : (v === 'clean' ? 'is-ok' : ''));
+  var label = { malicious: '恶意', suspicious: '可疑', clean: '无问题', unknown: '未知' }[v] || v;
+  return '<span class="sm-badge ' + cls + '">' + UI.esc(label) + '</span>' +
+    (score ? ' <span class="sm-t-3" style="font-size:11px">置信度 ' + score + '</span>' : '');
+}
+function primaryIPOf(n) {
+  var ips = n.IPs || [];
+  return ips.length ? String(ips[0]).replace(/\/.*$/, '') : '';
+}
+
+/* 情报查询：点一下就地查，不跳页、不复制 IP 去别的平台 */
+document.addEventListener('click', function (e) {
+  var b = e.target.closest ? e.target.closest('[data-act="intel"]') : null;
+  if (b) {
+    var id = b.getAttribute('data-id');
+    var box = document.getElementById('intelResult');
+    if (box) box.textContent = '查询中…';
+    b.disabled = true;
+    API.tiLookup(id, b.getAttribute('data-mode') === 'refresh').then(function (r) {
+      b.disabled = false;
+      if (!box) return;
+      if (!r || (!r.record && r.configured === false)) {
+        box.textContent = (r && r.message) || '未查到结果';
+        return;
+      }
+      var rec = r.record || {};
+      box.innerHTML = '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        intelTagHTML(rec.verdict, rec.score) +
+        '<span class="sm-t-3" style="font-size:11px">来源 ' + UI.esc(rec.source || '-') +
+        ' · ' + (r.source === 'local' ? '本地库' : '情报平台') +
+        (r.stale ? ' · 数据已过有效期' : '') + '</span></div>' +
+        ((rec.tags || []).length ? '<div class="sm-chips" style="margin-top:6px">' +
+          rec.tags.map(function (t) { return '<span class="sm-chip">' + UI.esc(t) + '</span>'; }).join('') + '</div>' : '');
+    }).catch(function (err) {
+      b.disabled = false;
+      if (box) box.textContent = '查询失败：' + err.message;
+    });
+    return;
+  }
+  var w = e.target.closest ? e.target.closest('[data-act="wl"]') : null;
+  if (w) addWhitelist(w.getAttribute('data-v'));
+});
+
 function kv(k, v) {
   return '<div class="sm-kv"><div class="sm-kv-k">' + k + '</div><div class="sm-kv-v">' + v + '</div></div>';
 }
@@ -534,11 +737,27 @@ function load() {
       return;
     }
     buildGraph(data);
+    openNodeFromURL();
   }).catch(function (e) {
     if (topo) topo.showOverlay(UI.errorHTML(e));
     snapshot = null;
     renderStats();
   });
+}
+
+/* 深链接：?node=<节点ID> 直接打开某台设备的详情。
+ * 用途很实在——把"这台设备有问题"的链接直接发给同事，不用教他
+ * "打开拓扑、找到 10.20.0.50、双击"。也是详情面板可被自动验证的前提。 */
+function openNodeFromURL() {
+  var want = '';
+  try {
+    want = new URLSearchParams(location.search).get('node') || '';
+  } catch (e) { return; }
+  if (!want) return;
+  var n = nodeCache[want];
+  if (!n) return;                  // 节点已老化/被清理，静默忽略
+  if (topo) topo.centerOn(want);
+  showDetail(want);
 }
 
 document.addEventListener('DOMContentLoaded', load);

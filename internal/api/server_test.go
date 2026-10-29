@@ -443,6 +443,87 @@ func TestProbeLocationIngest(t *testing.T) {
 	}
 }
 
+// V1.5 身份证据必须贯通探针链路。
+//
+// 探针是最靠近设备的观测点，UA / Server 头 / TTL 只有它看得到。这些字段一旦在
+// probeFlow 里丢掉，服务端就只能靠端口猜设备类型，表现为"探针在跑、身份全是空的"，
+// 而且不会报错——静默失效。
+func TestProbeIngestCarriesIdentity(t *testing.T) {
+	h, _ := newTestRouter(t, testCfg())
+	body := map[string]any{
+		"probe_id": "probe-id",
+		"ts":       base.Format(time.RFC3339),
+		"flows": []map[string]any{{
+			"src_ip": "10.10.0.1", "dst_ip": "10.10.0.2",
+			"src_port": 41123, "dst_port": 80, "proto": "tcp",
+			"bytes_up": 5000, "bytes_down": 8000, "packets": 40,
+			"first_seen": base.Format(time.RFC3339),
+			"last_seen":  base.Add(30 * time.Second).Format(time.RFC3339),
+			// 客户端是 Windows 桌面浏览器，服务端是 nginx
+			"user_agent":  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+			"http_server": "nginx/1.18.0",
+			"start_ttl":   128,
+		}},
+	}
+	if w := doReq(t, h, "POST", "/api/ingest/probe", body, nil); w.Code != 200 {
+		t.Fatalf("探针上报失败 %d: %s", w.Code, w.Body.String())
+	}
+
+	w := doReq(t, h, "GET", "/api/topology", nil, nil)
+	var snap map[string]any
+	json.Unmarshal(w.Body.Bytes(), &snap)
+	nodes := snap["Nodes"].([]any)
+
+	var client, server map[string]any
+	for _, n := range nodes {
+		nn, ok := n.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, ip := range nn["IPs"].([]any) {
+			switch ip {
+			case "10.10.0.1":
+				client = nn
+			case "10.10.0.2":
+				server = nn
+			}
+		}
+	}
+	if client == nil || server == nil {
+		t.Fatalf("节点缺失: %s", w.Body.String())
+	}
+	if client["OSHint"] != "Windows 10/11" {
+		t.Fatalf("客户端系统栈应来自 UA/TTL，实际 %v", client["OSHint"])
+	}
+	if client["TTL"] != float64(128) {
+		t.Fatalf("客户端 TTL 应为 128，实际 %v", client["TTL"])
+	}
+	if got := softwareList(client); len(got) == 0 || got[0] != "Windows 10/11 · Chrome 120" {
+		t.Fatalf("客户端软件指纹错误: %v", got)
+	}
+	if got := softwareList(server); len(got) != 1 || got[0] != "nginx/1.18.0" {
+		t.Fatalf("服务端软件指纹错误: %v", got)
+	}
+	// TTL 只属于发起方，不能顺带把服务端也指纹了
+	if server["TTL"] != nil {
+		t.Fatalf("服务端不应有 TTL，实际 %v", server["TTL"])
+	}
+}
+
+func softwareList(n map[string]any) []string {
+	raw, ok := n["Software"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, x := range raw {
+		if s, ok := x.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // V1.4 P0 回归：聚合网段内的成员主机必须全部进资产库。
 // 旧实现 syncAssets 遍历 Snapshot，而 Snapshot 会隐藏已聚合 /24 的成员，
 // 导致"网段内超过聚合阈值的主机永远发现不了"（账外资产发现静默失效）。

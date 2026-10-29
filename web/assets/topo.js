@@ -70,13 +70,69 @@
     unknown:
       '<rect x="2.8" y="2.8" width="18.4" height="18.4" rx="2"/>' +
       '<path d="M9.4 9.3a2.6 2.6 0 1 1 2.4 3.5c-.8.3-1.1 1-1.1 1.7v.3"/>' +
-      '<circle class="sm-fill" cx="10.7" cy="16.8" r=".9"/>'
+      '<circle class="sm-fill" cx="10.7" cy="16.8" r=".9"/>',
+    // 存储/NAS：盘片堆叠
+    nas:
+      '<rect x="3.2" y="4" width="17.6" height="6.2" rx="1.1"/>' +
+      '<rect x="3.2" y="13.8" width="17.6" height="6.2" rx="1.1"/>' +
+      '<circle class="sm-fill" cx="6.6" cy="7.1" r=".8"/><circle class="sm-fill" cx="6.6" cy="16.9" r=".8"/>' +
+      '<path d="M9.8 7.1h7.4M9.8 16.9h7.4"/>',
+    // 数据库：柱形
+    db:
+      '<ellipse cx="12" cy="6" rx="7.4" ry="2.8"/>' +
+      '<path d="M4.6 6v12c0 1.5 3.3 2.8 7.4 2.8s7.4-1.3 7.4-2.8V6"/>' +
+      '<path d="M4.6 12c0 1.5 3.3 2.8 7.4 2.8s7.4-1.3 7.4-2.8"/>'
   };
+  // 细分角色复用最接近的既有形状，靠文字标签区分（不为每个角色膨胀一套图标）
+  GLYPH.dns = GLYPH.server;
+  GLYPH.web = GLYPH.cloud;
+  GLYPH.remote = GLYPH.pc;
+  GLYPH.app = GLYPH.server;
   var TYPE_LABEL = {
     router: '路由器', switch_: '交换机', firewall: '防火墙', server: '服务器',
-    pc: '终端', proxy: '代理转发', cloud: '外部网络', subnet: '网段聚合', unknown: '未知设备'
+    pc: '终端', proxy: '代理转发', cloud: '外部网络', subnet: '网段聚合', unknown: '未知设备',
+    nas: '存储/NAS', dns: 'DNS 服务器', db: '数据库', web: 'Web 站点', remote: '远程管理', app: '应用服务'
   };
   var LAYER_LABEL = ['外部网络', '核心层', '汇聚层', '接入层', '终端层'];
+
+  /* ---------- 公网折叠（V1.5）----------
+   *
+   * 真实内网跑几小时后，公网 /24 聚合节点会有上百个，把内网那几十台设备挤成一小撮。
+   * 默认把它们收进"一朵小云"里：图面先回答"我的网长什么样"，而不是"我连过多少个网段"。
+   *
+   * 但有三类必须留在外面，并且标红——它们是"请你看这里"的信号，
+   * 折进云里等于把告警藏起来：
+   *   · 判定为国外的主机
+   *   · 疑似隧道（frp/clash 之类打过标签的）
+   *   · 中/高风险节点
+   * 加白名单后后端会把 Highlight 置为 false，这时它才允许回到云里——
+   * 白名单是"消红"的唯一出口，前端不另开一套判定。
+   */
+  var CLOUD_ID = 'cloud:internet';
+
+
+  /* ---------- 设备角色（后端识别结果，V1.5） ----------
+   *
+   * 后端按"被动观测到的证据"给出角色：谁被当作首跳网关、谁在 53 端口被访问过、
+   * 谁提供文件共享且有别的机器来连……前端只管展示。
+   *
+   * 在此之前前端是**按连线数量猜设备类型**的（deg≥8 当路由器、≥4 当交换机、
+   * ≥2 当服务器）。那是形状不是身份：一台只发 mDNS 的路由器在图上只有两条边，
+   * 会被当成"终端"；一台刷视频的 PC 连接数爆表，会被当成"服务器"。
+   * 现在优先用后端角色，连接度只在没有角色信息时兜底。
+   */
+  var ROLE_TYPE = {
+    gateway: 'router', nas: 'nas', dns: 'dns', db: 'db', web: 'web',
+    remote: 'remote', server: 'app', host: 'pc', external: 'cloud'
+  };
+  var ROLE_TIER = {
+    gateway: 1, nas: 3, dns: 3, db: 3, web: 3, remote: 3, server: 3, host: 4, external: 0
+  };
+  var ROLE_LABEL = {
+    gateway: '网关/路由器', nas: '存储/NAS', dns: 'DNS 服务器', db: '数据库',
+    web: 'Web 站点', remote: '远程管理', server: '应用服务', host: '终端', external: '外部网络'
+  };
+  function roleLabel(r) { return ROLE_LABEL[r] || TYPE_LABEL[ROLE_TYPE[r]] || r; }
 
   /* 工具栏图标（内联，避免依赖外部模块） */
   function ti(d) {
@@ -88,7 +144,9 @@
     minus: ti('M6 12h12'),
     fit: ti('M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4'),
     layout: ti('M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z'),
-    legend: ti('M4 6h10M4 12h10M4 18h6M18 6h2M18 12h2')
+    legend: ti('M4 6h10M4 12h10M4 18h6M18 6h2M18 12h2'),
+    // 公网折叠开关：一朵云 + 下方两条出口线
+    cloud: ti('M7 16.5h9.5a3.2 3.2 0 0 0 .4-6.4 4.9 4.9 0 0 0-9.2-1.1A3.9 3.9 0 0 0 7 16.5z')
   };
 
   /* ---------- 工具函数 ---------- */
@@ -152,12 +210,72 @@
 
   /* ---------- 分层布局 ---------- */
   function classify(n, deg) {
-    if (isExtNode(n)) return { type: 'cloud', tier: 0 };
+    if (isExtNode(n)) return { type: 'cloud', tier: 0, role: 'external' };
     if (isAggNode(n)) return { type: 'subnet', tier: 3 };
+    // 后端识别出的设备角色优先（V1.5），连接度只在没有角色时兜底
+    if (n.Role && ROLE_TYPE[n.Role]) {
+      return { type: ROLE_TYPE[n.Role], tier: ROLE_TIER[n.Role], role: n.Role };
+    }
     if (deg >= 8) return { type: 'router', tier: 1 };
     if (deg >= 4) return { type: 'switch_', tier: 2 };
     if (deg >= 2) return { type: 'server', tier: 3 };
     return { type: 'pc', tier: 4 };
+  }
+
+  /* foldExternal 把公网 /24 聚合节点收进一朵云。
+   *
+   * 折叠是**视图行为**，不是数据加工：原始 data 一律不动，返回新集合。
+   * 这样"展开"只要重算一遍就能恢复，不需要向服务端重新拉数据。
+   * 边也要跟着改端点，否则云节点会孤立地飘在第一层，与内网断开。
+   */
+  function foldExternal(nodes, edges) {
+    var folded = [], byId = {};
+    nodes.forEach(function (n) {
+      if (!isExtNode(n) || n.Highlight) return;
+      folded.push(n);
+      byId[String(n.ID)] = true;
+    });
+    if (!folded.length) return null;
+
+    var cloud = {
+      ID: CLOUD_ID,
+      Type: 'cloud',
+      Role: 'external',
+      Style: 'cloud-fold',
+      Members: folded.length,
+      Active: folded.some(function (n) { return n.Active !== false; }),
+      IPs: [],
+      Labels: []
+    };
+
+    // 边改端点 + 合并：118 个网段各自一条边会把云节点糊成一团
+    var out = [], idx = {}, selfBytes = 0;
+    edges.forEach(function (e) {
+      var a = String(e.SrcID), b = String(e.DstID);
+      if (byId[a]) a = CLOUD_ID;
+      if (byId[b]) b = CLOUD_ID;
+      if (a === b) { selfBytes += num(e.Bytes); return; }  // 两端都在云里，折叠后没有意义
+      var key = a + '\u0000' + b + '\u0000' + (e.Protocol || '') + '\u0000' + (e.Kind || '');
+      var hit = idx[key];
+      if (!hit) {
+        var cp = {};
+        for (var f in e) { if (Object.prototype.hasOwnProperty.call(e, f)) cp[f] = e[f]; }
+        cp.SrcID = a; cp.DstID = b;
+        cp._folded = 1;                    // 标记：这条边是多条边的合并结果
+        idx[key] = cp;
+        out.push(cp);
+        return;
+      }
+      hit.Bytes = num(hit.Bytes) + num(e.Bytes);
+      hit.Packets = num(hit.Packets) + num(e.Packets);
+      hit._folded += 1;
+      if (e.Active !== false) hit.Active = true;
+      if (e.LastSeen && (!hit.LastSeen || e.LastSeen > hit.LastSeen)) hit.LastSeen = e.LastSeen;
+      if (e.FirstSeen && (!hit.FirstSeen || e.FirstSeen < hit.FirstSeen)) hit.FirstSeen = e.FirstSeen;
+    });
+
+    var kept = nodes.filter(function (n) { return !byId[String(n.ID)]; });
+    return { nodes: kept.concat([cloud]), edges: out, folded: folded, selfBytes: selfBytes };
   }
 
   // V1.3：按探针位置分组布局（泳道归纳）。
@@ -331,6 +449,7 @@
     '.sm-topo-edge.is-inactive{stroke:#d4dae2;stroke-dasharray:5 4}' +
     '.sm-topo-edge.is-owner{stroke:#0052d9;stroke-dasharray:2 5;opacity:.55}' +
     '.sm-topo-edge.is-xff{stroke:#7b61ff;stroke-dasharray:6 3;opacity:.7}' +
+    '.sm-topo-edge.is-gw{stroke:#00a870;stroke-dasharray:3 4;opacity:.6}' +
     '.sm-topo-xff-ring{fill:none;stroke:#7b61ff;stroke-width:1;stroke-dasharray:1 4;opacity:.75}' +
     '.sm-topo-plate{fill:#fff;stroke-width:1}' +
     '.sm-topo-glyph{fill:none;stroke:#4b5768;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round}' +
@@ -339,6 +458,15 @@
     '.sm-topo-anchor-ring{fill:none;stroke:#e34d59;stroke-width:1.2;stroke-dasharray:5 4;opacity:.85}' +
     '.sm-topo-node.is-anchor .sm-topo-plate{fill:#fff8f8}' +
     '.sm-topo-node.is-agg .sm-topo-plate{fill:#f4f7fd}' +
+    '.sm-topo-hl-ring{fill:none;stroke:#e34d59;stroke-width:1.6;opacity:.9}' +
+    '.sm-topo-node.is-hl .sm-topo-plate{fill:#fdf6f6}' +
+    '.sm-topo-node.is-hl .sm-topo-sublabel{fill:#e34d59}' +
+    '.sm-topo-node.is-wl .sm-topo-plate{fill:#f7f8fa}' +
+    '.sm-topo-cloud-halo{fill:rgba(0,82,217,.07);stroke:rgba(0,82,217,.35);stroke-width:1;stroke-dasharray:6 5;opacity:.85}' +
+    '.sm-topo-node.is-cloud .sm-topo-plate{fill:#f2f7ff;stroke:#0052d9;stroke-width:1.4}' +
+    '.sm-topo-glyph.is-cloud{stroke:#0052d9;stroke-width:1.6}' +
+    '.sm-topo-cloud-sub{font-size:10px;fill:#0052d9;text-anchor:middle;font-weight:600;' +
+    'font-family:"PingFang SC","Microsoft YaHei",Arial,sans-serif}' +
     '.sm-topo-label{font-size:11px;fill:#4b5768;text-anchor:middle;font-family:Consolas,Menlo,monospace}' +
     '.sm-topo-sublabel{font-size:10px;fill:#b3bac5;text-anchor:middle;' +
     'font-family:"PingFang SC","Microsoft YaHei",Arial,sans-serif}' +
@@ -368,6 +496,7 @@
       '<button class="sm-btn is-icon is-sm" data-t="zout" title="缩小">' + TICO.minus + '</button>' +
       '<button class="sm-btn is-icon is-sm" data-t="fit" title="适应画布">' + TICO.fit + '</button>' +
       '<button class="sm-btn is-icon is-sm" data-t="relayout" title="重新布局">' + TICO.layout + '</button>' +
+      '<button class="sm-btn is-icon is-sm" data-t="ext" title="公网连接">' + TICO.cloud + '</button>' +
       '<button class="sm-btn is-icon is-sm" data-t="legend" title="显示 / 隐藏图例">' + TICO.legend + '</button>' +
       '<div class="sm-topo-zoom" data-t="ztxt">100%</div>' +
       '</div>' +
@@ -387,12 +516,18 @@
     var elOverlay = wrap.querySelector('.sm-topo-overlay');
     var elZoom = wrap.querySelector('[data-t="ztxt"]');
     var btnLegend = wrap.querySelector('[data-t="legend"]');
+    var btnExt = wrap.querySelector('[data-t="ext"]');
     if (btnLegend) btnLegend.classList.add('is-pressed');
 
     var data = { Nodes: [], Edges: [] };
     var geo = null;
     var alerts = {};
     var riskFilter = '';
+    // 公网折叠：默认折叠，展开状态按引擎实例各自记忆（下钻视图与主视图互不影响）
+    var foldEnabled = opts.foldExternal !== false;
+    var extOpen = false;
+    var cloud = null;      // 本次渲染的折叠结果（null = 没折/已展开）
+    var view = { Nodes: [], Edges: [] };
     var tx = 0, ty = 0, k = 1;
     var lastW = 0; // 上次画布宽度：侧栏开合导致宽度变化时用于保持视觉中心
     var selected = {};
@@ -411,6 +546,7 @@
       var nodes = data.Nodes || [], edges = data.Edges || [];
       gBands.innerHTML = ''; gEdges.innerHTML = ''; gNodes.innerHTML = '';
       edgeIndex = {}; nodeIndex = {};
+      cloud = null;
       if (!nodes.length) {
         elMini.innerHTML = '';
         elNotice.classList.add('sm-hide');
@@ -419,14 +555,19 @@
       }
       hideOverlay();
 
-      geo = layout(nodes, edges);
+      // 公网折叠只改"画什么"，不改 data：展开时重算即可，不用回头拉数据
+      cloud = (foldEnabled && !extOpen) ? foldExternal(nodes, edges) : null;
+      view = cloud ? { Nodes: cloud.nodes, Edges: cloud.edges } : { Nodes: nodes, Edges: edges };
+
+      geo = layout(view.Nodes, view.Edges);
       nodes.forEach(function (n) { nodeIndex[String(n.ID)] = n; });
+      if (cloud) nodeIndex[CLOUD_ID] = cloud.nodes[cloud.nodes.length - 1];
 
       var maxBytes = 1;
-      edges.forEach(function (e) { maxBytes = Math.max(maxBytes, num(e.Bytes)); });
+      view.Edges.forEach(function (e) { maxBytes = Math.max(maxBytes, num(e.Bytes)); });
 
-      var hideSub = nodes.length > SUBLABEL_HIDE;
-      var hideLabel = nodes.length > LABEL_HIDE;
+      var hideSub = view.Nodes.length > SUBLABEL_HIDE;
+      var hideLabel = view.Nodes.length > LABEL_HIDE;
 
       /* 层背景带 */
       var minX = Infinity, maxX = -Infinity;
@@ -451,7 +592,7 @@
 
       /* 边 */
       var eh = '';
-      edges.forEach(function (e, i) {
+      view.Edges.forEach(function (e, i) {
         var a = String(e.SrcID), b = String(e.DstID);
         if (!geo.xy[a] || !geo.xy[b]) return;
         var w = 1 + 2.4 * Math.sqrt(num(e.Bytes) / maxBytes);
@@ -462,10 +603,12 @@
         var owner = e.Kind === 'owner';
         // V1.8：XFF 转发关系边——客户端与代理之间，非观测流量
         var xff = e.Protocol === 'xff';
+        // V1.5：出网路径边——主机 → 首跳网关，非观测流量（网关 IP 不可见）
+        var gw = e.Kind === 'gateway' || e.Protocol === 'gateway';
         var key = 'e' + i;
-        eh += '<g class="sm-topo-edge-grp' + (owner ? ' is-owner' : '') + (xff ? ' is-xff' : '') + '" data-edge="' + key + '">' +
-          '<path class="sm-topo-edge' + (owner ? ' is-owner' : (xff ? ' is-xff' : (inactive ? ' is-inactive' : ''))) + '" d="' + d + '" style="stroke-width:' + (owner || xff ? 1 : w).toFixed(2) + '"/>' +
-          (!owner && !xff && !inactive && edges.length <= FLOW_MAX_EDGES && num(e.Bytes) > 0
+        eh += '<g class="sm-topo-edge-grp' + (owner ? ' is-owner' : '') + (xff ? ' is-xff' : '') + (gw ? ' is-gw' : '') + '" data-edge="' + key + '">' +
+          '<path class="sm-topo-edge' + (owner ? ' is-owner' : (xff ? ' is-xff' : (gw ? ' is-gw' : (inactive ? ' is-inactive' : '')))) + '" d="' + d + '" style="stroke-width:' + (owner || xff || gw ? 1 : w).toFixed(2) + '"/>' +
+          (!owner && !xff && !gw && !inactive && view.Edges.length <= FLOW_MAX_EDGES && num(e.Bytes) > 0
             ? '<path class="sm-topo-flow" d="' + d + '" style="stroke-width:' + Math.max(1.2, w * 0.8).toFixed(2) + '"/>' : '') +
           '<path class="sm-topo-edge-hit" d="' + d + '"/>' +
           '</g>';
@@ -481,7 +624,7 @@
         };
       });
       // 绑定端点以便拖拽时重算
-      edges.forEach(function (e, i) {
+      view.Edges.forEach(function (e, i) {
         var rec = edgeIndex['e' + i];
         if (rec) { rec.a = String(e.SrcID); rec.b = String(e.DstID); rec.data = e; }
       });
@@ -489,7 +632,8 @@
       /* 节点 */
       var nh = '';
       var anchorCount = 0;
-      nodes.forEach(function (n) {
+      var hlCount = 0;
+      view.Nodes.forEach(function (n) {
         var id = String(n.ID);
         var p = geo.xy[id];
         if (!p) return;
@@ -497,7 +641,11 @@
         var agg = t.type === 'subnet' || isAggNode(n);
         if (n.Anchor && !agg) anchorCount++;
         var lvl = n.RiskLevel || 'none';
-        var color = RISK[lvl] || RISK.none;
+        // 标红只认后端给的 Highlight（已加白的节点后端已经把它压成 false）。
+        // 前端不自己算"是不是国外"——两套判定迟早对不上。
+        var hl = !!n.Highlight;
+        if (hl) hlCount++;
+        var color = hl ? RISK.high : (RISK[lvl] || RISK.none);
         var active = n.Active !== false;
         var ip = primaryIP(n);
         var label = ip || (n.MAC ? String(n.MAC).slice(0, 17) : id);
@@ -509,6 +657,32 @@
         var isProxy = labels.indexOf('xff-proxy') >= 0;
         var isXffClient = labels.indexOf('xff-client') >= 0;
         var sub;
+
+        /* 折叠后的公网：一朵云，点开看 /24 */
+        if (id === CLOUD_ID) {
+          var foldedList = cloud ? cloud.folded : [];
+          var liveCount = 0, cloudAlerts = 0;
+          foldedList.forEach(function (f) {
+            if (f.Active !== false) liveCount++;
+            cloudAlerts += num(alerts[String(f.ID)]);
+          });
+          nh += '<g class="sm-topo-node is-cloud" data-id="' + esc(id) +
+            '" transform="translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')">' +
+            '<title>' + esc('互联网出口\n' + num(n.Members) + ' 个公网网段已折叠（活跃 ' + liveCount +
+              ' 个）\n点击展开查看具体网段；国外/隧道/风险节点不在云里，单独标红') + '</title>' +
+            '<rect class="sm-topo-cloud-halo" x="-34" y="-34" width="68" height="68" rx="14"/>' +
+            '<rect class="sm-topo-sel-ring" x="-31" y="-31" width="62" height="62" rx="10"/>' +
+            '<rect class="sm-topo-plate" x="-26" y="-26" width="52" height="52" rx="10"/>' +
+            '<g class="sm-topo-glyph is-cloud" transform="translate(-16.2,-16.2) scale(1.35)">' + GLYPH.cloud + '</g>' +
+            (cloudAlerts ? '<g class="sm-topo-badge" transform="translate(20,-20)">' +
+              '<circle class="sm-topo-badge-bg" r="8.5"/>' +
+              '<text class="sm-topo-badge-tx" y="3">' + (cloudAlerts > 99 ? '99+' : cloudAlerts) + '</text></g>' : '') +
+            '<text class="sm-topo-label" y="40">互联网</text>' +
+            '<text class="sm-topo-cloud-sub" y="54">' + num(n.Members) + ' 个网段 · 点击展开</text>' +
+            '</g>';
+          return;
+        }
+
         if (agg) {
           sub = num(n.Members)
             ? (num(n.Members) + ' 台 · 已聚合')
@@ -518,15 +692,40 @@
           if (anchor) tags.push('异常');
           if (isXffClient) tags.push('经代理');
           // 转发设备直接以「代理转发」定型，不再叠一个"七层转发"标签自我重复
-          var base = isProxy ? '代理转发' : TYPE_LABEL[t.type];
+          var base = isProxy ? '代理转发' : (t.role ? roleLabel(t.role) : TYPE_LABEL[t.type]);
           sub = base + (tags.length ? ' · ' + tags.join(' · ') : '');
         }
+        // 红点必须能解释自己：国外/隧道/风险 → 待核查；加过白的 → 已加白
+        if (hl) sub += ' · 待核查';
+        else if (n.Whitelisted) sub += ' · 已加白';
+
+        // 原生 tooltip：把识别到的服务端口挂在节点上，不用点开详情也能知道
+        // "这台开着 445/5000"——设备身份很大一部分就在这些端口里。
+        var tip = label;
+        if (n.Roles && n.Roles.length) tip += ' · ' + n.Roles.map(roleLabel).join(' / ');
+        if (n.Services && n.Services.length) tip += '\n服务：' + n.Services.join(', ');
+        if (n.OSHint) tip += '\n系统栈：' + n.OSHint + (num(n.TTL) ? '（TTL ' + n.TTL + '）' : '');
+        if (n.Software && n.Software.length) tip += '\n软件：' + n.Software.join(', ');
+        if (num(n.GatewayFor)) tip += '\n为 ' + num(n.GatewayFor) + ' 台设备提供公网出口';
+        // 标红的理由写在 tooltip 里：红点必须能解释自己
+        if (n.Overseas) tip += '\n归属：中国大陆以外';
+        if (n.TunnelSuspect) tip += '\n疑似隧道：命中 frp / clash 类特征';
+        if (n.IntelVerdict) {
+          tip += '\n情报：' + ({ malicious: '恶意', suspicious: '可疑', clean: '无问题', unknown: '未知' }[n.IntelVerdict] || n.IntelVerdict) +
+            (num(n.IntelScore) ? '（置信度 ' + num(n.IntelScore) + '）' : '');
+          if ((n.IntelTags || []).length) tip += ' · ' + n.IntelTags.join('/');
+        }
+        if (n.Whitelisted) tip += '\n已加白：不再参与标红';
 
         nh += '<g class="sm-topo-node' + (agg ? ' is-agg' : '') + (anchor ? ' is-anchor' : '') +
+          (hl ? ' is-hl' : '') + (n.Whitelisted ? ' is-wl' : '') +
           (isXffClient ? ' is-xffc' : '') +
           (active ? '' : ' is-off') + '" data-id="' + esc(id) + '" transform="translate(' + p.x.toFixed(1) + ',' + p.y.toFixed(1) + ')">' +
+          '<title>' + esc(tip) + '</title>' +
           (agg ? '<rect class="sm-topo-ring" x="-32" y="-32" width="64" height="64" rx="10"/>' : '') +
           (anchor ? '<rect class="sm-topo-anchor-ring" x="-34" y="-34" width="68" height="68" rx="10"/>' : '') +
+          // 需核查的节点：红环。已经有异常锚点虚环的不再叠一层，避免两个红圈挤在一起
+          (hl && !anchor ? '<rect class="sm-topo-hl-ring" x="-33" y="-33" width="66" height="66" rx="9"/>' : '') +
           (isXffClient && !anchor ? '<rect class="sm-topo-xff-ring" x="-38" y="-38" width="76" height="76" rx="12"/>' : '') +
           '<rect class="sm-topo-sel-ring" x="-31" y="-31" width="62" height="62" rx="8"/>' +
           '<rect class="sm-topo-plate" x="-26" y="-26" width="52" height="52" rx="6" ' +
@@ -545,8 +744,14 @@
 
       /* 大图保护 / 锚点提示 */
       var tips = [];
-      if (nodes.length > LABEL_HIDE) {
-        tips.push('节点 ' + nodes.length + ' 个，已隐藏标签以保证渲染性能（缩放后可查看局部）');
+      if (view.Nodes.length > LABEL_HIDE) {
+        tips.push('节点 ' + view.Nodes.length + ' 个，已隐藏标签以保证渲染性能（缩放后可查看局部）');
+      }
+      if (cloud) {
+        tips.push('公网连接已折叠为 ' + num(cloud.folded.length) + ' 个网段（点击云图标展开）');
+      }
+      if (hlCount > 0) {
+        tips.push('待核查 ' + hlCount + ' 台（国外 / 疑似隧道 / 中高风险，已加白的除外）');
       }
       if (anchorCount > 0) {
         tips.push('异常锚点 ' + anchorCount + ' 个已从网段聚合中单独展开（红色虚环）');
@@ -561,6 +766,33 @@
       renderLegend();
       applyFilter();
       drawMini();
+      syncExtButton();
+    }
+
+    /* ---------- 公网折叠：状态切换 ---------- */
+    // 可折叠的公网节点数（已加白的照旧可折；标红的不折）
+    function countExtNodes() {
+      var c = 0;
+      (data.Nodes || []).forEach(function (n) { if (isExtNode(n) && !n.Highlight) c++; });
+      return c;
+    }
+    function syncExtButton() {
+      if (!btnExt) return;
+      var n = cloud ? cloud.folded.length : countExtNodes();
+      btnExt.title = !foldEnabled
+        ? '本视图不折叠公网连接'
+        : (cloud ? ('公网连接：' + n + ' 个网段已折叠，点击展开') : ('公网连接：已展开 ' + n + ' 个网段，点击折叠'));
+      btnExt.classList.toggle('is-pressed', !!cloud);
+    }
+    function setExternal(open, doFit) {
+      if (!foldEnabled) return;
+      var was = extOpen;
+      extOpen = !!open;
+      if (was === extOpen) return;
+      var n = extOpen ? countExtNodes() : 0;
+      render();
+      if (doFit !== false) fit();
+      emit('foldExternal', { open: extOpen, count: n });
     }
 
     function edgeD(a, b) {
@@ -580,22 +812,26 @@
 
     function renderLegend() {
       var types = {};
-      var hasAnchor = false, hasAgg = false;
-      (data.Nodes || []).forEach(function (n) {
+      var hasAnchor = false, hasAgg = false, hasHl = false, hasWl = false;
+      // 用 view 而不是 data：折叠掉的节点不在图上，图例也不该为它们留条目
+      (view.Nodes || []).forEach(function (n) {
         var t = (geo && geo.info[String(n.ID)]) || { type: 'unknown' };
         types[t.type] = 1;
         // 与画布一致：xff-proxy 节点按代理转发画，图例也得列出来，否则图标没有图注
         if ((n.Labels || []).indexOf('xff-proxy') >= 0) types.proxy = 1;
         if (n.Anchor) hasAnchor = true;
         if (isAggNode(n)) hasAgg = true;
+        if (n.Highlight) hasHl = true;
+        if (n.Whitelisted) hasWl = true;
       });
       // 图例按需显示：只列当前图里真实存在的元素，否则条目越加越长，反过来压住图内容
-      var hasBytes = false, hasInactive = false, hasOwner = false, hasXff = false;
-      (data.Edges || []).forEach(function (e) {
+      var hasBytes = false, hasInactive = false, hasOwner = false, hasXff = false, hasGw = false;
+      (view.Edges || []).forEach(function (e) {
         if (num(e.Bytes) > 0) hasBytes = true;
         if (e.Active === false) hasInactive = true;
         if (e.Kind === 'owner') hasOwner = true;
         if (e.Protocol === 'xff') hasXff = true;
+        if (e.Kind === 'gateway' || e.Protocol === 'gateway') hasGw = true;
       });
 
       var h = '<div class="sm-lg-t">设备类型</div>';
@@ -616,8 +852,14 @@
       if (hasAgg) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed #8f9aab"></span><span>双环 = 可下钻</span></div>';
       if (hasAnchor) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px dashed ' + RISK.high +
         ';box-shadow:0 0 0 1px rgba(227,77,89,.2)"></span><span>红色虚环 = 异常锚点（不聚合）</span></div>';
+      if (hasHl) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1.6px solid ' + RISK.high +
+        '"></span><span>红环 = 待核查（国外/隧道/风险）</span></div>';
+      if (hasWl) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:#fff;border:1px solid #b6bfcc"></span><span>灰底 = 已加白（不再标红）</span></div>';
+      if (cloud) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:' + RISK.low +
+        ';opacity:.16"></span><span>云 = 公网连接已折叠（点击展开）</span></div>';
       if (hasOwner) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#0052d9 0 2px,transparent 2px 7px);opacity:.6"></span><span>细点线 = 网段归属</span></div>';
       if (hasXff) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#7b61ff 0 6px,transparent 6px 9px)"></span><span>紫色虚线 = 经代理转发</span></div>';
+      if (hasGw) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#00a870 0 3px,transparent 3px 7px);opacity:.7"></span><span>绿色点线 = 出网经该网关</span></div>';
       if (links) h += '<div class="sm-lg-t">链路</div>' + links;
       elLegend.innerHTML = h;
     }
@@ -858,6 +1100,8 @@
       var nodeEl = e.target.closest ? e.target.closest('.sm-topo-node') : null;
       if (nodeEl) {
         var id = nodeEl.getAttribute('data-id');
+        // 云节点不是资产，点它只做一件事：展开公网连接
+        if (id === CLOUD_ID) { setExternal(true); return; }
         selected = {}; selected[id] = true;
         syncSelection();
         emit('select', [id]);
@@ -938,6 +1182,7 @@
       else if (t === 'zout') zoomBy(1 / 1.2);
       else if (t === 'fit') fit();
       else if (t === 'relayout') { render(); fit(); emit('relayout', null); }
+      else if (t === 'ext') setExternal(!extOpen);
       // 图例占地方不小，小屏/大图时挡住节点，给一个开关键
       else if (t === 'legend') {
         elLegend.classList.toggle('sm-hide');
@@ -972,8 +1217,9 @@
         '<rect x="' + (b.x - PAD) + '" y="' + (b.y - PAD) + '" width="' + w + '" height="' + h + '" fill="#ffffff"/>' +
         '<text class="sm-topo-title" x="' + (b.x - PAD + 24) + '" y="' + (b.y - PAD + 34) + '">StarMap 内网拓扑图</text>' +
         '<text class="sm-topo-meta" x="' + (b.x - PAD + 24) + '" y="' + (b.y - PAD + 52) + '">生成时间 ' +
-        esc(new Date().toLocaleString('zh-CN', { hour12: false })) + ' · 节点 ' + (data.Nodes || []).length +
-        ' · 链路 ' + (data.Edges || []).length + '</text>' +
+        esc(new Date().toLocaleString('zh-CN', { hour12: false })) + ' · 节点 ' + view.Nodes.length +
+        ' · 链路 ' + view.Edges.length +
+        (cloud ? ' · 公网 ' + cloud.folded.length + ' 个网段已折叠' : '') + '</text>' +
         inner + '</svg>';
     }
     function download(name, href) {
@@ -1050,6 +1296,10 @@
       exportPNG: exportPNG,
       nodeCount: function () { return (data.Nodes || []).length; },
       edgeCount: function () { return (data.Edges || []).length; },
+      // 公网折叠：外部展开/折叠（默认折叠）。foldedCount 供页面顶部提示用
+      setFoldExternal: function (open) { setExternal(open); return api; },
+      isFoldExternalOpen: function () { return extOpen; },
+      foldedCount: function () { return cloud ? cloud.folded.length : 0; },
       // 节点在本次布局中被判定出的设备类型（router/switch_/server/pc/cloud/subnet/unknown）
       typeOf: function (id) {
         var t = geo && geo.info[String(id)];
@@ -1065,8 +1315,15 @@
 
   SM.Topo = {
     create: create,
+    // 公网折叠的纯函数版本：不依赖 DOM，便于单独验证折叠规则
+    // （哪些能折、边怎么合并、折叠后还剩什么）。
+    foldExternal: foldExternal,
+    CLOUD_ID: CLOUD_ID,
     glyph: function (t) { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + (GLYPH[t] || GLYPH.unknown) + '</svg>'; },
     typeLabel: function (t) { return TYPE_LABEL[t] || t; },
+    // 设备角色（后端识别）→ 中文名 + 展示类型
+    roleLabel: roleLabel,
+    roleType: function (r) { return ROLE_TYPE[r] || ''; },
     riskColor: function (lv) { return RISK[lv] || RISK.none; }
   };
 })(window);

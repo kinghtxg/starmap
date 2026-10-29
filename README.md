@@ -345,6 +345,7 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/INTEL.md](docs/INTEL.md) — **威胁情报对接指南**（1.5.0）：推送样例、字段别名表、覆盖/乱序语义、回源契约
 - [docs/PROBE.md](docs/PROBE.md) — **探针部署手册**（1.4.0）：四种采集后端、systemd/Windows 服务、权限、排障手册
 - [docs/RELEASE-1.4.md](docs/RELEASE-1.4.md) — 1.4.0 发布说明（独立探针）
 - [docs/RELEASE-1.3.1.md](docs/RELEASE-1.3.1.md) — 1.3.1 发布说明（真分页 / 配置一致性 / 收口）

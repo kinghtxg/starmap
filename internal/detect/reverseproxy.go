@@ -13,7 +13,16 @@ import (
 
 // ---------- 反代（SPEC §5） ----------
 
-// evalReverseProxy 单内网 IP 对外映射 Host 域名数 > 阈值（默认 10）→ 打标签。
+// evalReverseProxy 单内网 IP 作为**服务端**承载的 Host 域名数 > 阈值（默认 10）→ 打标签。
+//
+// 为什么必须看服务端方向：反代的特征是"一个入口 IP 后面挂多个站点"，只有在该 IP
+// **接收**请求、并且请求里的 Host/SNI 各不相同的时候，这个特征才成立。
+//
+// 早期实现按"源 IP"统计（谁发出了带 SNI 的请求就记在谁头上），等于在描述"客户端
+// 上网"：一台普通 PC 一天访问几十个站点，SNI 天然各不相同，必然超过阈值。
+// 接入真实流量实测，第一次评估就在值班主机上刷出 "对外映射 Host 33 个" 的反代事件，
+// 名单里全是 bilibili / 微软 / 百度网盘 / WPS —— 那只是这台机器在上网。
+// 方向搞反了，这条规则在真实网络里 100% 误报，而且是 mid 级噪音，必须停在源头。
 func evalReverseProxy(rc *ruleContext) []model.RiskEvent {
 	threshold := rc.d.Cfg.ReverseProxyHosts
 	if threshold <= 0 {
@@ -26,10 +35,16 @@ func evalReverseProxy(rc *ruleContext) []model.RiskEvent {
 		if host == "" {
 			host = s.SNI
 		}
-		if host == "" || !topology.IsPrivate(s.FiveTuple.SrcIP) {
+		if host == "" {
 			continue
 		}
-		node := rc.d.Engine.NodeByIP(s.FiveTuple.SrcIP)
+		// 只看服务端侧：目的地址是内网的会话，才可能是"某台内网设备在对外提供站点"。
+		// 目的地址是公网的，一律是别人在提供服务，与反代无关（CDN 单 IP 多 Host 的
+		// 误报也一并消失——那是人家的基础设施，不是我们的资产）。
+		if !topology.IsPrivate(s.FiveTuple.DstIP) {
+			continue
+		}
+		node := rc.d.Engine.NodeByIP(s.FiveTuple.DstIP)
 		if node == nil {
 			continue
 		}
@@ -56,7 +71,7 @@ func evalReverseProxy(rc *ruleContext) []model.RiskEvent {
 			NodeID: nodeID,
 			Level:  model.RiskMid,
 			Title:  "疑似反向代理：单 IP 映射多 Host",
-			Detail: fmt.Sprintf("节点对外映射 Host 域名数 %d，超过阈值 %d（仅标签）", len(hosts), threshold),
+			Detail: fmt.Sprintf("节点作为服务端承载 Host 域名数 %d，超过阈值 %d（仅标签）", len(hosts), threshold),
 			Evidence: map[string]string{
 				"host_count": strconv.Itoa(len(hosts)),
 				"threshold":  strconv.Itoa(threshold),

@@ -592,6 +592,29 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	if saved.MetricsToken != "" {
 		cfg.MetricsToken = saved.MetricsToken
 	}
+	// 威胁情报（V1.5）
+	//
+	// 密钥与 probe_token / metrics_token 同策略：落库明文、API 只回显"是否已设"。
+	// 空串不覆盖，保住"配置文件里写了 key、后台只改了超时"的场景。
+	cfg.TIEnabled = saved.TIEnabled
+	if saved.TIEndpoint != "" {
+		cfg.TIEndpoint = saved.TIEndpoint
+	}
+	if saved.TIAPIKey != "" {
+		cfg.TIAPIKey = saved.TIAPIKey
+	}
+	if saved.TITimeoutMS > 0 {
+		cfg.TITimeoutMS = saved.TITimeoutMS
+	}
+	if saved.TICacheSeconds > 0 {
+		cfg.TICacheSeconds = saved.TICacheSeconds
+	}
+	if saved.IntelPushToken != "" {
+		cfg.IntelPushToken = saved.IntelPushToken
+	}
+	if saved.IntelRetentionDays > 0 {
+		cfg.IntelRetentionDays = saved.IntelRetentionDays
+	}
 }
 
 // ---------- 自动发现：扫描目标计算（V1.5 新网段自动识别） ----------
@@ -685,6 +708,15 @@ func maintenanceLoop(ctx context.Context, st *store.Store, box *config.Box) {
 				slog.Warn("风险事件清理失败", "err", err)
 			} else if n > 0 {
 				slog.Info("风险事件已按保留期清理", "deleted", n, "days", days, "only_resolved", true)
+			}
+		}
+		// 情报是会过期的结论：一条 90 天前的 malicious 如果一直留着，那台机器会
+		// 永远标红，而这个红点已经不代表任何风险——最后用户就不信红色了。
+		if days := cfg.IntelRetentionDays; days > 0 {
+			if n, err := st.PruneIntel(days); err != nil {
+				slog.Warn("情报库清理失败", "err", err)
+			} else if n > 0 {
+				slog.Info("本地情报已按保留期清理", "deleted", n, "days", days)
 			}
 		}
 	}

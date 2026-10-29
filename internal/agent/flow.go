@@ -28,6 +28,13 @@ type Flow struct {
 	JA3      string `json:"ja3,omitempty"`
 	JA4      string `json:"ja4,omitempty"`
 
+	// 设备身份证据（V1.5）：探针是最靠近设备的观测点，它看到的这三样东西
+	// 一旦不往上报，服务端就只能靠端口猜设备类型——TTL 决定系统栈大类，
+	// UA / Server 头直接说出跑的是什么软件。都是会话级元数据，不增加流量。
+	StartTTL   int    `json:"start_ttl,omitempty"`
+	UserAgent  string `json:"user_agent,omitempty"`
+	HTTPServer string `json:"http_server,omitempty"`
+
 	IsLongConn          bool  `json:"is_long_conn,omitempty"`
 	HeartbeatIntervalMs int64 `json:"heartbeat_interval_ms,omitempty"`
 
@@ -71,6 +78,10 @@ func MapSessions(sessions []model.Session) []Flow {
 			HTTPHost: s.HTTPHost,
 			JA3:      s.JA3,
 			JA4:      s.JA4,
+
+			StartTTL:   s.StartTTL,
+			UserAgent:  s.UserAgent,
+			HTTPServer: s.HTTPServer,
 
 			IsLongConn:          s.IsLongConn,
 			HeartbeatIntervalMs: s.HeartbeatIntervalMs,

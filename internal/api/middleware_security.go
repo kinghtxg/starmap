@@ -57,6 +57,7 @@ var bodyLimitOverrides = map[string]int64{
 	"/api/ingest/pcap":   MaxPCAPUpload,  // PCAP 上传 200MB
 	"/api/ingest/probe":  64 << 20,       // 探针批量上报
 	"/api/ledger/import": ledgerMaxBytes, // 台账 CSV 16MB
+	"/api/intel/push":    64 << 20,       // 情报推送（定期全量/增量，条数另有上限）
 }
 
 // bodyLimit 给请求体套上确定的读取上限。

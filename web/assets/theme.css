@@ -911,6 +911,35 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-xs);
 /* V1.8：只能通过 XFF 还原得知的客户端（位于代理后，被动侧看不到它的直连流量） */
 .sm-topo-xff-ring { fill: none; stroke: #7b61ff; stroke-width: 1; stroke-dasharray: 1 4; opacity: .75; }
 .sm-topo-node.is-xffc .sm-topo-plate { fill: #fbfaff; }
+
+/* V1.5：公网折叠 —— 一朵可以点开的云
+ * 上百个公网 /24 会把内网设备挤成一小撮，默认收进这里。
+ * 标红的三类（国外/隧道/风险）不进云，所以这里的体量只代表"没问题的外部连接"。 */
+.sm-topo-node.is-cloud .sm-topo-plate { fill: #f2f7ff; stroke: var(--sm-brand-2); stroke-width: 1.4; }
+.sm-topo-cloud-halo {
+  fill: rgba(51, 112, 255, .07);
+  stroke: rgba(51, 112, 255, .35);
+  stroke-width: 1;
+  stroke-dasharray: 6 5;
+  animation: sm-cloud-pulse 3.6s var(--sm-ease) infinite;
+}
+@keyframes sm-cloud-pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .sm-topo-cloud-halo { animation: none; opacity: .8; } }
+.sm-topo-node.is-cloud:hover .sm-topo-cloud-halo { stroke: var(--sm-brand-2); opacity: 1; }
+.sm-topo-glyph.is-cloud { stroke: var(--sm-brand-2); stroke-width: 1.6; }
+.sm-topo-cloud-sub { font-size: 10px; fill: var(--sm-brand-2); text-anchor: middle; pointer-events: none; font-weight: 600; }
+
+/* V1.5：待核查（国外 / 疑似隧道 / 中高风险）—— 红环，且不参与公网折叠。
+ * 与「异常锚点」的红虚环区分：这里是实线环，代表"人还没看过"，看过后加白就会消掉。 */
+.sm-topo-hl-ring {
+  fill: none; stroke: var(--sm-danger); stroke-width: 1.6; opacity: .9;
+  filter: drop-shadow(0 0 3px rgba(227, 77, 89, .35));
+}
+.sm-topo-node.is-hl .sm-topo-plate { fill: #fdf6f6; }
+.sm-topo-node.is-hl .sm-topo-sublabel { fill: var(--sm-danger); }
+/* 已加白：灰底，说明"这台不是没问题，是你说过没问题" */
+.sm-topo-node.is-wl .sm-topo-plate { fill: #f7f8fa; }
+.sm-topo-node.is-wl .sm-topo-sublabel { fill: var(--sm-text-4); }
 .sm-topo-node.is-sel .sm-topo-plate { stroke: var(--sm-brand-2); stroke-width: 2; }
 .sm-topo-node.is-sel .sm-topo-sel-ring { opacity: 1; }
 .sm-topo-sel-ring { fill: none; stroke: var(--sm-brand-2); stroke-width: 1.5; opacity: 0; transition: opacity var(--sm-t) var(--sm-ease); stroke-dasharray: 4 3; }
