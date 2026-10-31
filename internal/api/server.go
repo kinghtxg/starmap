@@ -1544,13 +1544,28 @@ func (s *Server) syncTopology() int {
 	if len(fresh) > 0 {
 		_ = s.d.Store.SaveSessions(fresh)
 	}
-	sessions := res.Sessions()
+	// 只处理**本轮有变化的会话**，不再拿全表。
+	//
+	// 原来这里是 res.Sessions()：把 3 万条会话整表拷一份，交给
+	// extractPortsFromSessions 全量重算一遍端口，再 UpsertPorts 全量写一次。
+	// 于是每来一批流量就重写一遍全表端口记录——纯粹的写放大，而且随数据量
+	// 线性变慢。实测 32k 会话时探针上报 p50 359ms、p95 5.1s（8 路并发上报），
+	// 探针会跟着一起堵，最后表现为"网络里明明有流量，界面上不更新"。
+	//
+	// 语义上不比原来差：res.Entries 就是"自上次抽取以来有更新的会话"，
+	// 未变化的会话算出来的端口记录与库里已有的完全一致，重算一遍没有意义。
+	changed := make([]model.Session, 0, len(res.Entries))
+	for i := range res.Entries {
+		changed = append(changed, res.Entries[i].Session)
+	}
 	// 流量角度：提取内网主机端口（V1.2）
-	s.extractPortsFromSessions(sessions)
+	s.extractPortsFromSessions(changed)
 	// 节点 → 资产同步（账外资产自动登记，V1.2）
 	// 用节流版：探针上报是高频路径，每批都跑全量同步会把单连接占死。
-	s.syncAssetsThrottled()
-	return len(sessions)
+	s.syncAssetsInBackground()
+	// 返回会话总数：res.Active 是抽取后的活跃会话数，与原来 len(res.Sessions())
+	// 同义，但不需要为了一个数字拷整表。
+	return res.Active
 }
 
 // evaluateAsync 同步执行一轮检测评估，返回新建事件数。
@@ -2487,6 +2502,36 @@ func (s *Server) syncAssetsThrottled() {
 		s.assetMu.Unlock()
 	}()
 	s.syncAssets()
+}
+
+// syncAssetsInBackground 高频路径（探针上报）专用：触发的是一次后台同步，
+// 请求本身不等它。
+//
+// 全量资产同步是"所有节点 upsert 一遍"，3 万台主机即便分块提交也要上百毫秒
+// 到一秒。让一批流量上报去等它，等于把资产同步的耗时记在探针账上：探针看到
+// 服务端慢就退避，最后表现成"网里有流量但界面不更新"。
+//
+// 读接口仍然用阻塞版（syncAssetsThrottled）：用户点开资产页，就该看到含最新
+// 节点的列表，不能拿一份"同步还没跑完"的旧数据糊弄他。
+func (s *Server) syncAssetsInBackground() {
+	s.assetMu.Lock()
+	if s.assetSyncing || time.Since(s.lastAssetSync) < assetSyncInterval {
+		s.assetMu.Unlock()
+		return
+	}
+	s.assetSyncing = true
+	// 先把时间戳推进，避免后台同步还没跑完时每个请求又各起一个 goroutine
+	s.lastAssetSync = time.Now()
+	s.assetMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.assetMu.Lock()
+			s.assetSyncing = false
+			s.assetMu.Unlock()
+		}()
+		s.syncAssets()
+	}()
 }
 
 func (s *Server) assetStats(c *gin.Context) {

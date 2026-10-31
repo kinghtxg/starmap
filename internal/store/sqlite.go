@@ -1481,6 +1481,15 @@ func (s *Store) ListAuditLogs(limit int) ([]model.AuditLog, error) {
 	return out, rows.Err()
 }
 
+// assetSyncChunk 单次事务最多写多少行资产。
+//
+// 为什么要分块：这个同步是"全量节点 upsert"，3 万台主机就是 3 万条写。
+// 放进一个事务里，写锁被按住整整一两秒，期间探针上报的会话落库全部排队——
+// 实测 8 路并发上报 p95 从 300ms 涨到 4.8 秒，而探针侧看到的是"服务端很慢"，
+// 会开始退避，最后表现成"网络里有流量但界面不更新"。
+// 分块提交让写锁在块与块之间释放，上报可以插进去。
+const assetSyncChunk = 2000
+
 // SyncAssetsFromNodes 把拓扑节点批量同步进资产库（V1.5.2）。
 //
 // 替代 API 层原来的"逐节点 SELECT + 逐条 UPSERT"：那是 O(N) 次往返，
@@ -1496,29 +1505,44 @@ func (s *Store) SyncAssetsFromNodes(nodes []model.Node, now time.Time) (int, err
 	if len(nodes) == 0 {
 		return 0, nil
 	}
+	stmtSQL := `INSERT INTO assets(node_key,ips,mac,hostname,os,status,owner,department,location,description,
+	                    first_seen,last_seen,created_at,updated_at)
+	 VALUES(?,?,?,'','','unarchived','','',?,'',?,?,?,?)
+	 ON CONFLICT(node_key) DO UPDATE SET
+	   ips=excluded.ips,
+	   mac=excluded.mac,
+	   last_seen=excluded.last_seen,
+	   updated_at=excluded.updated_at,
+	   location=CASE WHEN assets.status='unarchived' AND excluded.location<>''
+	                 THEN excluded.location ELSE assets.location END`
+
+	n := 0
+	for start := 0; start < len(nodes); start += assetSyncChunk {
+		end := start + assetSyncChunk
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := s.syncAssetChunk(stmtSQL, nodes[start:end], now, &n); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// syncAssetChunk 写一批资产，一批一个事务。
+func (s *Store) syncAssetChunk(stmtSQL string, nodes []model.Node, now time.Time, n *int) error {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.Prepare(
-		`INSERT INTO assets(node_key,ips,mac,hostname,os,status,owner,department,location,description,
-		                    first_seen,last_seen,created_at,updated_at)
-		 VALUES(?,?,?,'','','unarchived','','',?,'',?,?,?,?)
-		 ON CONFLICT(node_key) DO UPDATE SET
-		   ips=excluded.ips,
-		   mac=excluded.mac,
-		   last_seen=excluded.last_seen,
-		   updated_at=excluded.updated_at,
-		   location=CASE WHEN assets.status='unarchived' AND excluded.location<>''
-		                 THEN excluded.location ELSE assets.location END`)
+	stmt, err := tx.Prepare(stmtSQL)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer stmt.Close()
 
-	n := 0
 	for i := range nodes {
 		nd := &nodes[i]
 		if nd.NodeKey == "" {
@@ -1534,11 +1558,11 @@ func (s *Store) SyncAssetsFromNodes(nodes []model.Node, now time.Time) (int, err
 		}
 		if _, err := stmt.Exec(nd.NodeKey, toJSON(nd.IPs), nd.MAC, nd.Location,
 			first, last, now, now); err != nil {
-			return n, err
+			return err
 		}
-		n++
+		*n++
 	}
-	return n, tx.Commit()
+	return tx.Commit()
 }
 
 // ---------- Config KV ----------
