@@ -6,7 +6,7 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.6.0**（[1.6.0 发布说明](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.6.1**（[1.6.1 发布说明](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -369,6 +369,7 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/RELEASE-1.6.1.md](docs/RELEASE-1.6.1.md) — **1.6.1 发布说明**（误报风暴 / 写锁争用 / 落盘两档 / 流量回退）
 - [docs/RELEASE-1.6.md](docs/RELEASE-1.6.md) — **1.6.0 发布说明**（任务账 / 变更视图 / 导出 / 容量治理）
 - [docs/INTEL.md](docs/INTEL.md) — **威胁情报对接指南**（1.5.0）：推送样例、字段别名表、覆盖/乱序语义、回源契约
 - [docs/PROBE.md](docs/PROBE.md) — **探针部署手册**（1.4.0）：四种采集后端、systemd/Windows 服务、权限、排障手册

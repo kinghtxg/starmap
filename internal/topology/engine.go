@@ -150,9 +150,22 @@ type Engine struct {
 	domains  []model.NetDomain     // 网络域（用于节点 Domain 归属）
 
 	// 持久化（P0-2）：persist 为 nil 时引擎纯内存（单测场景）
-	persist    *store.Store
-	dirtyNodes map[int64]bool   // 待落盘节点
-	dirtyEdges map[edgeKey]bool // 待落盘边
+	persist *store.Store
+	// dirtyNodes/dirtyEdges 是**结构变更**：新节点、网卡/MAC/风险/标签变了、
+	// 节点在离线状态之间切换、新边。这类变化必须尽快落盘，频率跟 flush 周期一致。
+	dirtyNodes map[int64]bool   // 待落盘节点（结构变更）
+	dirtyEdges map[edgeKey]bool // 待落盘边（新增）
+	// touchNodes/touchEdges 只是**计数变了**：last_seen 往前挪、边上的字节/包数累加。
+	//
+	// 为什么必须分开：探针每 5 秒重发同一条会话，于是每一轮 Ingest 都会让
+	// "这条边又多了几个字节""这台机器的 last_seen 又新了"成立。如果这些都算脏，
+	// 那么 6 万节点的网络每 2 秒就要重写 6 万节点 + 6 万边 + 6 万会话偏移
+	// = 30k 行/秒的持续写入。SQLite 只有一个写者，写锁被这一件事占满，
+	// 探针上报就排在它后面 —— 实测 9.5 万会话时上报接口稳定 3.4 秒。
+	// 而这些东西的精度要求只是"分钟级"：图上一条边的字节数晚 1 分钟更新，
+	// 没有任何人会看出来；上报被拖到 3 秒，运维当场就看得见。
+	touchNodes map[int64]bool
+	touchEdges map[edgeKey]bool
 }
 
 // New 创建拓扑引擎。
@@ -186,6 +199,8 @@ func New(cfg model.SystemConfig) *Engine {
 		sessions:         map[string]*sessState{},
 		dirtyNodes:       map[int64]bool{},
 		dirtyEdges:       map[edgeKey]bool{},
+		touchNodes:       map[int64]bool{},
+		touchEdges:       map[edgeKey]bool{},
 	}
 	if e.agingSeconds <= 0 {
 		e.agingSeconds = 86400
@@ -346,25 +361,59 @@ func (e *Engine) restoreLocked() error {
 
 // Flush 把累计的脏节点/边一次性批量落盘（幂等 upsert，节点按 id、边按 (src_key,dst_key,protocol)）。
 // 调用方通过 RunPersist 以固定间隔驱动，绝不在每个报文里写库。
-func (e *Engine) Flush() error {
+// Flush 强制落盘全部变化（含计数刷新），用于退出前与需要强一致的场合。
+func (e *Engine) Flush() error { return e.flush(true) }
+
+// flush 落盘。
+//
+// includeCounters=false 时只写结构变更（新节点/新边/属性变化），
+// 把"只是 last_seen 或字节数变了"的那部分留给慢通道——它们每分钟写一次就够，
+// 见 touchNodes 的注释。返回值语义不变：出错时脏标记已经放回，下一轮重试。
+func (e *Engine) flush(includeCounters bool) error {
 	e.mu.Lock()
 	st := e.persist
-	if st == nil || (len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0 && !e.sessionDirty) {
+	if st == nil {
 		e.mu.Unlock()
 		return nil
 	}
-	nodeIDs := make([]int64, 0, len(e.dirtyNodes))
-	nodes := make([]model.Node, 0, len(e.dirtyNodes))
-	for id := range e.dirtyNodes {
+	if len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0 &&
+		(!includeCounters || (len(e.touchNodes) == 0 && len(e.touchEdges) == 0 && !e.sessionDirty)) {
+		e.mu.Unlock()
+		return nil
+	}
+	// 需要落盘的节点 = 结构变更 ∪（本轮的）计数刷新
+	need := e.dirtyNodes
+	if includeCounters && len(e.touchNodes) > 0 {
+		need = make(map[int64]bool, len(e.dirtyNodes)+len(e.touchNodes))
+		for id := range e.dirtyNodes {
+			need[id] = true
+		}
+		for id := range e.touchNodes {
+			need[id] = true
+		}
+	}
+	nodeIDs := make([]int64, 0, len(need))
+	nodes := make([]model.Node, 0, len(need))
+	for id := range need {
 		if n := e.nodes[id]; n != nil {
 			n.NodeKey = nodeKeyFor(n)
 			nodeIDs = append(nodeIDs, id)
 			nodes = append(nodes, *n)
 		}
 	}
-	edgeKeys := make([]edgeKey, 0, len(e.dirtyEdges))
-	edges := make([]store.EdgeUpsert, 0, len(e.dirtyEdges))
-	for k := range e.dirtyEdges {
+	needEdges := e.dirtyEdges
+	if includeCounters && len(e.touchEdges) > 0 {
+		needEdges = make(map[edgeKey]bool, len(e.dirtyEdges)+len(e.touchEdges))
+		for k := range e.dirtyEdges {
+			needEdges[k] = true
+		}
+		for k := range e.touchEdges {
+			needEdges[k] = true
+		}
+	}
+	edgeKeys := make([]edgeKey, 0, len(needEdges))
+	edges := make([]store.EdgeUpsert, 0, len(needEdges))
+	for k := range needEdges {
 		ed := e.edges[k]
 		if ed == nil {
 			continue
@@ -385,7 +434,7 @@ func (e *Engine) Flush() error {
 	// concurrent map read and map write —— Go 运行时直接 fatal，recover 拦不住，
 	// 整个进程当场退出（V1.5.1 就是这么崩的）。写库失败时用 remarkOffsetsDirty 放回去。
 	offs := make(map[string]store.SessionOffset, len(e.sessions))
-	if e.sessionDirty {
+	if e.sessionDirty && includeCounters {
 		for k, ss := range e.sessions {
 			if ss == nil || !ss.dirty {
 				continue
@@ -396,21 +445,32 @@ func (e *Engine) Flush() error {
 			}
 			ss.dirty = false
 		}
+		e.sessionDirty = false
 	}
+	// 结构变更无论哪一档都要清；计数刷新只在真的写出去之后才清。
 	e.dirtyNodes = map[int64]bool{}
 	e.dirtyEdges = map[edgeKey]bool{}
-	e.sessionDirty = false
+	var prevTouchNodes map[int64]bool
+	var prevTouchEdges map[edgeKey]bool
+	if includeCounters {
+		// 先把旧集合留一份：写库失败要原样放回去，否则这段时间的计数刷新就永久丢了。
+		prevTouchNodes, prevTouchEdges = e.touchNodes, e.touchEdges
+		e.touchNodes = map[int64]bool{}
+		e.touchEdges = map[edgeKey]bool{}
+	}
 	e.mu.Unlock()
 
 	if len(nodes) > 0 {
 		if err := st.UpsertNodes(nodes); err != nil {
 			e.remarkDirty(nodeIDs, edgeKeys)
+			e.remarkTouch(prevTouchNodes, prevTouchEdges)
 			return err
 		}
 	}
 	if len(edges) > 0 {
 		if err := st.UpsertEdges(edges); err != nil {
 			e.remarkDirty(nil, edgeKeys)
+			e.remarkTouch(prevTouchNodes, prevTouchEdges)
 			return err
 		}
 	}
@@ -420,11 +480,27 @@ func (e *Engine) Flush() error {
 		// 去 e.sessions 里找指针（那正是崩溃的来源）。
 		if err := st.SaveSessionOffsets(offs); err != nil {
 			e.remarkOffsetsDirty(offs)
+			e.remarkTouch(prevTouchNodes, prevTouchEdges)
 			return err
 		}
 		e.pruneOffsets(st)
 	}
 	return nil
+}
+
+// remarkTouch 落盘失败时把"计数刷新"集合放回去（调用方不持锁）。
+func (e *Engine) remarkTouch(nodes map[int64]bool, edges map[edgeKey]bool) {
+	if len(nodes) == 0 && len(edges) == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id := range nodes {
+		e.touchNodes[id] = true
+	}
+	for k := range edges {
+		e.touchEdges[k] = true
+	}
 }
 
 // remarkOffsetsDirty 落盘失败时把基准重新标脏，等待下一轮重试。
@@ -494,8 +570,16 @@ func (e *Engine) remarkDirty(nodeIDs []int64, edgeKeys []edgeKey) {
 	}
 }
 
-// RunPersist 启动后台节流落盘（建议 2s 一次）：只在定时器到期时批量写，
-// ctx 取消时补一次 flush，保证优雅退出不丢数据。未绑定存储则不启动。
+// RunPersist 启动后台节流落盘（建议 2s 一次）。
+//
+// 两档节奏：
+//   - 每一拍只写结构变更（新节点/新边/属性变化）——这些必须尽快落盘，
+//     否则重启后会凭空少一批设备；
+//   - 每 counterEvery 拍（默认 60 秒）额外写一次计数刷新（last_seen、边字节数、
+//     会话增量基准）——这些晚一分钟没有任何业务影响，但每 2 秒写一遍会把
+//     写锁占满，把探针上报拖到秒级。
+//
+// ctx 取消时补一次全量 flush，保证优雅退出不丢数据。未绑定存储则不启动。
 func (e *Engine) RunPersist(ctx context.Context, interval time.Duration) {
 	if e.persist == nil {
 		return
@@ -503,9 +587,15 @@ func (e *Engine) RunPersist(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+	// counterEvery：按"时间"而不是"拍数"算，这样 interval 改了节奏也不会走样。
+	counterEvery := 1
+	if every := int((60 * time.Second) / interval); every > 1 {
+		counterEvery = every
+	}
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
+		tick := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -514,7 +604,8 @@ func (e *Engine) RunPersist(ctx context.Context, interval time.Duration) {
 				}
 				return
 			case <-t.C:
-				if err := e.Flush(); err != nil {
+				tick++
+				if err := e.flush(tick%counterEvery == 0); err != nil {
 					log.Printf("[topology] 拓扑落盘失败: %v", err)
 				}
 			}
@@ -612,7 +703,7 @@ func (e *Engine) Ingest(s *model.Session) {
 	// 判据是三个条件同时成立：新快照的 FirstSeen 晚于**上一次快照的 LastSeen**
 	// （时间上不重叠，物理上才可能是同一条五元组上的另一条连接）且累计值变小。
 	//
-	// 1.6.0 修正：原来比的是 FirstSeen 是否比上一次的 FirstSeen 晚。同一条会话被两个
+	// 1.6.1 修正：原来比的是 FirstSeen 是否比上一次的 FirstSeen 晚。同一条会话被两个
 	// 观察者（本地抓包 + 探针）分别上报时，两边的 FirstSeen 天生差几微秒到几秒、累计值
 	// 也可能一边多一边少，旧判据会把它当成新连接把 st.bytes 清零，于是整条会话的流量被
 	// 重复计入一次，下一次上报又按旧值求差——数字来回跳，越跳越大。
@@ -717,6 +808,8 @@ func (e *Engine) Ingest(s *model.Session) {
 		}
 		e.nextEdgeID++
 		e.edges[ek] = edge
+		// 新边是结构变更：必须走快通道，否则新出现的连接要等一分钟才落盘。
+		e.dirtyEdges[ek] = true
 	}
 	edge.Bytes += deltaBytes
 	edge.Packets += deltaPackets
@@ -727,15 +820,13 @@ func (e *Engine) Ingest(s *model.Session) {
 	if s.FirstSeen.Before(edge.FirstSeen) {
 		edge.FirstSeen = s.FirstSeen
 	}
-	e.dirtyEdges[ek] = true
+	// 只是字节/包数在累加 → 走慢通道（见 touchEdges 注释）。
+	e.touchEdges[ek] = true
 
 	// 更新节点活跃时间（变更即标记脏，节流 flush 时批量落盘）
 	for _, id := range []int64{srcID, dstID} {
 		if n := e.nodes[id]; n != nil {
-			if s.LastSeen.After(n.LastSeen) {
-				n.LastSeen = s.LastSeen
-				e.dirtyNodes[id] = true
-			}
+			// last_seen 的推进已经由 nodeForLocked 记进慢通道，这里只管结构性的变化。
 			if s.FirstSeen.Before(n.FirstSeen) {
 				n.FirstSeen = s.FirstSeen
 				e.dirtyNodes[id] = true
@@ -830,11 +921,17 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 			}
 			if now.After(n.LastSeen) {
 				n.LastSeen = now
+				// 只是活跃时间前进 → 慢通道（见 touchNodes 注释）。
+				e.touchNodes[id] = true
 			}
 			return id
 		}
 	}
 	if id, ok := e.ipNode[ip]; ok {
+		if n := e.nodes[id]; n != nil && now.After(n.LastSeen) {
+			n.LastSeen = now
+			e.touchNodes[id] = true
+		}
 		if mac != "" {
 			e.macNode[mac] = id
 			if e.nodes[id].MAC == "" {
@@ -856,6 +953,7 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 			n := e.nodes[id]
 			if now.After(n.LastSeen) {
 				n.LastSeen = now
+				e.touchNodes[id] = true
 			}
 			return id
 		}

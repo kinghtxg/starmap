@@ -86,9 +86,7 @@ func (r intelPushRecord) score() int {
 func (r intelPushRecord) tags() []string {
 	out := r.Tags
 	if strings.TrimSpace(r.Tag) != "" {
-		out = append(out, strings.FieldsFunc(r.Tag, func(c rune) bool {
-			return c == '|' || c == ',' || c == ';'
-		})...)
+		out = append(out, strings.FieldsFunc(r.Tag, func(c rune) bool { return c == '|' || c == ',' || c == ';' })...)
 	}
 	return out
 }

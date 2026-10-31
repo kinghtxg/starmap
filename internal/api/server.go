@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -102,16 +103,21 @@ type Server struct {
 	assetMu       sync.Mutex
 	assetSyncing  bool
 	lastAssetSync time.Time
-	// assetDone 是"正在跑的那一轮同步"的完成信号（跑完即 close）。
-	// 读接口靠它等一轮正在进行的同步结束：探针上报把同步推到后台之后，
-	// 用户紧接着打开资产页，不该拿到一份"同步还没跑完"的旧列表。
-	assetDone chan struct{}
 
 	// 白名单短缓存（V1.5）：拓扑每次刷新都要判断"这些节点是否已加白"，
 	// 逐个查库没必要；但改完白名单要能立刻生效，所以 TTL 只取 2 秒。
 	wlMu      sync.Mutex
 	wlEntries []model.WhitelistEntry
 	wlAt      time.Time
+
+	// 端口落库节流（V1.6）：见 portWriteTTL。
+	portMu    sync.Mutex
+	portWrote map[string]time.Time
+	portSwept time.Time
+
+	// 探针心跳与上报审计的节流（V1.6）：见 probeHeartbeatTTL。
+	probeMu    sync.Mutex
+	probeWrote map[string]time.Time
 
 	// 威胁情报客户端（V1.5）：配置可在运行期改，指纹变了就重建客户端。
 	tiMu sync.Mutex
@@ -649,7 +655,6 @@ func primaryNodeIP(n *model.Node) string {
 		return ""
 	}
 	ip := n.IPs[0]
-	// 外部聚合节点存的是 /24，取网络地址
 	if i := strings.IndexByte(ip, '/'); i >= 0 {
 		return ip[:i]
 	}
@@ -1310,6 +1315,14 @@ func (s *Server) ingestProbe(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "packets 与 flows 均为空")
 		return
 	}
+	// 分段计时：上报是一秒十几次的高频路径，一旦某一段变成 O(全局规模)，
+	// 现场只能看到"上报要 3 秒"，看不出是哪一段。只在偏慢时输出。
+	started := time.Now()
+	var segIngest struct {
+		flows, probe, topo, audit time.Duration
+	}
+	mark := func() time.Time { return time.Now() }
+
 	baseTs := report.SentAt
 	if baseTs.IsZero() {
 		baseTs = report.Ts
@@ -1342,6 +1355,7 @@ func (s *Server) ingestProbe(c *gin.Context) {
 	// 探针每 5 秒把同一条会话的累计值重发一遍，服务端就再累加一遍。
 	// 一条 3MB 的连接报 300 次就是 900MB，整库能被撑到几百 GB，
 	// 而界面上只是"流量很大"，没有任何告警。
+	flowsStart := mark()
 	for i := range report.Flows {
 		f := &report.Flows[i]
 		if f.Location == "" {
@@ -1357,9 +1371,11 @@ func (s *Server) ingestProbe(c *gin.Context) {
 		}
 	}
 	atomic.AddInt64(&s.packetsTotal, int64(accepted))
+	segIngest.flows = mark().Sub(flowsStart)
 
 	// 探针注册（V1.3）：记录探针位置，供拓扑按位置归纳
-	if s.d.Store != nil {
+	probeStart := mark()
+	if s.d.Store != nil && s.allowProbeWrite(report.ProbeID) {
 		_ = s.d.Store.UpsertProbe(&model.Probe{
 			ProbeID:  report.ProbeID,
 			Name:     report.Name,
@@ -1367,14 +1383,33 @@ func (s *Server) ingestProbe(c *gin.Context) {
 			LastSeen: time.Now(),
 		})
 	}
+	segIngest.probe = mark().Sub(probeStart)
 
-	sessions := s.syncTopology()
+	topoStart := mark()
+	sessions, topoSeg := s.syncTopologyTimed()
+	segIngest.topo = mark().Sub(topoStart)
 	// 检测放到后台：上报是高频路径，同步跑一轮全量检测会让单次上报的耗时
 	// 等于一轮检测（实测 1000 会话 13 秒、3000 会话 42 秒），探针会被自己的上报拖死。
 	// 这里只踢一脚，由 Detector.Run 在 2 秒内合并执行；事件照旧会出现在告警页。
 	s.kickDetection()
-	s.d.Reviewer.Audit(s.actor(c), "ingest_probe", report.ProbeID,
-		"accepted="+strconv.Itoa(accepted))
+	auditStart := mark()
+	// 审计也按探针节流：每秒十几次"上报了一条"的审计记录没有信息量，
+	// 却是一次实打实的写事务——它排在写锁队列里，把上报本身一起拖慢。
+	if s.allowProbeWrite("audit:" + report.ProbeID) {
+		s.d.Reviewer.Audit(s.actor(c), "ingest_probe", report.ProbeID,
+			"accepted="+strconv.Itoa(accepted))
+	}
+	segIngest.audit = mark().Sub(auditStart)
+
+	if el := time.Since(started); el > 500*time.Millisecond {
+		ms := func(d time.Duration) int64 { return d.Milliseconds() }
+		log.Printf("[ingest] 单次上报偏慢：%v（flows %d、新会话 %d）"+
+			" 分段：flows=%dms probe=%dms topo=%dms[drain=%dms engine=%dms save=%dms ports=%dms assets=%dms] audit=%dms",
+			el.Round(time.Millisecond), len(report.Flows), sessions,
+			ms(segIngest.flows), ms(segIngest.probe), ms(segIngest.topo),
+			ms(topoSeg.drain), ms(topoSeg.engine), ms(topoSeg.save),
+			ms(topoSeg.ports), ms(topoSeg.assets), ms(segIngest.audit))
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"accepted": accepted,
 		"total":    len(report.Packets) + len(report.Flows),
@@ -1527,10 +1562,24 @@ func (s *Server) ingestPCAP(c *gin.Context) {
 
 // syncTopology 把聚合器会话增量灌入拓扑引擎并持久化新会话，返回会话总数。
 func (s *Server) syncTopology() int {
+	n, _ := s.syncTopologyTimed()
+	return n
+}
+
+// topoSegments 上报路径各段耗时（只在偏慢时输出，见 ingestProbe）。
+type topoSegments struct {
+	drain, engine, save, ports, assets time.Duration
+}
+
+func (s *Server) syncTopologyTimed() (int, topoSegments) {
+	var seg topoSegments
 	if s.d.Aggregator == nil {
-		return 0
+		return 0, seg
 	}
+	t0 := time.Now()
 	res := s.d.Aggregator.DrainNow()
+	seg.drain = time.Since(t0)
+	t0 = time.Now()
 	// 首轮抽出的会话才落库：去重判定已收敛在聚合器内部（V1.0），
 	// 外层不再维护 savedSessions 这张只会越长越大的表。
 	// 本批统一收齐后一次事务写入——逐条写等于每行一次提交，
@@ -1543,31 +1592,23 @@ func (s *Server) syncTopology() int {
 			fresh = append(fresh, e.Session)
 		}
 	}
+	seg.engine = time.Since(t0)
+	t0 = time.Now()
 	if len(fresh) > 0 {
 		_ = s.d.Store.SaveSessions(fresh)
 	}
-	// 只处理**本轮有变化的会话**，不再拿全表。
-	//
-	// 原来这里是 res.Sessions()：把 3 万条会话整表拷一份，交给
-	// extractPortsFromSessions 全量重算一遍端口，再 UpsertPorts 全量写一次。
-	// 于是每来一批流量就重写一遍全表端口记录——纯粹的写放大，而且随数据量
-	// 线性变慢。实测 32k 会话时探针上报 p50 359ms、p95 5.1s（8 路并发上报），
-	// 探针会跟着一起堵，最后表现为"网络里明明有流量，界面上不更新"。
-	//
-	// 语义上不比原来差：res.Entries 就是"自上次抽取以来有更新的会话"，
-	// 未变化的会话算出来的端口记录与库里已有的完全一致，重算一遍没有意义。
-	changed := make([]model.Session, 0, len(res.Entries))
-	for i := range res.Entries {
-		changed = append(changed, res.Entries[i].Session)
-	}
+	seg.save = time.Since(t0)
+	sessions := res.Sessions()
+	t0 = time.Now()
 	// 流量角度：提取内网主机端口（V1.2）
-	s.extractPortsFromSessions(changed)
+	s.extractPortsFromSessions(sessions)
+	seg.ports = time.Since(t0)
+	t0 = time.Now()
 	// 节点 → 资产同步（账外资产自动登记，V1.2）
-	// 用节流版：探针上报是高频路径，每批都跑全量同步会把单连接占死。
-	s.syncAssetsInBackground()
-	// 返回会话总数：res.Active 是抽取后的活跃会话数，与原来 len(res.Sessions())
-	// 同义，但不需要为了一个数字拷整表。
-	return res.Active
+	// 用节流版：探针上报是高频路径，每批都跑全量同步会把写锁占死。
+	s.syncAssetsThrottledAfter(assetSyncIngestInterval)
+	seg.assets = time.Since(t0)
+	return len(sessions), seg
 }
 
 // evaluateAsync 同步执行一轮检测评估，返回新建事件数。
@@ -2475,10 +2516,20 @@ func (s *Server) listAssets(c *gin.Context) {
 
 // ---------- 资产同步 ----------
 
-// assetSyncInterval 两次全量同步之间的最小间隔。
+// assetSyncInterval 两次全量同步之间的最小间隔（页面触发）。
 // 5 秒是个折中：资产页连续刷新（F5 连按、多标签页）不会每次都跑一遍全量同步，
 // 而新发现的设备最迟 5 秒后就能在资产库里看到——比"每次请求都同步"的代价低两个数量级。
 const assetSyncInterval = 5 * time.Second
+
+// assetSyncIngestInterval 上报路径触发资产同步的最小间隔（V1.6）。
+//
+// 全量同步是"把全部主机 upsert 一遍"，6 万台就是 6 万行、占写锁约 2.8 秒。
+// 上报路径每秒十几次，若按 5 秒节奏跑，写锁一半以上的时间被它占着，
+// 探针上报会稳定排到 3 秒（实测）。
+//
+// 30 秒是这里的正确标尺：资产台账是"人看的清单"，慢 30 秒没有任何影响；
+// 而它一跑就卡住整条上报链路，是秒级、看得见的影响。两边权衡很清楚。
+const assetSyncIngestInterval = 30 * time.Second
 
 // syncAssetsThrottled 带节流与防重入的全量同步。
 //
@@ -2486,68 +2537,27 @@ const assetSyncInterval = 5 * time.Second
 // 1 万台主机就是 2 万次 SQLite 往返；而 store 用单连接（MaxOpenConns=1），
 // 这段时间里所有其它请求（拓扑、事件、端口）都在排队。这不是"慢一点"，是整站卡住。
 //
-// 并发进来的第二个调用不会重复跑一遍：要么等正在跑的那一轮结束（拿到的是
-// 刚同步完的数据），要么直接返回（节流窗口内，最多旧 5 秒）。
-func (s *Server) syncAssetsThrottled() {
-	ch, owner := s.beginAssetSync()
-	if owner {
-		s.syncAssets()
-		s.endAssetSync(ch)
-		return
-	}
-	if ch != nil {
-		// 有一轮后台同步在跑：等它结束。探针上报把它推到后台之后，
-		// 用户紧接着打开资产页，不该看到一份"同步还没跑完"的列表。
-		<-ch
-	}
-}
+// 并发进来的第二个调用直接返回（读到的是上一轮结果）：宁可让访问者看到 5 秒前的资产快照，
+// 也不要让它排队等 2 万次 SQL——后者会把连接池占满，连带把只读接口一起拖死。
+func (s *Server) syncAssetsThrottled() { s.syncAssetsThrottledAfter(assetSyncInterval) }
 
-// beginAssetSync 判断这一轮该不该跑：
-//   - owner=true  → 调用方负责跑，跑完必须调用 endAssetSync(ch)
-//   - owner=false → 不需要跑；ch 非 nil 表示有一轮正在跑，可以等它
-func (s *Server) beginAssetSync() (ch chan struct{}, owner bool) {
+// syncAssetsThrottledAfter 带自定义最小间隔的节流同步。
+func (s *Server) syncAssetsThrottledAfter(min time.Duration) {
 	s.assetMu.Lock()
-	defer s.assetMu.Unlock()
-	if s.assetSyncing {
-		return s.assetDone, false
-	}
-	if time.Since(s.lastAssetSync) < assetSyncInterval {
-		return nil, false
+	if s.assetSyncing || time.Since(s.lastAssetSync) < min {
+		s.assetMu.Unlock()
+		return
 	}
 	s.assetSyncing = true
-	// 先把时间戳推进，避免这一轮还没跑完时每个请求又各起一个 goroutine
 	s.lastAssetSync = time.Now()
-	s.assetDone = make(chan struct{})
-	return s.assetDone, true
-}
-
-// endAssetSync 收尾：放开名额并唤醒等着的人。
-func (s *Server) endAssetSync(ch chan struct{}) {
-	s.assetMu.Lock()
-	s.assetSyncing = false
-	s.assetDone = nil
 	s.assetMu.Unlock()
-	close(ch)
-}
 
-// syncAssetsInBackground 高频路径（探针上报）专用：触发的是一次后台同步，
-// 请求本身不等它。
-//
-// 全量资产同步是"所有节点 upsert 一遍"，3 万台主机即便分块提交也要上百毫秒
-// 到一秒。让一批流量上报去等它，等于把资产同步的耗时记在探针账上：探针看到
-// 服务端慢就退避，最后表现成"网里有流量但界面不更新"。
-//
-// 读接口仍然用阻塞版（syncAssetsThrottled）：用户点开资产页，就该看到含最新
-// 节点的列表，不能拿一份"同步还没跑完"的旧数据糊弄他。
-func (s *Server) syncAssetsInBackground() {
-	ch, owner := s.beginAssetSync()
-	if !owner {
-		return
-	}
-	go func() {
-		defer s.endAssetSync(ch)
-		s.syncAssets()
+	defer func() {
+		s.assetMu.Lock()
+		s.assetSyncing = false
+		s.assetMu.Unlock()
 	}()
+	s.syncAssets()
 }
 
 func (s *Server) assetStats(c *gin.Context) {
@@ -2856,9 +2866,82 @@ func (s *Server) extractPortsFromSessions(sessions []model.Session) {
 			})
 		}
 	}
-	if len(ports) > 0 {
+	if ports = s.filterPortWrites(ports); len(ports) > 0 {
 		_ = s.d.Store.UpsertPorts(ports)
 	}
+}
+
+// portWriteTTL 同一 (ip,port,proto) 的最短落库间隔。
+//
+// 端口记录是**资产台账**（这台机器开过哪些端口），不是会话流水：
+// 它的 last_seen 只要分钟级精度就够了。而探针每 5 秒把同一条会话重发一遍，
+// 原来的实现就每 5 秒把这些端口行连同 5 个索引重写一次。
+// 实测 9.5 万会话规模下，单次上报要写 400 行端口 ≈ 30ms 写锁时间，
+// 6.5 次上报/秒 = 写入路径 20% 的时间在重写没有变化的行；
+// 更糟的是 WAL 因此在 5 分钟内涨到 224MB，反过来把读写都拖慢。
+//
+// 3 分钟是"台账精度"与"写量"的折中：稳态下写量降到 1/100 以下，
+// 变更页（PortChanges）最长滞后 3 分钟，远小于它按天计算的窗口。
+const portWriteTTL = 3 * time.Minute
+
+// probeHeartbeatTTL 同一探针两次心跳/审计落库之间的最小间隔。
+//
+// 探针每 5 秒上报一次，心跳与审计各是一次独立写事务。9.5 万会话的规模下，
+// 单次上报被观测到 2.6~3.0 秒耗在"等写锁 + 写这一行"上——一行数据不值这个价，
+// 它只是在给写锁队列添堵。探针 last_seen 到分钟精度足够，审计留一条
+// "这台探针在报数"的记录即可，不必每 5 秒留一条。
+const probeHeartbeatTTL = time.Minute
+
+// allowProbeWrite 判断该键是否需要现在落库（TTL 节流）。
+func (s *Server) allowProbeWrite(key string) bool {
+	now := time.Now()
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probeWrote == nil {
+		s.probeWrote = make(map[string]time.Time, 16)
+	}
+	if at, ok := s.probeWrote[key]; ok && now.Sub(at) < probeHeartbeatTTL {
+		return false
+	}
+	s.probeWrote[key] = now
+	return true
+}
+
+// filterPortWrites 过滤掉刚刚写过的端口，只保留需要落库的。
+//
+// 用内存表而不是查库：查库同样要读事务，而且判定"是否需要写"本身不该产生 IO。
+// 表里只放 (ip,port,proto)，稳态规模等于端口总数（几千到几万），
+// 超过上限就整体清空重建——清了只会多写一轮，不会写错。
+func (s *Server) filterPortWrites(in []model.PortRecord) []model.PortRecord {
+	if len(in) == 0 {
+		return in
+	}
+	now := time.Now()
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
+	if s.portWrote == nil {
+		s.portWrote = make(map[string]time.Time, 1024)
+	}
+	// 顺手清理：过期条目留着只会让表无限长。
+	if time.Since(s.portSwept) > portWriteTTL {
+		for k, at := range s.portWrote {
+			if now.Sub(at) >= portWriteTTL {
+				delete(s.portWrote, k)
+			}
+		}
+		s.portSwept = now
+	}
+	out := make([]model.PortRecord, 0, len(in))
+	for i := range in {
+		p := &in[i]
+		k := p.IP + "|" + strconv.Itoa(p.Port) + "|" + p.Proto
+		if at, ok := s.portWrote[k]; ok && now.Sub(at) < portWriteTTL {
+			continue
+		}
+		s.portWrote[k] = now
+		out = append(out, *p)
+	}
+	return out
 }
 
 // 拓扑快照的安全阀（V1.5.2）。

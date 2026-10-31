@@ -51,9 +51,10 @@ func bulkFlows(n, startID int) []map[string]any {
 
 // TestProbeIngestLatencyDoesNotGrowWithState 上报延迟不得随会话规模线性增长。
 func TestProbeIngestLatencyDoesNotGrowWithState(t *testing.T) {
-	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	// -race 下整体慢 5~10 倍，2 秒的上界必然误报——跳过的是"耗时预算"这一条断言，
+	// 功能断言（状态码、eval_async）在别的用例里照跑。
 	if raceEnabled {
-		t.Skip("-race 构建下跳过耗时断言")
+		t.Skip("-race 下执行速度不可比，跳过耗时预算断言")
 	}
 	h, _ := newTestRouter(t, testCfg())
 
