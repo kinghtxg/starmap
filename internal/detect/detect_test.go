@@ -361,6 +361,10 @@ func TestUnknownEgressLearningPeriod(t *testing.T) {
 
 // ---------- 多网域融合 ----------
 
+// 域维度：同一台设备（同 MAC）的自有地址落在两个手工配置的业务域。
+//
+// 注意判定依据是**设备自己的地址**，不是"它访问过谁"——见下面的
+// TestMultiNetIgnoresPeerDomains。
 func TestMultiNet(t *testing.T) {
 	d, eng, st := newTestDetector(t, fullCfg())
 	eng.SetDomains([]model.NetDomain{
@@ -369,10 +373,10 @@ func TestMultiNet(t *testing.T) {
 	})
 	st.CreateDomain(&model.NetDomain{Name: "gov", CIDRs: []string{"10.0.0.0/8"}})
 	st.CreateDomain(&model.NetDomain{Name: "prod", CIDRs: []string{"192.168.0.0/16"}})
-	// 同节点跨两个内网域：192.168.1.10(prod) → 10.9.9.9(gov) + → 192.168.3.3(prod)
+	// 同一 MAC 同时拥有 prod 与 gov 的地址 = 一机两网
 	setSessions(d, eng,
-		bigSession("192.168.1.10", "10.9.9.9", "aa:bb:cc:50:00:01", 9001, base),
-		bigSession("192.168.1.10", "192.168.3.3", "aa:bb:cc:50:00:01", 9002, base),
+		bigSession("192.168.1.10", "8.8.8.8", "aa:bb:cc:50:00:01", 9001, base),
+		bigSession("10.9.9.9", "8.8.8.8", "aa:bb:cc:50:00:01", 9002, base),
 	)
 	created, _ := d.Evaluate()
 	found := false
@@ -382,10 +386,47 @@ func TestMultiNet(t *testing.T) {
 			if ev.Level != model.RiskHigh {
 				t.Fatalf("multi_net 应为 high，实际 %s", ev.Level)
 			}
+			if !strings.Contains(ev.Evidence["basis"], "domain") {
+				t.Fatalf("应按域维度(basis 含 domain)判定，实际 basis=%q", ev.Evidence["basis"])
+			}
+			if !strings.Contains(ev.Evidence["domains"], "gov") ||
+				!strings.Contains(ev.Evidence["domains"], "prod") {
+				t.Fatalf("domains 应包含 gov 与 prod，实际 %q", ev.Evidence["domains"])
+			}
 		}
 	}
 	if !found {
-		t.Fatal("跨 ≥2 网络域应产生 multi_net high 事件")
+		t.Fatal("同一设备自有地址跨 ≥2 网络域应产生 multi_net high 事件")
+	}
+}
+
+// 普通客户端跨域访问不算"一机两网"（v1.6.0 压测发现的误报风暴，回归用例）。
+//
+// 起因：旧实现把会话**对端**的域也算进设备的域集合，于是"10.x 的主机访问
+// 172.16.x 的服务"（默认域 gov 与 office 下最常见的业务流量）被判成
+// 一机两网 high。4 万节点的压测网络里，一轮评估产出 3.9 万个 high 事件，
+// 占全量候选的 99.7%，真正的事件全被埋掉，评估耗时也从 200ms 涨到 1.9s。
+func TestMultiNetIgnoresPeerDomains(t *testing.T) {
+	d, eng, st := newTestDetector(t, fullCfg())
+	domains := []model.NetDomain{
+		{Name: "gov", CIDRs: []string{"10.0.0.0/8"}},
+		{Name: "office", CIDRs: []string{"172.16.0.0/12"}},
+		{Name: "internet", CIDRs: []string{"0.0.0.0/0"}},
+	}
+	eng.SetDomains(domains)
+	for i := range domains {
+		st.CreateDomain(&domains[i])
+	}
+	// 单地址主机，分别访问 office 段与 gov 段——这是正常工作
+	setSessions(d, eng,
+		bigSession("10.1.1.5", "172.16.3.9", "aa:bb:cc:80:00:01", 9501, base),
+		bigSession("10.1.1.5", "10.9.9.9", "aa:bb:cc:80:00:01", 9502, base),
+	)
+	created, _ := d.Evaluate()
+	for _, ev := range created {
+		if ev.Type == model.EventTypeMultiNet {
+			t.Fatalf("仅仅访问了另一个网段不等于接入了另一张网，不应触发 multi_net，实际 evidence=%v", ev.Evidence)
+		}
 	}
 }
 

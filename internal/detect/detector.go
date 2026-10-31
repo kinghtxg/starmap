@@ -150,6 +150,7 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 	var seg struct {
 		copy, index, rules, wl, dedup, loop, write time.Duration
 		ruleCost                                   [6]time.Duration
+		ruleHits                                   [6]int
 	}
 	mark := func() time.Time { return time.Now() }
 
@@ -169,8 +170,10 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 	}
 	for i, fn := range rules {
 		start := mark()
-		candidates = append(candidates, fn(rc)...)
+		hits := fn(rc)
 		seg.ruleCost[i] = mark().Sub(start)
+		seg.ruleHits[i] = len(hits)
+		candidates = append(candidates, hits...)
 	}
 	t3 := mark()
 
@@ -198,21 +201,21 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 			ms := func(d time.Duration) int64 { return d.Milliseconds() }
 			log.Printf("[detect] 单轮评估偏慢：%v（会话 %d、节点 %d、候选 %d、新建 %d、证据更新 %d）"+
 				" 分段：copy=%dms index=%dms rules=%dms[frp=%d clash=%d rev=%d egress=%d multinet=%d xff=%d] "+
+				"规则产出：frp=%d clash=%d rev=%d egress=%d multinet=%d xff=%d "+
 				"wl=%dms dedup=%dms loop=%dms write=%dms",
 				el.Round(time.Millisecond), len(sessions), len(rc.nodes), len(candidates), len(created), len(pendingUpdates),
 				ms(seg.copy), ms(seg.index), ms(seg.rules),
 				ms(seg.ruleCost[0]), ms(seg.ruleCost[1]), ms(seg.ruleCost[2]),
 				ms(seg.ruleCost[3]), ms(seg.ruleCost[4]), ms(seg.ruleCost[5]),
+				seg.ruleHits[0], seg.ruleHits[1], seg.ruleHits[2],
+				seg.ruleHits[3], seg.ruleHits[4], seg.ruleHits[5],
 				ms(seg.wl), ms(seg.dedup), ms(seg.loop), ms(seg.write))
 		}
 	}()
-	// 本轮需要落库的证据变更，统一在末尾一次事务提交。
-	var pendingUpdates []evidenceUpdate
-	// 本轮新建的事件也攒起来一次事务写入：一条一条 INSERT 是自动提交，
-	// 每台新主机就要一次落盘；网络在长，这条路径的写次数是没有上限的。
-	var pendingCreates []*model.RiskEvent
 	// 去重索引一轮只建一次：原实现每个候选查两次库，O(候选数 × 历史事件数)。
 	dedup := d.buildDedupIndex(now)
+	t5 := mark()
+	seg.dedup = t5.Sub(t4)
 	for i := range candidates {
 		ev := &candidates[i]
 		node := rc.nodeByID(ev.NodeID)
@@ -249,6 +252,8 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 		dedup[dedupKey{typ: ev.Type, nodeID: ev.NodeID}] = ev
 		pendingCreates = append(pendingCreates, ev)
 	}
+	t6 := mark()
+	seg.loop = t6.Sub(t5)
 
 	if len(pendingCreates) > 0 {
 		ids, err := d.Store.CreateEvents(pendingCreates)
@@ -275,6 +280,7 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 			return created, err
 		}
 	}
+	seg.write = mark().Sub(t6)
 	return created, nil
 }
 
