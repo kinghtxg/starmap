@@ -11,3 +11,8 @@ coverage-all.out
 coverage.html
 dist/
 smoketest.db*
+
+# 任何 SQLite 运行产物都不入库（曾误提交过诊断库）
+*.db
+*.db-wal
+*.db-shm

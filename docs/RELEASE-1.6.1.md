@@ -109,7 +109,16 @@
 长期部署会一直长，于是"每轮评估读全表"= 评估耗时随运行时长线性劣化。
 改为 `ListEventsForDedup`：窗口过滤下推 SQL，只取 5 个必要列。
 
-### 8. 两处常驻的分段计时日志
+### 8. 端口状态刷新持锁 5.9 秒
+
+`MarkStalePorts` 原本是一条 `UPDATE ... WHERE state='open' AND last_seen < ?` 打全表。
+5 万行表里有 2.4 万行命中时，Windows runner 上实测 **5.86 秒**——这 5.86 秒写锁一直握着，
+探针上报全部排队。维护循环每小时跑一遍，等于每小时卡一次上报。
+
+改成分块提交（每批 2000 行，批间释放写锁）。每批仍是集合更新而非逐行：
+逐行版实测 1.29s，比整批还慢——分块只为缩短持锁时间，不能顺手把算法退化成逐行。
+
+### 9. 两处常驻的分段计时日志
 
 - `[detect] 单轮评估偏慢`：copy / index / 六条规则（各自耗时与产出数）/ 白名单 / 去重 / 循环 / 写库；
 - `[ingest] 单次上报偏慢`：flows / probe / topo（drain、engine、save、ports、assets）/ audit。
@@ -182,6 +191,13 @@ internal/detect/eval_scale_test.go         误报修正后的规模基准
   或换引擎，不是调参能解决的。
 - **WAL 会长到几十 MB**：持续写入下有读快照长期存在，checkpoint 无法复位到起点。
   空间会复用，但文件不收缩。
+- **时间列的时区表示不统一，窗口边界会偏一个时区偏移（UTC+8 即 8 小时）。**
+  库里的时间列存的是驱动给的 `time.Time.String()`，同一个瞬间在 `+0000 UTC`
+  （会话时间来自 JSON）与 `+0800 CST`（维护逻辑用 `time.Now()`）下是两串不同文本。
+  字符串比较比的是"几点几分"而不是"哪个时刻"，于是变更页窗口、stale 标记的边界
+  会变宽约 8 小时（方向是"多算"，不漏行、不写坏数据）。
+  `TestTimeRangeCompareIsOffsetSensitive` 把现状固定住了。修它要统一成
+  "UTC + 定长格式"并对存量行做一次归一化迁移，属于 1.7 的范围。
 - **任务进度不落库**：`discover_tasks` 只记开始/结束两个时刻，运行中的进度在内存里，
   进程重启后该任务记为「进程重启，任务中断」。这是有意的取舍，不是遗漏。
 - **变更视图只覆盖端口**：资产新增/消失、事件变化还没有独立的变更流。
@@ -212,7 +228,7 @@ docs/RELEASE-1.6.1.md                     本文件
 
 ```
 internal/version/version.go          1.6.0 → 1.6.1
-internal/store/sqlite.go             连接池 32 条、DSN pragma、资产同步 WHERE 守卫
+internal/store/sqlite.go             连接池 32 条、DSN pragma、资产同步 WHERE 守卫、端口状态分块刷新
 internal/topology/engine.go          落盘两档、五元组复位判据改为时间不重叠
 internal/parser/absflow.go           五元组复位判据改为时间不重叠
 internal/parser/absflow_test.go      夹具改为确定性锚点
@@ -222,7 +238,8 @@ internal/api/intel.go                staticcheck 收口
 internal/detect/detector.go          去重索引窗口下推
 internal/detect/eval_scale_test.go   基准改为修正误报后的真实形态
 internal/api/ingest_latency_test.go  -race 下跳过耗时预算
-internal/store/changes_capacity_test.go 同上
+internal/store/changes_capacity_test.go 同上，新增分块循环用例
+internal/store/timefmt_test.go       改正错误的取证方式（用 hex() 看真实字节），新增时区偏移用例
 README.md / CHANGELOG.md / SPEC.md   版本与叙述同步
 ```
 

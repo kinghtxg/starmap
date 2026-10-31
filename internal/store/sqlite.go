@@ -1797,18 +1797,44 @@ const portUpsertSQL = `INSERT INTO ports(node_key,ip,port,proto,service,state,so
 // 真离线那么久的机器，本来就该走离线清理，端口跟着变 stale 正好一致。
 const PortStaleAfter = 30 * 24 * time.Hour
 
+// stalePortChunk 单次提交标记的行数。
+//
+// 一次 UPDATE 打完 5 万行会把这期间的所有写入挡在门外：Windows runner 上实测
+// 24k 行要 5.9 秒，等于维护循环每跑一轮，探针上报就卡 5.9 秒。分块后每批只持锁
+// 几十毫秒，批间让出写锁，上报最多被推迟一小段。
+//
+// 每批仍然是**集合更新**（不是逐行 prepared statement）：逐行版实测 1.29s，
+// 比整批还慢——一次集合更新的代价远小于两万次语句执行。分块只为缩短持锁时间，
+// 不能顺手把算法退化成逐行。
+//
+// 声明成 var 而不是 const，是为了让用例能把它调小去验证"循环边界与末批余数"，
+// 生产代码不应修改它。
+var stalePortChunk = 5000
+
 // MarkStalePorts 把超过 staleAfter 未再观测到的端口标记为 stale，返回受影响行数。
 //
 // 只改 state，不删行：曾经开放过这件事本身是证据（尤其是事后回溯），
 // 但必须让它和"当前开放"在界面上区分开。
+//
+// 分块提交（V1.6.1）：每批独立事务，批间释放写锁。子查询先物化再更新，
+// 所以 LIMIT 的语义不会随语句内部执行顺序漂移；被改掉的行下一轮不再满足
+// state='open'，扫描范围自然收窄，直到没有候选为止。
 func (s *Store) MarkStalePorts(before time.Time) (int64, error) {
-	res, err := s.db.Exec(
-		`UPDATE ports SET state='stale' WHERE state='open' AND last_seen < ?`, before)
-	if err != nil {
-		return 0, err
+	const sqlStmt = `UPDATE ports SET state='stale'
+	                 WHERE id IN (SELECT id FROM ports
+	                              WHERE state='open' AND last_seen < ? LIMIT ?)`
+	var total int64
+	for {
+		res, err := s.db.Exec(sqlStmt, before, stalePortChunk)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n == 0 {
+			return total, nil
+		}
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
 }
 
 // UpsertPort 写入/更新单条端口记录。
