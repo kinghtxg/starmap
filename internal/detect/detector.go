@@ -320,23 +320,26 @@ type dedupIndex map[dedupKey]*model.RiskEvent
 // buildDedupIndex 一次性装载 24h 窗口内的 pending/confirmed 事件。
 // 同一 (类型,节点) 有多个历史事件时保留最新的（原实现按 id DESC 排序，
 // 取到的也是最新那条，语义保持一致）。
+//
+// 窗口过滤下推到 SQL：事件表没有保留期，长期部署会一直长，
+// 每轮评估读全表 = 评估耗时随运行时长线性劣化。查询失败时退化为空索引
+// ——宁可多建一条事件，也不要漏报。
 func (d *Detector) buildDedupIndex(now time.Time) dedupIndex {
 	idx := make(dedupIndex, 256)
-	for _, st := range []string{model.EventStatusPending, model.EventStatusConfirmed} {
-		evs, err := d.Store.ListEvents(st, "")
-		if err != nil {
-			// 查询失败时退化为空索引：宁可多建一条事件，也不要漏报。
+	evs, err := d.Store.ListEventsForDedup(now.Add(-DedupWindow))
+	if err != nil {
+		return idx
+	}
+	for i := range evs {
+		ev := &evs[i]
+		// SQL 已经按窗口筛过；这里再挡一道，免得库里的时钟偏移让一条
+		// 老事件"复活"，把新事件吃掉。
+		if now.Sub(ev.CreatedAt) >= DedupWindow {
 			continue
 		}
-		for i := range evs {
-			ev := &evs[i]
-			if now.Sub(ev.CreatedAt) >= DedupWindow {
-				continue
-			}
-			k := dedupKey{typ: ev.Type, nodeID: ev.NodeID}
-			if old, ok := idx[k]; !ok || ev.ID > old.ID {
-				idx[k] = ev
-			}
+		k := dedupKey{typ: ev.Type, nodeID: ev.NodeID}
+		if old, ok := idx[k]; !ok || ev.ID > old.ID {
+			idx[k] = ev
 		}
 	}
 	return idx

@@ -230,17 +230,57 @@ CREATE INDEX IF NOT EXISTS idx_disc_tasks_started ON discover_tasks(started_at D
 CREATE INDEX IF NOT EXISTS idx_disc_tasks_status ON discover_tasks(status, started_at DESC);
 `
 
+// openDSN 给 SQLite 的 DSN 挂上连接级 pragma。
+//
+// 为什么要写进 DSN 而不是在 Open 里 Exec 一次：**pragma 是连接级的**，
+// 连接池里每开一条新连接都要重新设一遍，Exec 只能覆盖当时那一条。
+//
+//   - busy_timeout  —— 写锁被别人占着时等一会儿，而不是立刻返回 database is locked；
+//   - journal_mode  —— WAL：读不挡写、写不挡读（库级属性，写上只是保证新库也一致）；
+//   - synchronous=NORMAL —— WAL 下的推荐值。FULL 会在每次提交 fsync 一次，
+//     探针上报是每请求一个事务，于是"每 400 条报文一次磁盘同步"，
+//     真实网络下吞吐被 fsync 卡死。NORMAL 在 WAL 里已经能扛进程崩溃，
+//     只有操作系统掉电才可能丢最后几个事务，对流量日志是可接受的取舍；
+//   - _txlock=immediate —— 事务一开始就拿写锁。默认的 DEFERRED 事务若先读后写，
+//     锁升级失败时 SQLite 会**立刻**返回 SQLITE_BUSY（不理会 busy_timeout，
+//     否则就成了死锁），表现为偶发写失败。
+func openDSN(path string) string {
+	if path == ":memory:" || strings.HasPrefix(path, "file::memory:") {
+		return path // 内存库不开连接池，见 Open
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep +
+		"_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_txlock=immediate"
+}
+
 // Open 打开（不存在则创建）SQLite 数据库并建表。
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", openDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
-	// SQLite 单写者，限制连接数避免 database is locked
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("设置 WAL 失败: %w", err)
+	// 连接数策略（V1.6.0 重做）。
+	//
+	// 旧实现是 SetMaxOpenConns(1)：理由是"SQLite 单写者，多连接会 database is locked"。
+	// 单写者是对的，但**读不需要写锁**——WAL 下读走快照，根本不该排进写队列。
+	// 把连接限制成 1 条，等于让全进程的读都排在写事务后面：
+	// 实测 68k 会话、探针持续上报时，一条"查白名单"的 SQL 要等 2.4 秒才拿到连接，
+	// 而它本身只返回 0 行；评估器每轮因此固定多花 2~3 秒，
+	// 而这段时间又被算进"评估慢"，把问题指错了方向。
+	//
+	// 现在：写仍然互斥（靠 SQLite 的写锁 + busy_timeout 排队），读并发。
+	// 内存库(:memory:)必须保持 1 条连接——每条连接都是一个独立的内存数据库。
+	if path == ":memory:" || strings.HasPrefix(path, "file::memory:") {
+		db.SetMaxOpenConns(1)
+	} else {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -1167,7 +1207,42 @@ func (s *Store) GetEvent(id int64) (*model.RiskEvent, error) {
 	return e, err
 }
 
+// ListEventsForDedup 返回去重索引需要的事件行：窗口内的 pending/confirmed，
+// 只取 5 个必要列。
+//
+// 为什么单独开一个方法而不是复用 ListEvents：
+//
+//   - 去重只关心 (type, node_id) 与 evidence，标题/详情/node_key/复核意见全是白读的；
+//   - 24h 窗口必须由 SQL 过滤。事件表没有保留期，长期在线部署会一直长，
+//     而"每轮评估读全表"意味着评估耗时随运行时长线性劣化——开发机跑几小时
+//     看不出，现场跑一周就是"服务越用越卡"。
+//
+// 时间比较依赖"同一偏移下字符串序 == 时间序"（modernc 把 time.Time 绑成
+// RFC3339，见 timefmt_test.go 的锁定用例）。
+func (s *Store) ListEventsForDedup(since time.Time) ([]model.RiskEvent, error) {
+	rows, err := s.db.Query(
+		`SELECT id,type,node_id,evidence,created_at,updated_at FROM events
+		  WHERE status IN (?,?) AND created_at >= ? ORDER BY id`,
+		model.EventStatusPending, model.EventStatusConfirmed, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]model.RiskEvent, 0, 256)
+	for rows.Next() {
+		var e model.RiskEvent
+		var evidence string
+		if err := rows.Scan(&e.ID, &e.Type, &e.NodeID, &evidence, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		fromJSON(evidence, &e.Evidence)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ListEvents 按状态/类型筛选查询事件（空串表示不筛选）。
+
 // 无限量：内部统计与测试用。对外接口一律走 ListEventsPaged，避免一次拉全表。
 func (s *Store) ListEvents(status, evType string) ([]model.RiskEvent, error) {
 	return s.ListEventsPaged(EventFilter{Status: status, Type: evType}, 0, 0)
