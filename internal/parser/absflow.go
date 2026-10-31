@@ -58,8 +58,9 @@ type AbsFlow struct {
 //     谁大听谁的，不会因为某一路少算了就把已有数字打回去。
 //
 // 例外是"五元组被复用"：同一个客户端端口重新发起连接时探针会开一条新会话，
-// 累计值从 0 重来。判据是新会话的 FirstSeen 更晚且总量更小——这时候必须整体重置，
-// 否则新连接的流量会被旧连接的峰值一直压住，永远算不进去。
+// 累计值从 0 重来。判据是新会话的 FirstSeen 晚于旧会话的 LastSeen（时间上不重叠）
+// 且总量更小——这时候必须整体重置，否则新连接的流量会被旧连接的峰值一直压住，
+// 永远算不进去。
 func (a *Aggregator) IngestAbs(f *AbsFlow) {
 	if a == nil || f == nil || f.SrcIP == "" || f.DstIP == "" {
 		return
@@ -106,8 +107,15 @@ func (a *Aggregator) IngestAbs(f *AbsFlow) {
 	st.seenAt = now
 
 	total := f.BytesUp + f.BytesDown
-	// 五元组复用：FirstSeen 前移且总量更小 → 这是同一条四元组上的新连接。
-	reused := !f.FirstSeen.IsZero() && f.FirstSeen.After(ses.FirstSeen) && total < ses.BytesUp+ses.BytesDown
+	// 五元组复用：新连接的 FirstSeen 必须晚于**旧会话的 LastSeen**，也就是两者时间上
+	// 不重叠。一个五元组在同一时刻只可能属于一条连接，所以这是物理判据。
+	//
+	// 不能用「FirstSeen 比上一次的 FirstSeen 晚」当判据：同一条会话可能被两个观察者
+	// （本地抓包 + 探针，或两台探针）分别上报，两边的 FirstSeen 天生差几微秒到几秒，
+	// 累计值也可能一边多一边少。按旧判据会把它当成新连接整条复位，已经累计的流量
+	// 被一笔勾掉、下游的增量基准跟着退——正是这条注释要防的事。
+	reused := !f.FirstSeen.IsZero() && !ses.LastSeen.IsZero() &&
+		f.FirstSeen.After(ses.LastSeen) && total < ses.BytesUp+ses.BytesDown
 	if reused {
 		ses.FirstSeen = f.FirstSeen
 		ses.BytesUp, ses.BytesDown, ses.Packets = 0, 0, 0

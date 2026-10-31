@@ -608,13 +608,19 @@ func (e *Engine) Ingest(s *model.Session) {
 	// 五元组复用（V1.5.1）：同一个客户端端口重新发起连接时，聚合器那边是一条新会话，
 	// 累计值从 0 重新长。这时如果还按"比上次小就当成 0 增量"处理，这条新连接的全部
 	// 流量会被旧连接的峰值一直压住——要等它超过旧值才会重新计入，常见结果是整段消失。
-	// 判据必须是两个条件同时成立：FirstSeen 前移 **且** 累计值变小。
-	// 只看 FirstSeen 会误伤——有些采集路径每次上报都拿"现在"当 FirstSeen，
-	// 那样每次上报都会被判成新连接，流量直接翻倍，比原来的 bug 更糟。
-	// st.firstSeen 为零时（刚启动、恢复不到首次时间）一律不判定，否则会把已计入的
-	// 历史流量整笔再加一次——那正是重启翻倍的来源。
+	//
+	// 判据是三个条件同时成立：新快照的 FirstSeen 晚于**上一次快照的 LastSeen**
+	// （时间上不重叠，物理上才可能是同一条五元组上的另一条连接）且累计值变小。
+	//
+	// 1.6.0 修正：原来比的是 FirstSeen 是否比上一次的 FirstSeen 晚。同一条会话被两个
+	// 观察者（本地抓包 + 探针）分别上报时，两边的 FirstSeen 天生差几微秒到几秒、累计值
+	// 也可能一边多一边少，旧判据会把它当成新连接把 st.bytes 清零，于是整条会话的流量被
+	// 重复计入一次，下一次上报又按旧值求差——数字来回跳，越跳越大。
+	//
+	// st.lastSeen / st.firstSeen 为零时（刚启动、恢复不到首次时间）一律不判定，否则会把
+	// 已计入的历史流量整笔再加一次——那正是重启翻倍的来源。
 	if !st.lastSeen.IsZero() && !st.firstSeen.IsZero() &&
-		s.FirstSeen.After(st.firstSeen) && totalBytes < st.bytes {
+		s.FirstSeen.After(st.lastSeen) && totalBytes < st.bytes {
 		st.bytes, st.packets = 0, 0
 	}
 	deltaBytes := totalBytes - st.bytes

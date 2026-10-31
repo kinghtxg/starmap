@@ -10,7 +10,15 @@ import (
 // 流量就会随上报次数成倍膨胀——真实环境里是 13 倍起步、几百 GB 量级，
 // 而界面上看不出任何异常，只是"流量很大"。
 
-func absBase() time.Time { return time.Now().Add(-10 * time.Minute).UTC() }
+// absAnchor 是本进程内所有快照共用的时间锚点。
+//
+// 必须是包级变量而不是每次调用取 time.Now()：absFlow 每次重新取"现在"会让相邻两次
+// 夹具调用的 FirstSeen 差几微秒，于是"同一条会话"在代码眼里变成了"FirstSeen 更晚"，
+// 复位判据被误触发。这种不确定性在时钟粒度粗的平台上（Windows）恰好不出现，
+// 一到纳秒精度的 CI 上就必挂——用例要锁的是语义，不能依赖时钟粒度。
+var absAnchor = time.Now().Add(-10 * time.Minute).UTC()
+
+func absBase() time.Time { return absAnchor }
 
 func absFlow(up, down int64) *AbsFlow {
 	first := absBase()
@@ -93,6 +101,35 @@ func TestIngestAbsNeverGoesBackwards(t *testing.T) {
 	a.IngestAbs(smaller)
 	if got := absSession(t, a); got != 10000 {
 		t.Fatalf("同一条会话的数字不应回退，应保持 10000，实际 %d", got)
+	}
+}
+
+// TestIngestAbsToleratesObserverSkew 两个观察者看同一条会话时，FirstSeen 天然
+// 差一点点（本地抓包和探针各自的第一个报文时间戳不可能完全相同），累计值也可能
+// 一边多一边少。这种情况**不能**被当成五元组复用整条复位，否则已经累计的流量
+// 会被一笔勾掉，而且两个观察者交替上报时数字会来回跳。
+func TestIngestAbsToleratesObserverSkew(t *testing.T) {
+	a := NewAggregator(3600, 64)
+	first := absFlow(9000, 1000)
+	a.IngestAbs(first)
+
+	// 第二个观察者：FirstSeen 晚了 800 毫秒，数值只有一半，但时间上与已有会话重叠。
+	skewed := absFlow(4000, 500)
+	skewed.FirstSeen = first.FirstSeen.Add(800 * time.Millisecond)
+	skewed.LastSeen = first.LastSeen
+	a.IngestAbs(skewed)
+
+	if got := absSession(t, a); got != 10000 {
+		t.Fatalf("观察者时钟偏差不应导致复位，应保持 10000，实际 %d", got)
+	}
+
+	// 第一个观察者继续上报更大的值，数字应该照常增长，而不是从头再来。
+	grown := absFlow(12000, 2000)
+	grown.FirstSeen = first.FirstSeen
+	grown.LastSeen = first.LastSeen.Add(time.Minute)
+	a.IngestAbs(grown)
+	if got := absSession(t, a); got != 14000 {
+		t.Fatalf("继续上报较大值后应为 14000，实际 %d", got)
 	}
 }
 
