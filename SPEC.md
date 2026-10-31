@@ -143,14 +143,40 @@ starmap/
   - `GET /api/intel?verdict=&limit=&offset=` 本地库分页；`GET /api/intel/stats` 概况（含 `push_token_set`/`remote_enabled`/`retention_days`）
   - `GET /api/nodes/{id}/ti?refresh=1` 单点查询：本地命中 → 回源 → 写回；响应含 `source∈{local,remote,none}`
   - `DELETE /api/intel/{indicator}` 人工纠错（admin）
+- **时间维度（1.6.0）**
+  - `GET /api/tasks?status=&limit=&offset=`：主动发现任务账（落库，重启不丢）。
+    `status ∈ {running,done,error,cancelled}`，非法值 400；响应带 `X-Total-Count`。
+    正在跑的任务用内存里的实时进度覆盖库里的旧值。
+  - `GET /api/tasks/{id}`：任务详情；内存命中优先，否则读库；都没有 404。
+  - `POST /api/tasks/{id}/cancel`：停止任务。**202** 已请求停止（cancel 会传到扫描 goroutine）/
+    **409** 任务已结束（响应里带当前状态）/ **404** 不存在。
+  - `GET /api/changes?days=7`：窗口内**新增**（`first_seen ∈ [since,until)`）与
+    **不再活动**（`last_seen < since AND first_seen < since`，与新增互斥）的端口。
+    `days ∈ [1,90]`，非法/超大值夹取。响应含各侧 `total`、`hosts`（去重 IP 数）、`items`（上限 500）。
+  - `GET /api/trend?days=7`：最近 N 天新增资产/端口/事件。序列长度恒等于 `days`，
+    缺日补 0；结果缓存 60s（响应带 `cached` 标记）。
+  - `GET /api/export/{assets,ports,events,tasks}.csv`：CSV 导出。UTF-8 BOM；
+    以 `= + - @` 开头的非数值单元格加前导单引号（防公式注入）；分页流式写，单次上限 20 万行。
+    **放在 operator 组**：导出的是全网资产地图，不该给只读巡检账号。
 
-## 7. 前端页面（web/，深色科技风，严格配色：bg #0F172A，card #1E293B，accent #38BDF8，text #E2E8F0，红 #F87171 橙 #FB923C 绿 #4ADE80，全局低透明拓扑连线动态背景 canvas）
-1. index.html 拓扑总览：Cytoscape.js 自动布局(cose)、风险三色、缩放平移拖拽、节点详情侧栏（IP/MAC/域/标签/对端/首见时间）、边粗细=流量、导出 PNG（cy.png）/导出 PDF（jsPDF 包图）
-2. events.html 事件工作台：列表+筛选+详情+三操作（确认归档/误报加白/暂缓），操作留痕展示
-3. whitelist.html 白名单管理；domains.html 网络域管理
-4. ingest.html 数据接入：PCAP 上传、抓包状态、探针说明
-5. settings.html 系统配置（探测开关、老化、阈值）；logs.html 审计日志；about.html 关于/版本
-统一侧边导航 layout.js，fetch 调 §6 API。
+## 7. 前端页面（web/，单二进制内嵌，原生 JS 无构建步骤）
+
+设计系统是 `assets/theme.css` 的「刻本」浅色令牌（主色 `#3370ff`、画布 `#f6f7fa`、
+描边 `#e5e6e8`、圆角 6/10）。**不引任何第三方前端库**——内网离线部署，
+多一个 CDN 依赖就是多一个上线风险，拓扑图与趋势小图都是自绘 SVG。
+
+1. `index.html` 拓扑总览：`assets/topo.js` 自绘 SVG（力导向 + `/24` 聚合 + 下钻 + 风险锚点）、
+   节点详情侧栏、网段清单、统计卡、导出 PNG（离屏 canvas 重绘，不用第三方库）
+2. `assets.html` 主机资产：三 tab（资产清单 / 端口记录 / 台账对照）、归档登记、深度发现、nmap 扫描
+3. `changes.html` 网络变更（1.6）：新增 / 不再活动双栏、1/7/30/90 天窗口、三张新增趋势小图
+4. `tasks.html` 发现任务（1.6）：任务账列表、状态筛选、实时进度、停止、详情抽屉（活跃主机明细）
+5. `events.html` 事件工作台：列表 + 筛选 + 详情 + 三操作（确认归档 / 误报加白 / 暂缓），操作留痕
+6. `whitelist.html` 白名单；`domains.html` 网络域
+7. `ingest.html` 数据接入：PCAP 上传、抓包控制、探针说明
+8. `settings.html` 系统配置；`logs.html` 审计日志；`about.html` 关于/版本；`login.html` 登录
+9. 统一顶栏 / 侧栏 / 页脚由 `assets/app.js` 渲染；角色门禁走 `<html data-sm-role>` 的 CSS 属性选择器
+   （JS 只在启动扫一遍会漏掉渲染后才插入的按钮）
+
 
 ## 8. 测试要求
 - testdata/gen_pcap.go：用 gopacket 合成 PCAP，场景：正常办公流量、FRP 特征流量、Clash 特征流量、反代多 Host、跨网域双域流量

@@ -6,7 +6,7 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.3.1**（[1.3.1 发布说明](docs/RELEASE-1.3.1.md) · [1.3.0](docs/RELEASE-1.3.md) · [1.2](docs/RELEASE-1.2.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.6.0**（[1.6.0 发布说明](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -116,6 +116,25 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
   Windows 下按 **IP** 列网卡（描述为空的网卡也能选对）。
 
 部署见 **[docs/PROBE.md](docs/PROBE.md)**；配置样例 `configs/probe.yaml`。
+
+### 时间维度（1.6.0）
+
+前面几块都在回答「**现在**网里长什么样」。这个问题看一次就过期了：
+第二天再打开，没人知道哪台机器是新来的、哪个 3389 上周还在今天没了。
+
+- **发现任务账**：主动发现任务落库（`discover_tasks`），重启不丢，可按状态筛选、分页回溯。
+  1.5 及之前任务只存在内存里（最多 50 条），运维问「周三起的那轮全网段扫描跑完了吗」
+  只能翻日志。**只记任务账不记扫描结果**——端口/指纹已经在 `ports` 表里，
+  两处都存就得处理「不一致时谁对」，而这种不一致从来不会自己消失。
+- **可停止**：`POST /api/tasks/{id}/cancel` 会真的把 `context.CancelFunc` 传到扫描
+  goroutine，当前主机收尾后退出。取消是「请求」而不是「立即杀」：一次 TCP 探测可能已经在路上。
+- **变更视图**：窗口内**新增**的端口与**不再活动**的端口。不引入快照表，
+  全部由 `ports` 的 `first_seen` / `last_seen` 推导。
+  两栏都带去重主机数——300 个新端口来自 2 台机器（新上线一套业务）和来自 300 台
+  （全网推新客户端），处置方式完全不同。
+- **CSV 导出**：资产 / 端口 / 事件 / 任务。防公式注入（页面标题来自被扫描主机，
+  扫到一台返回 `=cmd|'/c calc'!A0` 的设备，一打开表格就执行），带 UTF-8 BOM
+  （否则中文 Excel 按 GBK 解码整列乱码），流式分页写、单次上限 20 万行。
 
 ### 风险特征打标（仅标签）
 
@@ -282,6 +301,11 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 | POST | `/discover/run` | 主动发现：内置端口扫描 + 服务指纹（异步） |
 | GET | `/discover/status/{id}` | 发现任务进度 / 结果 |
 | GET | `/discover/plan` | 端口档位计划（要扫多少端口） |
+| GET | `/tasks` `/tasks/{id}` | 发现任务账（历史任务，重启不丢） |
+| POST | `/tasks/{id}/cancel` | 停止运行中的发现任务（真打断） |
+| GET | `/changes?days=7` | 变更视图：窗口内新增 / 不再活动的端口 |
+| GET | `/trend?days=7` | 趋势：最近 N 天新增资产 / 端口 / 事件 |
+| GET | `/export/{assets,ports,events,tasks}.csv` | CSV 导出（防公式注入、带 BOM） |
 | GET | `/events` | 事件列表（状态/类型筛选） |
 | POST | `/events/{id}/review` | 复核（confirm / false_positive / defer） |
 | GET/POST/PUT/DELETE | `/whitelist` `/domains` | 白名单 · 网络域 CRUD |
@@ -345,6 +369,7 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/RELEASE-1.6.md](docs/RELEASE-1.6.md) — **1.6.0 发布说明**（任务账 / 变更视图 / 导出 / 容量治理）
 - [docs/INTEL.md](docs/INTEL.md) — **威胁情报对接指南**（1.5.0）：推送样例、字段别名表、覆盖/乱序语义、回源契约
 - [docs/PROBE.md](docs/PROBE.md) — **探针部署手册**（1.4.0）：四种采集后端、systemd/Windows 服务、权限、排障手册
 - [docs/RELEASE-1.4.md](docs/RELEASE-1.4.md) — 1.4.0 发布说明（独立探针）
@@ -363,6 +388,7 @@ UI 设计基准与「刻本」同一套令牌。
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `session_max_count` | 200000 | 会话表硬上限；`/api/stats` 的 `Dropped>0` 说明打满 |
+| `session_retention_days` | 30 | **会话历史表**保留期（1.6 新增）。现场实测 3 天 60 万行/148MB，一年约 18GB；0 表示不清理 |
 | `session_idle_seconds` | 300 | 会话静默多久回收；调太小会让慢速长连接反复上下线 |
 | `session_max_age_seconds` | 21600 | 单会话最长存活，防不关闭的连接撑爆 |
 | `aggregate_threshold` | 20 | 单个 /24 超过该主机数则聚合显示；大图调大 |

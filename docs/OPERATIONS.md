@@ -227,6 +227,7 @@ OIDC（APSSO）接入见 [AUTH-APSSO.md](AUTH-APSSO.md)。
 | `session_max_count` | `200000` | 会话表上限 |
 | `session_idle_seconds` | `300` | 会话静默回收阈值 |
 | `session_max_age_seconds` | `21600` | 单会话最长存活 |
+| `session_retention_days` | `30` | **会话历史表（`sessions`）保留天数**；0=不清理。这张表是库内增长最快的一张，现场实测 3 天 60 万行/148MB，一年约 18GB |
 | `log_level` | `info` | `debug`/`info`/`warn`/`error`，可热改 |
 | `log_format` | `text` | `text`/`json`，**改后需重启** |
 | `metrics_enabled` | `true` | 是否暴露 `/metrics`，**改后需重启** |

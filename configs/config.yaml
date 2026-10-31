@@ -15,6 +15,12 @@ listen_addr: "127.0.0.1:8080"    # HTTP 监听地址（默认仅回环；对外�
 db_path: "starmap.db"         # SQLite 数据库路径
 probe_token: ""               # 探针上报 token（可选，配置则校验，§10.7）
 audit_retention_days: 90      # 审计日志保留天数（§10.8）
+event_retention_days: 180     # 风险事件保留天数（只清已处置的）
+# 会话历史表（sessions）保留天数。这是库内增长最快的一张表：现场实测 3 天
+# 60 万行 / 148MB，按此线性外推一年约 18GB，而界面上看不出任何异常。
+# 0 表示不清理（不建议）。注意它和 session_max_age_seconds 是两件事：
+# 后者管内存里的活跃会话，这个管落库的历史。
+session_retention_days: 30
 cors_origins: []              # CORS 白名单；为空则仅同源（不发 Allow-Origin 头）
 
 # ---- 自动发现（V1.4）：周期扫描让拓扑自生长 ----

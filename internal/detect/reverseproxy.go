@@ -44,7 +44,7 @@ func evalReverseProxy(rc *ruleContext) []model.RiskEvent {
 		if !topology.IsPrivate(s.FiveTuple.DstIP) {
 			continue
 		}
-		node := rc.d.Engine.NodeByIP(s.FiveTuple.DstIP)
+		node := rc.nodeByIP(s.FiveTuple.DstIP)
 		if node == nil {
 			continue
 		}
@@ -111,7 +111,7 @@ func evalUnknownEgress(rc *ruleContext) []model.RiskEvent {
 		if s.LastSeen.Before(windowStart) {
 			continue
 		}
-		node := rc.d.Engine.NodeByIP(s.FiveTuple.SrcIP)
+		node := rc.nodeByIP(s.FiveTuple.SrcIP)
 		if node == nil {
 			continue
 		}

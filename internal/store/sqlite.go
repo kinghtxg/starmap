@@ -150,7 +150,22 @@ CREATE TABLE IF NOT EXISTS ports (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ports_key ON ports(node_key, ip, port, proto);
 CREATE INDEX IF NOT EXISTS idx_ports_ip ON ports(ip);
+-- 变更页与趋势图都按 first_seen / last_seen 做时间范围筛选（V1.6）。
+-- 没有索引时这两个查询是全表扫描 + 排序，而端口表本来就是最大的那张表
+-- （一次 /16 全端口扫描就是几十万行），仪表盘会随之变慢。
+CREATE INDEX IF NOT EXISTS idx_ports_first_seen ON ports(first_seen);
+-- 复合索引不是"多此一举"：变更页的「消失」条件是
+-- last_seen < ? AND first_seen < ?，只建 last_seen 单列索引时
+-- SQLite 拿到范围后必须**回表**逐行取 first_seen 才能判定，实测 4.3 万行
+-- 的 COUNT(*) 要 395ms；把 first_seen 也放进索引后变成纯索引遍历。
+-- 左前缀仍是 last_seen，所以它同时顶替了单列索引，不需要再建一条。
+CREATE INDEX IF NOT EXISTS idx_ports_last_first ON ports(last_seen, first_seen);
+-- 端口状态刷新（MarkStalePorts：state='open' AND last_seen < ?）同样要覆盖索引，
+-- 否则每轮维护都要回表扫一遍全表。
+CREATE INDEX IF NOT EXISTS idx_ports_state_seen ON ports(state, last_seen);
 CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
+-- 趋势图按天统计新增资产，同样需要时间索引。
+CREATE INDEX IF NOT EXISTS idx_assets_created ON assets(created_at);
 -- 事件列表按状态/类型筛选并倒序分页；没有索引时每次都是全表扫描 + 排序。
 -- 事件表是持续增长的（检测引擎每 2s 评估一轮），这条索引的价值随时间上升。
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status, id DESC);
@@ -192,6 +207,27 @@ CREATE TABLE IF NOT EXISTS intel_iocs (
 -- 标红要按"命中即红旗"批量取，按 verdict + 数据时间倒序能只扫需要的行
 CREATE INDEX IF NOT EXISTS idx_intel_verdict ON intel_iocs(verdict, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_intel_received ON intel_iocs(received_at);
+-- 主动发现任务账（V1.6）。只存"这次扫了什么、结果多少"，扫描结果本身在 ports 表：
+-- 两处都存一份，迟早开始漂移。
+CREATE TABLE IF NOT EXISTS discover_tasks (
+  id            TEXT PRIMARY KEY,
+  targets       TEXT NOT NULL DEFAULT '',
+  profile       TEXT NOT NULL DEFAULT '',
+  profile_label TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL DEFAULT 'running',
+  total         INTEGER NOT NULL DEFAULT 0,
+  done          INTEGER NOT NULL DEFAULT 0,
+  alive         INTEGER NOT NULL DEFAULT 0,
+  open_ports    INTEGER NOT NULL DEFAULT 0,
+  fingerprints  INTEGER NOT NULL DEFAULT 0,
+  error         TEXT NOT NULL DEFAULT '',
+  created_by    TEXT NOT NULL DEFAULT '',
+  started_at    DATETIME NOT NULL,
+  finished_at   DATETIME
+);
+-- 任务页永远按"最新在前"翻，状态筛选是第二个入口，各配一条索引。
+CREATE INDEX IF NOT EXISTS idx_disc_tasks_started ON discover_tasks(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_disc_tasks_status ON discover_tasks(status, started_at DESC);
 `
 
 // Open 打开（不存在则创建）SQLite 数据库并建表。
@@ -220,6 +256,11 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("端口指纹迁移失败: %w", err)
 	}
+	// 1.5.2：会话历史表补唯一键（先清理历史重复行，再建索引）
+	if err := migrateSessionUnique(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("会话表唯一键迁移失败: %w", err)
+	}
 	// 1.3：事件补 node_key。只加列不重建：事件是历史记录，
 	// 重建会丢掉"创建时间"这一列最核心的信息（它决定了保留期与时间线）。
 	if err := ensureColumn(db, "events", "node_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -239,7 +280,46 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// migrateSessionUnique 给 sessions 表补五元组唯一键（V1.5.2）。
+//
+// 为什么必须唯一：这张表是"会话历史"，写到它里面的动作是 INSERT。旧实现在进程内
+// 用 emitted 标记保证"同一个五元组只插一次"，但那个标记只活在本次进程里——
+// 重启之后，所有仍在持续的会话又都成了"首次见到"，于是再插一行。
+// 现场实测：灌同一个 pcap、中间重启一次，两条五元组各出现两行。
+// 这类重复行没有任何独立信息（字节数停在首见那一刻），留着只会让表持续膨胀。
+//
+// 迁移顺序不能反：必须先删重复行，再建唯一索引。历史库（比如跑了 70 小时、
+// 攒了 60 万行的那个）里一定已经有重复，直接建索引会失败、服务起不来。
+func migrateSessionUnique(db *sql.DB) error {
+	if indexExists(db, "idx_sessions_ft") {
+		return nil
+	}
+	// 去重：同一五元组只保留 id 最小（最早）的一行。
+	// 保留最早的行而不是最新，是因为这一行的 first_seen 才是真正的"首次见到"。
+	if _, err := db.Exec(`DELETE FROM sessions WHERE id NOT IN (
+	        SELECT MIN(id) FROM sessions GROUP BY five_tuple)`); err != nil {
+		return fmt.Errorf("清理会话重复行失败: %w", err)
+	}
+	// 保留期清理按 last_seen 过滤，没有索引就是全表扫
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_last_seen ON sessions(last_seen)`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_ft ON sessions(five_tuple)`)
+	return err
+}
+
+// indexExists 判断索引是否已存在（迁移的幂等判据）。
+func indexExists(db *sql.DB, name string) bool {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 // migratePortFingerprint 给 ports 表补指纹列。
+
 // 用 ADD COLUMN 而不是重建表：端口表是历史累积的观测数据，重建一次等于把所有
 // "首次发现时间"重置为迁移当天，账实对照会全部失真。
 func migratePortFingerprint(db *sql.DB) error {
@@ -732,9 +812,39 @@ func (s *Store) DeleteEdge(id int64) error {
 // ---------- Session CRUD ----------
 
 // SaveSession 保存会话（新会话插入，返回 ID）。
+// SaveSession 写入/更新一条会话历史（V1.5.2 起按五元组幂等）。
+//
+// 语义变化说明：旧实现是纯 INSERT，靠"进程内首次"去重，重启后同一会话会再插一行；
+// 现在走 ON CONFLICT，同一个五元组永远只有一行，重启后落到 UPDATE 分支。
+// 附带的好处是这一行会跟着会话演进（字节数、SNI、JA3 都是最新观测值），
+// 而不是永远停在"首次见到那一刻"——后者对排查毫无用处。
+//
+// 字段用 CASE 保护：新值为空时不覆盖已有值。一条 keep-alive 连接后续的报文里
+// 往往没有 ClientHello / HTTP 头，直接覆盖会把先前解析到的 SNI、Host 洗掉。
+// sessionUpsertSQL 会话历史写入语句的唯一来源（单条与批量共用，避免两处漂移）。
+//
+// ON CONFLICT 是「幂等 upsert + 空值不覆盖」：早期版本是裸 INSERT，同一个五元组
+// 出现两次就报错；而空值覆盖更是会洗掉已经采到的证据（探针先报了 SNI，
+// 下一批 flows 没带，库里的 SNI 就没了）。
+const sessionUpsertSQL = `INSERT INTO sessions(five_tuple,mac,start_ttl,first_seen,last_seen,bytes_up,bytes_down,packets,sni,http_host,ja3,ja4,is_long_conn,heartbeat_interval_ms,closed)
+	 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	 ON CONFLICT(five_tuple) DO UPDATE SET
+	   last_seen=excluded.last_seen,
+	   bytes_up=excluded.bytes_up,
+	   bytes_down=excluded.bytes_down,
+	   packets=excluded.packets,
+	   mac=CASE WHEN excluded.mac<>'' THEN excluded.mac ELSE sessions.mac END,
+	   start_ttl=CASE WHEN excluded.start_ttl>0 THEN excluded.start_ttl ELSE sessions.start_ttl END,
+	   sni=CASE WHEN excluded.sni<>'' THEN excluded.sni ELSE sessions.sni END,
+	   http_host=CASE WHEN excluded.http_host<>'' THEN excluded.http_host ELSE sessions.http_host END,
+	   ja3=CASE WHEN excluded.ja3<>'' THEN excluded.ja3 ELSE sessions.ja3 END,
+	   ja4=CASE WHEN excluded.ja4<>'' THEN excluded.ja4 ELSE sessions.ja4 END,
+	   is_long_conn=MAX(sessions.is_long_conn, excluded.is_long_conn),
+	   heartbeat_interval_ms=CASE WHEN excluded.heartbeat_interval_ms>0 THEN excluded.heartbeat_interval_ms ELSE sessions.heartbeat_interval_ms END,
+	   closed=MAX(sessions.closed, excluded.closed)`
+
 func (s *Store) SaveSession(ses *model.Session) (int64, error) {
-	res, err := s.db.Exec(
-		`INSERT INTO sessions(five_tuple,mac,start_ttl,first_seen,last_seen,bytes_up,bytes_down,packets,sni,http_host,ja3,ja4,is_long_conn,heartbeat_interval_ms,closed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	res, err := s.db.Exec(sessionUpsertSQL,
 		toJSON(ses.FiveTuple), ses.MAC, ses.StartTTL, ses.FirstSeen, ses.LastSeen,
 		ses.BytesUp, ses.BytesDown, ses.Packets, ses.SNI, ses.HTTPHost, ses.JA3, ses.JA4,
 		b2i(ses.IsLongConn), ses.HeartbeatIntervalMs, b2i(ses.Closed))
@@ -742,6 +852,51 @@ func (s *Store) SaveSession(ses *model.Session) (int64, error) {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// SaveSessions 批量写入会话历史（一次事务、一条预编译语句）。
+//
+// 单条 SaveSession 每次都是一次隐式事务，每行都要一次提交/落盘。探针一批上报
+// 里可能有几百条新会话，逐条写会把上报接口的耗时按行数线性拉长（实测约 1ms/条）。
+// 批量写把 N 次提交压成 1 次。
+func (s *Store) SaveSessions(list []model.Session) error {
+	if len(list) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(sessionUpsertSQL)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for i := range list {
+		ses := &list[i]
+		if _, err := stmt.Exec(
+			toJSON(ses.FiveTuple), ses.MAC, ses.StartTTL, ses.FirstSeen, ses.LastSeen,
+			ses.BytesUp, ses.BytesDown, ses.Packets, ses.SNI, ses.HTTPHost, ses.JA3, ses.JA4,
+			b2i(ses.IsLongConn), ses.HeartbeatIntervalMs, b2i(ses.Closed)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DeleteSessionsBefore 删除 last_seen 早于 cutoff 的会话历史，返回删除行数。
+//
+// 这是 sessions 表唯一的回收路径（V1.5.2 新增）。没有它，这张表就是纯粹的
+// "历史唯一连接数"累加器：现场实测 3 天 60 万行 / 148MB，一年约 18GB，
+// 而界面上看不到任何迹象。
+func (s *Store) DeleteSessionsBefore(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM sessions WHERE last_seen < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // ListSessions 查询全部会话。
@@ -878,7 +1033,12 @@ func (s *Store) PruneSessionOffsets(before time.Time) error {
 // ---------- RiskEvent CRUD ----------
 
 // CreateEvent 创建风险事件。
-func (s *Store) CreateEvent(e *model.RiskEvent) (int64, error) {
+// eventInsertSQL 事件写入语句的唯一来源（单条与批量共用）。
+const eventInsertSQL = `INSERT INTO events(type,node_id,node_key,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`
+
+// prepareEventForInsert 补齐缺省字段（单条与批量必须走同一套默认值，
+// 否则同一个事件走两条路会得到不同的 created_at / status）。
+func prepareEventForInsert(e *model.RiskEvent) {
 	now := time.Now()
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = now
@@ -887,14 +1047,59 @@ func (s *Store) CreateEvent(e *model.RiskEvent) (int64, error) {
 	if e.Status == "" {
 		e.Status = model.EventStatusPending
 	}
-	res, err := s.db.Exec(
-		`INSERT INTO events(type,node_id,node_key,title,detail,evidence,status,level,created_at,updated_at,review_note,reviewer) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+}
+
+func (s *Store) CreateEvent(e *model.RiskEvent) (int64, error) {
+	prepareEventForInsert(e)
+	res, err := s.db.Exec(eventInsertSQL,
 		e.Type, e.NodeID, e.NodeKey, e.Title, e.Detail, toJSON(e.Evidence), e.Status, e.Level,
 		e.CreatedAt, e.UpdatedAt, e.ReviewNote, e.Reviewer)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// CreateEvents 批量新建事件（一次事务），返回与入参顺序一致的 id。
+//
+// 评估器一轮可能新建上百条事件（网络里每出现一台新主机就是一条）。
+// 单条 INSERT 是自动提交，每条都要一次提交与落盘；在 SQLite 这个"单写者"上，
+// 一分钟几百次提交会把写锁占满，表现成"上报接口偶发卡十几秒"——
+// 真相是写入方在排队，而不是上报本身慢。
+func (s *Store) CreateEvents(list []*model.RiskEvent) ([]int64, error) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(eventInsertSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	ids := make([]int64, len(list))
+	for i, e := range list {
+		prepareEventForInsert(e)
+		res, err := stmt.Exec(
+			e.Type, e.NodeID, e.NodeKey, e.Title, e.Detail, toJSON(e.Evidence), e.Status, e.Level,
+			e.CreatedAt, e.UpdatedAt, e.ReviewNote, e.Reviewer)
+		if err != nil {
+			return nil, err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		ids[i] = id
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // UpdateEventStatus 复核操作：更新状态/备注/复核人。
@@ -909,6 +1114,36 @@ func (s *Store) UpdateEventEvidence(id int64, evidence map[string]string) error 
 	_, err := s.db.Exec(`UPDATE events SET evidence=?,updated_at=? WHERE id=?`,
 		toJSON(evidence), time.Now(), id)
 	return err
+}
+
+// UpdateEventEvidenceBatch 批量更新事件证据（一次事务）。
+//
+// 评估器每轮可能刷新成百上千条事件证据，逐条 UPDATE 等于每条一次提交；
+// 稳态下这批写会被评估周期反复放大，把整个库的写路径占满。
+func (s *Store) UpdateEventEvidenceBatch(ids []int64, evidences []map[string]string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if len(ids) != len(evidences) {
+		return fmt.Errorf("批量更新证据参数不匹配: ids=%d evidences=%d", len(ids), len(evidences))
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(`UPDATE events SET evidence=?, updated_at=? WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now()
+	for i := range ids {
+		if _, err := stmt.Exec(toJSON(evidences[i]), now, ids[i]); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func scanEvent(row rowScanner) (*model.RiskEvent, error) {
@@ -1171,6 +1406,66 @@ func (s *Store) ListAuditLogs(limit int) ([]model.AuditLog, error) {
 	return out, rows.Err()
 }
 
+// SyncAssetsFromNodes 把拓扑节点批量同步进资产库（V1.5.2）。
+//
+// 替代 API 层原来的"逐节点 SELECT + 逐条 UPSERT"：那是 O(N) 次往返，
+// 2000 台主机就是 4000 条独立语句，资产页一次加载（/assets + /assets/stats）
+// 还要把它跑两遍，只能靠 2 秒节流掩盖问题。
+//
+// 语义与原实现严格一致：
+//   - 新节点 → status=unarchived（账外资产，等待人工归档）
+//   - 已存在 → 只刷新 ips / mac / last_seen；已归档资产的归属信息
+//     （owner / department / 物理位置 / 描述）一律保留，不能被自动同步覆盖成空值
+//   - 位置只有"未归档"才跟随探针，已归档以人工填写为准
+func (s *Store) SyncAssetsFromNodes(nodes []model.Node, now time.Time) (int, error) {
+	if len(nodes) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO assets(node_key,ips,mac,hostname,os,status,owner,department,location,description,
+		                    first_seen,last_seen,created_at,updated_at)
+		 VALUES(?,?,?,'','','unarchived','','',?,'',?,?,?,?)
+		 ON CONFLICT(node_key) DO UPDATE SET
+		   ips=excluded.ips,
+		   mac=excluded.mac,
+		   last_seen=excluded.last_seen,
+		   updated_at=excluded.updated_at,
+		   location=CASE WHEN assets.status='unarchived' AND excluded.location<>''
+		                 THEN excluded.location ELSE assets.location END`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+
+	n := 0
+	for i := range nodes {
+		nd := &nodes[i]
+		if nd.NodeKey == "" {
+			continue
+		}
+		first := nd.FirstSeen
+		if first.IsZero() {
+			first = now
+		}
+		last := nd.LastSeen
+		if last.IsZero() {
+			last = now
+		}
+		if _, err := stmt.Exec(nd.NodeKey, toJSON(nd.IPs), nd.MAC, nd.Location,
+			first, last, now, now); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, tx.Commit()
+}
+
 // ---------- Config KV ----------
 
 // SetConfigKV 写入系统参数键值。
@@ -1246,19 +1541,38 @@ func (s *Store) UpsertAsset(a *model.Asset) (int64, error) {
 }
 
 // ArchiveAsset 归档：写入归属信息 + 归档时间。
+// ArchiveAsset 归档登记（未归档 → 已归档，写归属信息）。
+//
+// 0 行受影响要报错，不能静默成功：资产行是由 syncAssets 从拓扑懒同步出来的，
+// 如果调用方在资产行还不存在时就归档，UPDATE 会匹配 0 行而返回 nil——
+// 接口回 {"ok":true}，界面刷新后归属还是空的。这类"成功但没生效"最难查：
+// 日志里只有一条正常的 archive 审计，没有任何异常。
 func (s *Store) ArchiveAsset(nodeKey, owner, department, location, hostname, osName, description, by string) error {
 	now := time.Now()
-	_, err := s.db.Exec(`UPDATE assets SET status='archived', owner=?, department=?, location=?, hostname=?, os=?, description=?, archived_at=?, archived_by=?, updated_at=? WHERE node_key=?`,
+	res, err := s.db.Exec(`UPDATE assets SET status='archived', owner=?, department=?, location=?, hostname=?, os=?, description=?, archived_at=?, archived_by=?, updated_at=? WHERE node_key=?`,
 		owner, department, location, hostname, osName, description, now, by, now, nodeKey)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("资产记录不存在（node_key=%s），请先刷新资产列表让节点同步入库", nodeKey)
+	}
+	return nil
 }
 
-// UpdateAsset 维护归档信息（不改 status）。
+// UpdateAsset 维护归档信息（不改 status）。语义与 ArchiveAsset 一致：
+// 0 行受影响视为失败，理由同上。
 func (s *Store) UpdateAsset(nodeKey, owner, department, location, hostname, osName, description string) error {
 	now := time.Now()
-	_, err := s.db.Exec(`UPDATE assets SET owner=?, department=?, location=?, hostname=?, os=?, description=?, updated_at=? WHERE node_key=?`,
+	res, err := s.db.Exec(`UPDATE assets SET owner=?, department=?, location=?, hostname=?, os=?, description=?, updated_at=? WHERE node_key=?`,
 		owner, department, location, hostname, osName, description, now, nodeKey)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("资产记录不存在（node_key=%s）", nodeKey)
+	}
+	return nil
 }
 
 // AssetByKey 按 node_key 查资产，不存在返回 (nil, nil)。
@@ -1390,6 +1704,32 @@ const portUpsertSQL = `INSERT INTO ports(node_key,ip,port,proto,service,state,so
 	product,version,title,banner,tls_cn,tls_names,favicon)
 	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ` + portUpsertConflict
 
+// PortStaleAfter 端口多久没再被观测到就标记为 stale（V1.5.2）。
+//
+// 为什么需要它：ports 表原先只有写入，唯一的删除路径是"资产被清理时连带删"。
+// 结果是端口列表会永久腐烂——一台机器三年前开过 3389，列表里就一直是 3389，
+// 而且和"今天确实在开"长得一模一样。对"理清网内结构"这个定位来说，
+// 一条陈旧的开放端口比没有这条记录更糟：它会误导处置优先级。
+//
+// 30 天是折中：内网设备很少有超过一个月完全不上线的正常情况；
+// 真离线那么久的机器，本来就该走离线清理，端口跟着变 stale 正好一致。
+const PortStaleAfter = 30 * 24 * time.Hour
+
+// MarkStalePorts 把超过 staleAfter 未再观测到的端口标记为 stale，返回受影响行数。
+//
+// 只改 state，不删行：曾经开放过这件事本身是证据（尤其是事后回溯），
+// 但必须让它和"当前开放"在界面上区分开。
+func (s *Store) MarkStalePorts(before time.Time) (int64, error) {
+	res, err := s.db.Exec(
+		`UPDATE ports SET state='stale' WHERE state='open' AND last_seen < ?`, before)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// UpsertPort 写入/更新单条端口记录。
 // UpsertPort 幂等写入端口记录（node_key+ip+port+proto 唯一）。
 func (s *Store) UpsertPort(p *model.PortRecord) error {
 	_, err := s.db.Exec(portUpsertSQL,

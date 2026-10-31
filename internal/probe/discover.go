@@ -104,10 +104,17 @@ type HostResult struct {
 
 // DiscoverResult 一轮主动发现的汇总。
 type DiscoverResult struct {
-	StartedAt    time.Time    `json:"started_at"`
-	Duration     string       `json:"duration"`
-	Profile      string       `json:"profile"`
-	Total        int          `json:"total"`
+	StartedAt time.Time `json:"started_at"`
+	Duration  string    `json:"duration"`
+	Profile   string    `json:"profile"`
+	Total     int       `json:"total"`
+	// Done 实际处理完的主机数（成功扫完 + 扫失败的都算）。
+	//
+	// 必须与 Total 分开：Total 是"这一轮要扫多少台"，Done 是"实际处理了多少台"。
+	// 任务被取消或超时中断时，两者不等——早前 API 层直接把 Total 赋给 Done，
+	// 于是界面上一个刚被停掉的任务显示「254/254 已完成」，
+	// 看着像扫完了，实际一台都没扫。对"要不要重扫一遍"这种判断是致命误导。
+	Done         int          `json:"done"`
 	Alive        int          `json:"alive"`
 	OpenPorts    int          `json:"open_ports"`
 	Fingerprints int          `json:"fingerprints"`
@@ -201,6 +208,7 @@ func (s *Scanner) Discover(ctx context.Context, hosts []string, opt DiscoverOpti
 	wg.Wait()
 
 	res.Duration = s.nowSince(start).String()
+	res.Done = done
 	res.Alive = alive
 	res.OpenPorts = openPorts
 	res.Fingerprints = fps

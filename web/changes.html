@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>变更 · StarMap 星图</title>
+<link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+</head>
+<body>
+<div class="sm-app">
+  <header class="sm-topbar" id="smTopbar"></header>
+
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">网络变更</h1>
+          <p class="sm-sub">跟上一段时间比：新开了哪些端口 · 哪些不再活动 · 全部由端口首次/最后观测时间推导</p>
+        </div>
+        <div class="sm-toolbar">
+          <select class="sm-select is-sm sm-w-auto" id="fDays" aria-label="时间窗口">
+            <option value="1">最近 1 天</option>
+            <option value="7" selected>最近 7 天</option>
+            <option value="30">最近 30 天</option>
+            <option value="90">最近 90 天</option>
+          </select>
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+        </div>
+      </div>
+
+      <div class="sm-content">
+        <div class="sm-grid sm-grid-4 sm-anim" id="statsBar"></div>
+
+        <!-- 趋势：三张小图并排，不引第三方图表库（内网离线部署，多一个
+             CDN 依赖就是多一个上线风险）。数据为最近 N 天的新增计数。 -->
+        <section class="sm-card sm-anim" style="margin-top:14px">
+          <div class="sm-card-hd">
+            <div class="sm-row is-center" style="gap:10px">
+              <h2>新增趋势</h2>
+              <span class="sm-badge" id="trendNote">—</span>
+            </div>
+          </div>
+          <div class="sm-card-bd" id="trendBox"></div>
+        </section>
+
+        <div class="sm-tabbar sm-anim" style="margin-top:14px">
+          <button class="sm-tab is-active" data-tab="added">新增端口 <span class="sm-badge is-success" id="nAdded">0</span></button>
+          <button class="sm-tab" data-tab="gone">不再活动 <span class="sm-badge is-warning" id="nGone">0</span></button>
+        </div>
+
+        <section id="tab-added" class="sm-card sm-anim" style="margin-top:12px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <div class="sm-card-hd">
+            <div class="sm-row is-center" style="gap:10px">
+              <h2>窗口内首次发现的端口</h2>
+              <span class="sm-badge" id="addedRange">—</span>
+            </div>
+            <div class="sm-toolbar">
+              <button class="sm-btn is-sm" data-role="operator" data-act="export-ports" data-ico="download">导出端口全量</button>
+            </div>
+          </div>
+          <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+            <div class="sm-table-wrap"><table class="sm-table" id="addedTable"></table></div>
+          </div>
+          <div class="sm-card-ft" id="addedFoot"></div>
+        </section>
+
+        <section id="tab-gone" class="sm-card sm-anim sm-hide" style="margin-top:12px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <div class="sm-card-hd">
+            <div class="sm-row is-center" style="gap:10px">
+              <h2>窗口内不再活动的端口</h2>
+              <span class="sm-badge" id="goneRange">—</span>
+            </div>
+            <div class="sm-toolbar">
+              <button class="sm-btn is-sm" data-role="operator" data-act="export-ports" data-ico="download">导出端口全量</button>
+            </div>
+          </div>
+          <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+            <div class="sm-table-wrap"><table class="sm-table" id="goneTable"></table></div>
+          </div>
+          <div class="sm-card-ft" id="goneFoot"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
+<script>
+'use strict';
+
+var added = null;
+var gone = null;
+var seq = 0;
+
+// 单侧变更的表格渲染。
+//
+// 两栏列一致（同一批端口记录），差别只在排序与时间列的含义：
+// 新增看 first_seen，消失看 last_seen。共用一套渲染函数避免两处漂移。
+function tableHTML(g, timeKey) {
+  if (!g || !g.items || !g.items.length) {
+    return UI.emptyHTML(timeKey === 'first_seen' ? '窗口内没有新出现的端口' : '窗口内没有停止活动的端口',
+      '换个时间窗口看看，或去「主机资产 → 端口记录」发起一轮主动发现');
+  }
+  return '<table class="sm-table"><thead><tr>' +
+    '<th style="min-width:118px">IP</th>' +
+    '<th style="min-width:70px">端口</th>' +
+    '<th style="min-width:60px">协议</th>' +
+    '<th style="min-width:110px">服务</th>' +
+    '<th>识别</th>' +
+    '<th style="min-width:100px">状态</th>' +
+    '<th style="min-width:142px">' + (timeKey === 'first_seen' ? '首次发现' : '最后观测') + '</th>' +
+    '</tr></thead><tbody>' +
+    g.items.map(function (p) {
+      var id = [p.product, p.version].filter(Boolean).join(' ') || p.title || p.service || '—';
+      return '<tr>' +
+        '<td class="sm-mono" style="font-size:12px">' + UI.esc(p.ip) + '</td>' +
+        '<td class="sm-mono">' + p.port + '</td>' +
+        '<td class="sm-t-2" style="font-size:12px">' + UI.esc(p.proto || '—') + '</td>' +
+        '<td style="font-size:12px">' + UI.esc(p.service || '—') + '</td>' +
+        '<td><div class="sm-ellipsis" title="' + UI.escAttr(id) + '">' + UI.esc(id) + '</div></td>' +
+        '<td><span class="sm-badge ' + (p.state === 'stale' ? 'is-warning' : 'is-success') + '">' +
+          UI.esc(p.state === 'stale' ? '已消失' : '开放') + '</span></td>' +
+        '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtTime(p[timeKey])) + '</td>' +
+        '</tr>';
+    }).join('') + '</tbody></table>';
+}
+
+function footHTML(g, shown) {
+  if (!g) return '';
+  if (g.total <= shown) {
+    return '<div class="sm-pager"><span style="margin-right:auto">共 ' + UI.fmtNum(g.total) + ' 条 · 涉及 ' +
+      UI.fmtNum(g.hosts) + ' 台主机</span></div>';
+  }
+  // 被截断时必须明说：静默只显示 500 条会让用户以为"就这些"，
+  // 而实际可能有几千条——变更页最怕的就是这个。
+  return '<div class="sm-pager"><span style="margin-right:auto">共 ' + UI.fmtNum(g.total) + ' 条 · 涉及 ' +
+    UI.fmtNum(g.hosts) + ' 台主机 · <b style="color:#a8661a">仅显示前 ' + UI.fmtNum(shown) +
+    ' 条，请缩小时间窗口</b></span></div>';
+}
+
+/* ---------- 趋势小图 ---------- */
+// 手绘 SVG 而不是引图表库：内网离线部署，多一个第三方依赖就是多一个
+// 上线风险，而这里要画的只是三组等宽柱子。
+//
+// 纵轴用「本组最大值」归一：三条序列量级差很远（资产几十、端口几万），
+// 共用一根纵轴会让资产那条永远贴在底线上，看不出任何形状。
+function sparkSVG(points, key, color, emptyText) {
+  var w = 240, h = 56, gap = 2;
+  var n = points.length;
+  if (!n) return '';
+  var max = 1, sum = 0;
+  points.forEach(function (p) {
+    if (p[key] > max) max = p[key];
+    sum += p[key] || 0;
+  });
+
+  // 轨道底 + 顶线：全是 0 的时候如果什么都不画，这块区域看起来像
+  // 图表加载失败。画上轨道能确认"这里确实是一段没有新增的日子"。
+  //
+  // 全 0 时不画柱，直接写一行字：7 根 2px 的柱子在底部连起来像一条虚线，
+  // 读者第一反应是"渲染出错了"，而实际含义是"这段时间干净"。
+  var track = '<rect x="0" y="0" width="' + w + '" height="' + h + '" fill="#f4f5f7" rx="3"></rect>' +
+    '<line x1="0" y1="1" x2="' + w + '" y2="1" stroke="#e5e6e8" stroke-width="1"></line>';
+
+  if (sum === 0) {
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h +
+      '" preserveAspectRatio="none" role="img">' + track +
+      '<text x="' + (w / 2) + '" y="' + (h / 2 + 4) + '" text-anchor="middle" ' +
+      'font-size="11" fill="#9aa0a8">' + UI.esc(emptyText || '无新增') + '</text></svg>';
+  }
+
+  var bw = Math.max(1, (w - gap * (n - 1)) / n);
+  var bars = points.map(function (p, i) {
+    var v = p[key] || 0;
+    var bh = v === 0 ? 2 : Math.max(3, Math.round(v / max * (h - 3)));
+    var x = i * (bw + gap);
+    var y = h - bh;
+    return '<rect x="' + x.toFixed(1) + '" y="' + y + '" width="' + bw.toFixed(1) +
+      '" height="' + bh + '" rx="1" fill="' + color + '" opacity="' + (v === 0 ? '.30' : '.88') + '">' +
+      '<title>' + UI.esc(p.date + '：' + v) + '</title></rect>';
+  }).join('');
+  return '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="' + h +
+    '" preserveAspectRatio="none" role="img">' + track + bars + '</svg>';
+}
+
+function trendCard(points, key, label, color, total) {
+  var first = points.length ? points[0].date.slice(5) : '';
+  var last = points.length ? points[points.length - 1].date.slice(5) : '';
+  // 每张图必须自带边框。没有边界时三张并排会被读成"一张图配了三个标签"，
+  // 而右侧那个总数会被误认为左边下一个标签的值。
+  return '<div style="border:1px solid var(--sm-border);border-radius:var(--sm-r-sm);' +
+    'padding:10px 12px;background:var(--sm-bg)">' +
+    '<div class="sm-row is-center" style="justify-content:space-between;margin-bottom:8px">' +
+    '<span class="sm-label">' + UI.esc(label) + '</span>' +
+    '<span class="sm-mono" style="font-size:14px;font-weight:600;color:' +
+    (total > 0 ? color : 'var(--sm-text-3)') + '">' + UI.fmtNum(total) + '</span>' +
+    '</div>' +
+    sparkSVG(points, key, color, '近 ' + points.length + ' 天无新增') +
+    '<div class="sm-row" style="justify-content:space-between;margin-top:5px">' +
+    '<span class="sm-t-3" style="font-size:11px">' + UI.esc(first) + '</span>' +
+    '<span class="sm-t-3" style="font-size:11px">' + UI.esc(last) + '</span>' +
+    '</div></div>';
+}
+
+function renderTrend(points, days) {
+  var box = document.getElementById('trendBox');
+  if (!points || !points.length) {
+    box.innerHTML = UI.emptyHTML('暂无趋势数据', '接入流量或跑一轮主动发现后这里会有曲线');
+    document.getElementById('trendNote').textContent = '—';
+    return;
+  }
+  var sum = function (k) {
+    return points.reduce(function (a, p) { return a + (p[k] || 0); }, 0);
+  };
+  document.getElementById('trendNote').textContent = '近 ' + days + ' 天';
+  box.innerHTML = '<div class="sm-grid sm-grid-3">' +
+    trendCard(points, 'assets', '新增资产', '#3370ff', sum('assets')) +
+    trendCard(points, 'ports', '新增端口', '#1aa179', sum('ports')) +
+    trendCard(points, 'events', '新增事件', '#e64545', sum('events')) +
+    '</div>';
+}
+
+function load() {
+  var days = document.getElementById('fDays').value;
+  var my = ++seq;
+  document.getElementById('addedTable').innerHTML = UI.skeletonRows(6);
+  document.getElementById('goneTable').innerHTML = UI.skeletonRows(6);
+
+  // 趋势是"锦上添花"，变更列表才是这页的主体。
+  // 两条请求各自失败互不牵连：趋势挂了不该让用户看不到变更，
+  // 反之亦然。所以这里不用 Promise.all。
+  API.trend(days)
+    .then(function (t) { if (my === seq) renderTrend(t.points, t.days); })
+    .catch(function () { if (my === seq) renderTrend(null, days); });
+
+  return API.changes(days)
+    .then(function (d) {
+      if (my !== seq) return;
+      added = d.added;
+      gone = d.gone;
+
+      document.getElementById('addedTable').innerHTML = tableHTML(added, 'first_seen');
+      document.getElementById('goneTable').innerHTML = tableHTML(gone, 'last_seen');
+      document.getElementById('addedFoot').innerHTML = footHTML(added, (added.items || []).length);
+      document.getElementById('goneFoot').innerHTML = footHTML(gone, (gone.items || []).length);
+      document.getElementById('nAdded').textContent = UI.fmtNum(added.total || 0);
+      document.getElementById('nGone').textContent = UI.fmtNum(gone.total || 0);
+      document.getElementById('addedRange').textContent = '近 ' + d.days + ' 天';
+      document.getElementById('goneRange').textContent = '近 ' + d.days + ' 天';
+      renderStats();
+    })
+    .catch(function (e) {
+      if (my !== seq) return;
+      added = gone = null;
+      document.getElementById('addedTable').innerHTML = UI.errorHTML(e);
+      document.getElementById('goneTable').innerHTML = UI.errorHTML(e);
+      document.getElementById('addedFoot').innerHTML = '';
+      document.getElementById('goneFoot').innerHTML = '';
+      document.getElementById('nAdded').textContent = '0';
+      document.getElementById('nGone').textContent = '0';
+      renderStats();
+    });
+}
+
+function renderStats() {
+  var a = added || { total: 0, hosts: 0 };
+  var g = gone || { total: 0, hosts: 0 };
+  var items = [
+    { k: '新增端口', v: a.total || 0, i: 'plus', cls: (a.total ? 'is-warn' : 'is-off'), ex: '窗口内首次发现' },
+    { k: '新增涉及主机', v: a.hosts || 0, i: 'node', cls: '', ex: '去重后的 IP 数' },
+    { k: '不再活动端口', v: g.total || 0, i: 'clock', cls: (g.total ? 'is-high' : 'is-off'), ex: '窗口内未再观测' },
+    { k: '停用涉及主机', v: g.hosts || 0, i: 'warn', cls: '', ex: '去重后的 IP 数' }
+  ];
+  var host = document.getElementById('statsBar');
+  host.innerHTML = items.map(function (it) {
+    return '<div class="sm-stat ' + it.cls + '">' +
+      '<div class="sm-stat-ico">' + UI.ico(it.i) + '</div>' +
+      '<div style="min-width:0">' +
+      '<div class="sm-stat-val" data-v="' + it.v + '">0</div>' +
+      '<div class="sm-stat-key">' + UI.esc(it.k) + '</div>' +
+      '<div class="sm-stat-extra">' + UI.esc(it.ex) + '</div>' +
+      '</div></div>';
+  }).join('');
+  host.querySelectorAll('.sm-stat-val').forEach(function (el) {
+    UI.countTo(el, Number(el.getAttribute('data-v')) || 0);
+  });
+}
+
+/* ---------- 事件绑定 ---------- */
+UI.on('refresh', load);
+UI.on('export-ports', function () {
+  // 走 API.download 而不是 location.href：失败时能弹提示，不会整页跳到 JSON 错误
+  API.download('ports', {}).then(function (r) {
+    UI.toast('已导出 ' + r.name, 'ok');
+  }).catch(function (e) { UI.toast(e.message, 'err'); });
+});
+
+// 标签页走的是 data-tab 而不是 data-act（与资产页一致）：
+// UI.on 只转发 [data-act] 的点击，所以这里必须自己绑。
+document.querySelectorAll('.sm-tab[data-tab]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var tab = b.getAttribute('data-tab');
+    document.querySelectorAll('.sm-tab[data-tab]').forEach(function (x) {
+      x.classList.toggle('is-active', x === b);
+    });
+    document.getElementById('tab-added').classList.toggle('sm-hide', tab !== 'added');
+    document.getElementById('tab-gone').classList.toggle('sm-hide', tab !== 'gone');
+  });
+});
+
+document.getElementById('fDays').addEventListener('change', load);
+
+document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>

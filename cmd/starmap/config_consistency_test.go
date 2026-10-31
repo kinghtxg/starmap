@@ -78,6 +78,7 @@ var configKeyToField = map[string]string{
 	"session_max_count":       "SessionMaxCount",
 	"session_idle_seconds":    "SessionIdleSeconds",
 	"session_max_age_seconds": "SessionMaxAgeSeconds",
+	"session_retention_days":  "SessionRetentionDays",
 	// 可观测性
 	"log_level":     "LogLevel",
 	"log_format":    "LogFormat",

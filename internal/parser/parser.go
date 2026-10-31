@@ -387,7 +387,21 @@ type Aggregator struct {
 	NowFunc      func() time.Time
 	dropped      int64 // 因容量上限被丢弃的新会话数
 	evictedTotal int64 // 累计回收会话数
+	// lastSweep 上次全表淘汰扫描的时间（V1.5.2）。
+	//
+	// 没有它的时候，表一打满就变成"每来一个新会话全表扫一遍"：
+	// 20 万上限下单包处理成本约 92ms（5 万实测 23ms，线性外推），
+	// 抓包侧直接塌成每秒十几个会话，然后开始丢包——而这一切在界面上
+	// 只表现为 Dropped 这个没人看的计数器。
+	// 用时间门控把全表扫描压到每 5 秒最多一次，单包成本回到微秒级；
+	// 门控窗口内到来的新会话按原策略直接丢弃（不挤占已有分析结果）。
+	lastSweep time.Time
 }
+
+// sweepInterval 全表淘汰扫描的最小间隔。
+// 取 5s：会话的 idle 阈值是 300s 量级，晚 5 秒回收完全不影响分析结果，
+// 但能把"表满时的单包成本"从毫秒级压回微秒级。
+const sweepInterval = 5 * time.Second
 
 // now 返回摄入时钟（未注入则用真实时钟）。
 func (a *Aggregator) now() time.Time {
@@ -481,9 +495,13 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 
 	st, ok := a.sessions[key]
 	if !ok {
-		// 容量上限：先回收一轮过期会话；仍有压力则丢弃新会话（只丢弃，不挤占已有分析结果）。
+		// 容量上限：到点才做一次全表淘汰，其余时间直接丢弃新会话。
+		//
+		// 这里**不能**每个新会话都扫一遍全表：表打满时那等于把单包成本从
+		// 微秒级推到几十毫秒（20 万上限实测约 92ms），整条摄入链路会雪崩。
+		// 丢弃是有意的取舍——"只丢弃，不挤占已有分析结果"，与 V1.0 的策略一致。
 		if a.MaxSessions > 0 && len(a.sessions) >= a.MaxSessions {
-			a.evictLocked(now)
+			a.sweepIfDueLocked(now)
 			if len(a.sessions) >= a.MaxSessions {
 				a.dropped++
 				return
@@ -498,7 +516,12 @@ func (a *Aggregator) Ingest(p *PacketInfo) {
 			Location:  p.Location,
 		}
 		st = &sessionState{session: ses, dirty: true, bornAt: now, seenAt: now}
-		// 以"发起方端口 > 对端端口"作为客户端方向的粗略启发（临时端口）
+		// 方向判定：以"本会话第一条报文的方向"为客户端方向。
+		//
+		// 注意这里**不是**按端口大小猜的（虽然内网客户端常用临时高端口）。
+		// 首包定方向的理由：抓包点看到的第一个包通常就是 SYN，方向可靠；
+		// 按端口大小猜会在服务器到服务器、以及固定端口服务（如 443 对 443）上翻车。
+		// 代价是一条会话一旦开头判错，后面全程都是反的——但首包判错的概率远低于端口启发。
 		base := st.session
 		st.isClient = func(srcIP string, srcPort uint16) bool {
 			return srcIP == base.FiveTuple.SrcIP && srcPort == base.FiveTuple.SrcPort
@@ -675,7 +698,7 @@ func (a *Aggregator) Drain(now time.Time) DrainResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	evicted := a.evictLocked(now)
+	evicted := a.sweepIfDueLocked(now)
 
 	out := make([]SessionEntry, 0, len(a.sessions))
 	for _, st := range a.sessions {
@@ -712,6 +735,18 @@ func (a *Aggregator) Drain(now time.Time) DrainResult {
 		Active:  len(a.sessions),
 		Dropped: a.dropped,
 	}
+}
+
+// sweepIfDueLocked 按时钟门控执行一次全表淘汰，未到点直接返回 nil。
+// 调用方需持有 a.mu。
+//
+// 时钟回拨（测试注入更早的时间）时也允许扫，否则测试无法推进状态。
+func (a *Aggregator) sweepIfDueLocked(now time.Time) []string {
+	if !a.lastSweep.IsZero() && !now.Before(a.lastSweep) && now.Sub(a.lastSweep) < sweepInterval {
+		return nil
+	}
+	a.lastSweep = now
+	return a.evictLocked(now)
 }
 
 // evictLocked 回收过期会话，返回被回收的五元组 key。调用方需持有 a.mu。

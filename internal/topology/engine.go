@@ -93,6 +93,10 @@ type sessState struct {
 	firstSeen time.Time // 会话最初被看到的时间，用于识别"五元组被复用"
 	lastSeen  time.Time
 	dirty     bool // 自上次落盘以来有变化（增量基准按需覆盖写）
+	// seenAt 本进程最近一次收到这条会话的**墙钟**时间，只用于内存回收。
+	// 不能用 lastSeen 代替：导入历史 PCAP 时 lastSeen 可能是几个月前，
+	// 按它回收会把刚灌进来、后面还要继续上报的基准全部提前删掉。
+	seenAt time.Time
 }
 
 // Engine 拓扑生长引擎（并发安全）
@@ -322,12 +326,14 @@ func (e *Engine) restoreLocked() error {
 	// 恢复失败不影响启动：宁可少一部分增量基准（个别会话重启后多算一次），
 	// 也不能因为一次查询失败让整个服务起不来。
 	if offs, oerr := e.persist.SessionOffsets(time.Now().Add(-time.Duration(e.sessionMaxAge) * time.Second)); oerr == nil {
+		now := time.Now()
 		for k, o := range offs {
 			e.sessions[k] = &sessState{
 				bytes:     o.Bytes,
 				packets:   o.Packets,
 				firstSeen: o.FirstSeen,
 				lastSeen:  o.LastSeen,
+				seenAt:    now, // 刚从库里恢复，等同"刚刚见过"，不要立刻被内存修剪掉
 			}
 		}
 	}
@@ -373,6 +379,11 @@ func (e *Engine) Flush() error {
 	// 会话增量基准：只在变化时覆盖写（V1.5.1）。
 	// 这是"重启不翻倍"唯一依赖的运行态数据：丢了它就等于把仍在持续的会话
 	// 整笔再算一次，而界面上只会看到一个更大的数字。
+	//
+	// 注意 dirty 必须**在锁内**清除，不能在写库之后回到 e.sessions 里改：
+	// 释锁之后另一个 goroutine 正在往这张 map 里插新五元组，读它就是
+	// concurrent map read and map write —— Go 运行时直接 fatal，recover 拦不住，
+	// 整个进程当场退出（V1.5.1 就是这么崩的）。写库失败时用 remarkOffsetsDirty 放回去。
 	offs := make(map[string]store.SessionOffset, len(e.sessions))
 	if e.sessionDirty {
 		for k, ss := range e.sessions {
@@ -383,6 +394,7 @@ func (e *Engine) Flush() error {
 				Bytes: ss.bytes, Packets: ss.packets,
 				FirstSeen: ss.firstSeen, LastSeen: ss.lastSeen,
 			}
+			ss.dirty = false
 		}
 	}
 	e.dirtyNodes = map[int64]bool{}
@@ -403,23 +415,39 @@ func (e *Engine) Flush() error {
 		}
 	}
 	if len(offs) > 0 {
-		// 写失败不重试：下一轮 Ingest 会把这些会话重新标脏，最多丢 2s 的基准精度。
-		// 重试反而会把整批 upsert 拖到下一轮，代价大于收益。
+		// 写失败不重试一整批：把脏标记放回去，下一轮 Ingest 或下一轮 flush 会再带上。
+		// 关键在于"放回去"这个动作只能在锁内做，且只能按 key 集合操作——绝不能再
+		// 去 e.sessions 里找指针（那正是崩溃的来源）。
 		if err := st.SaveSessionOffsets(offs); err != nil {
+			e.remarkOffsetsDirty(offs)
 			return err
-		}
-		for k := range offs {
-			if ss := e.sessions[k]; ss != nil {
-				ss.dirty = false
-			}
 		}
 		e.pruneOffsets(st)
 	}
 	return nil
 }
 
+// remarkOffsetsDirty 落盘失败时把基准重新标脏，等待下一轮重试。
+//
+// 只遍历传入的 key 集合、并且全程持锁，不触碰 map 本身的结构：
+// 并发写入的是 map 的**槽位**，只要不在锁外读取/遍历 e.sessions 就不会 fatal。
+func (e *Engine) remarkOffsetsDirty(offs map[string]store.SessionOffset) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for k := range offs {
+		if ss := e.sessions[k]; ss != nil {
+			ss.dirty = true
+		}
+	}
+	e.sessionDirty = true
+}
+
 // pruneOffsets 定期清掉早已结束的会话基准（表不能跟着会话数无限长）。
 // 每 10 分钟一次即可：基准过期一两分钟没有影响，脏数据堆一年才有害。
+//
+// 内存与库内必须用**同一套过期口径**一起清。V1.5.1 只清了库、没清内存，
+// e.sessions 就成了整个进程里唯一"只进不出"的容器：聚合器那头已经把会话回收了，
+// 这头的 key 永久留着。现场 70 小时的实例回收了 60 万个会话，这份 map 就跟着长到 60 万。
 func (e *Engine) pruneOffsets(st *store.Store) {
 	now := time.Now()
 	e.mu.Lock()
@@ -432,8 +460,26 @@ func (e *Engine) pruneOffsets(st *store.Store) {
 	if maxAge <= 0 {
 		maxAge = 6 * time.Hour
 	}
+	cutoff := now.Add(-maxAge)
+	pruned := 0
+	for k, ss := range e.sessions {
+		if ss == nil {
+			delete(e.sessions, k)
+			pruned++
+			continue
+		}
+		// seenAt 为零说明这条基准刚被建出来（或从库里恢复）还没打过时间戳，留着。
+		if !ss.seenAt.IsZero() && ss.seenAt.Before(cutoff) {
+			delete(e.sessions, k)
+			pruned++
+		}
+	}
+	total := len(e.sessions)
 	e.mu.Unlock()
-	_ = st.PruneSessionOffsets(now.Add(-maxAge))
+	if pruned > 0 {
+		log.Printf("[topology] 清理过期会话基准 %d 条，剩余 %d 条", pruned, total)
+	}
+	_ = st.PruneSessionOffsets(cutoff)
 }
 
 // remarkDirty 写库失败时把脏集合放回去，等待下一轮重试（避免单次抖动丢失拓扑）。
@@ -583,6 +629,7 @@ func (e *Engine) Ingest(s *model.Session) {
 	st.bytes = totalBytes
 	st.packets = s.Packets
 	st.lastSeen = s.LastSeen
+	st.seenAt = time.Now()
 	st.dirty = true
 	e.sessionDirty = true
 	if st.firstSeen.IsZero() || (!s.FirstSeen.IsZero() && s.FirstSeen.Before(st.firstSeen)) {
@@ -911,6 +958,13 @@ func (e *Engine) matchDomainExLocked(ip string) (name string, ones int) {
 	return best, bestOnes
 }
 
+// Domains 返回网络域配置的副本（detect 模块一轮评估取一次，避免逐 IP 抢锁）。
+func (e *Engine) Domains() []model.NetDomain {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return append([]model.NetDomain(nil), e.domains...)
+}
+
 // MatchDomainPrefix 查询 IP 命中的网络域及其 CIDR 前缀长度（detect 模块使用）。
 // 域名为空表示未命中任何域；ones == 0 表示仅被通配域（0.0.0.0/0、::/0）兜底命中。
 func (e *Engine) MatchDomainPrefix(ip string) (string, int) {
@@ -988,6 +1042,45 @@ func (e *Engine) AddNodeLabel(nodeID int64, label string) {
 	}
 }
 
+// NodeEffect 一条"事件→节点"的联动效果。
+type NodeEffect struct {
+	NodeID int64
+	Level  string // 非空时覆盖节点风险等级
+	Label  string // 非空时给节点打标签
+}
+
+// ApplyNodeEffects 批量应用事件对节点的联动（一次加锁）。
+//
+// 单条 SetNodeRisk / AddNodeLabel 各自加一次写锁。评估器一轮可能新建上千条事件，
+// 逐条应用就是几千次写锁，而同一时刻 8 路探针在抢同一把锁——
+// Go 的互斥锁没有公平保证，长写循环会把读路径一起饿住。
+// 实测 1.1 万会话、单轮新建 4.7 千条事件时，光这一步就要 1.9 秒。
+func (e *Engine) ApplyNodeEffects(items []NodeEffect) {
+	if len(items) == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, it := range items {
+		n, ok := e.nodes[it.NodeID]
+		if !ok {
+			continue
+		}
+		dirty := false
+		if it.Level != "" && n.RiskLevel != it.Level {
+			n.RiskLevel = it.Level
+			dirty = true
+		}
+		if it.Label != "" && !contains(n.Labels, it.Label) {
+			n.Labels = append(n.Labels, it.Label)
+			dirty = true
+		}
+		if dirty {
+			e.dirtyNodes[it.NodeID] = true
+		}
+	}
+}
+
 // GetNode 按 ID 查询节点。
 func (e *Engine) GetNode(id int64) *model.Node {
 	e.mu.RLock()
@@ -1014,7 +1107,12 @@ func (e *Engine) NodeByKey(key string) *model.Node {
 	defer e.mu.RUnlock()
 	if id, ok := e.nodeKey[key]; ok {
 		if n := e.nodes[id]; n != nil {
-			return n
+			// 返回副本，与 GetNode / NodeByIP 保持一致。
+			// 返回内部指针等于把一把没上锁的刀递出去：锁一释放，调用方拿到的
+			// 就是别人正在改的结构体，读到的字段可能是半新半旧的（节点老化、
+			// 聚合重建都在改它）。当前调用点只读，但这是迟早会被人写坏的那种 API。
+			cp := *n
+			return &cp
 		}
 	}
 	return nil
@@ -1207,6 +1305,34 @@ func APINodeID(n *model.Node) string {
 
 func hasLabel(n *model.Node, l string) bool { return contains(n.Labels, l) }
 
+// nodeSortLess 拓扑快照的稳定排序：主机在前、网段聚合其次、外部聚合最后；
+// 同类内部，主机按数值 ID、聚合节点按 CIDR 字符串。
+//
+// 为什么要专门写：APINodeID 对主机返回十进制字符串，直接按字符串排序会得到
+// "1, 10, 11, 2, 20, 3..." 这种字典序，节点一多就明显错乱。
+func nodeSortLess(a, b *model.Node) bool {
+	ra, rb := nodeSortRank(a), nodeSortRank(b)
+	if ra != rb {
+		return ra < rb
+	}
+	if ra == 0 {
+		return a.ID < b.ID
+	}
+	return APINodeID(a) < APINodeID(b)
+}
+
+// nodeSortRank 排序分组：0=真实主机，1=网段聚合，2=外部聚合。
+func nodeSortRank(n *model.Node) int {
+	switch {
+	case hasLabel(n, LabelSubnetAgg):
+		return 1
+	case hasLabel(n, LabelExternalAg):
+		return 2
+	default:
+		return 0
+	}
+}
+
 // isRiskAnchor 判断节点是否为"风险锚点"。
 // V1.6：中/高风险节点（多网融合、隧道、可疑出网等）不参与网段聚合，
 // 在拓扑中始终单独呈现。理由——大网里 /24 一旦超过聚合阈值就折叠成一个网段节点，
@@ -1320,7 +1446,11 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 			stats.ActiveEdges++
 		}
 	}
-	sort.Slice(nodes, func(i, j int) bool { return APINodeID(&nodes[i]) < APINodeID(&nodes[j]) })
+	// 排序：真实主机（按数值 ID）→ 网段聚合 → 外部聚合。
+	//
+	// 之前直接按 APINodeID 字符串排，得到的是字典序："10" 排在 "9" 前面。
+	// 节点少时看不出来，一多就是明显的错乱，而列表/下拉框都直接吃这个顺序。
+	sort.SliceStable(nodes, func(i, j int) bool { return nodeSortLess(&nodes[i], &nodes[j]) })
 
 	return model.TopoSnapshot{
 		Nodes:       nodes,
@@ -1651,7 +1781,6 @@ func (e *Engine) SubnetSnapshot(cidr string) model.TopoSnapshot {
 		}
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
-	visible := e.visibleMapLocked()
 	var edges []model.Edge
 	stats := model.TopoStats{NodeCount: len(nodes)}
 	for _, edge := range e.edges {
@@ -1672,7 +1801,6 @@ func (e *Engine) SubnetSnapshot(cidr string) model.TopoSnapshot {
 			stats.ActiveNodes++
 		}
 	}
-	_ = visible
 	return model.TopoSnapshot{Nodes: nodes, Edges: edges, Stats: stats, GeneratedAt: time.Now().UTC()}
 }
 

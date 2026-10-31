@@ -114,7 +114,7 @@ func evalClash(rc *ruleContext) []model.RiskEvent {
 		if !topology.IsPrivate(s.FiveTuple.SrcIP) || topology.IsPrivate(s.FiveTuple.DstIP) {
 			continue
 		}
-		node := rc.d.Engine.NodeByIP(s.FiveTuple.SrcIP)
+		node := rc.nodeByIP(s.FiveTuple.SrcIP)
 		if node == nil {
 			continue
 		}
@@ -129,7 +129,7 @@ func evalClash(rc *ruleContext) []model.RiskEvent {
 		if !topology.IsPrivate(s.FiveTuple.SrcIP) || topology.IsPrivate(s.FiveTuple.DstIP) {
 			continue // 只看内网→公网
 		}
-		node := rc.d.Engine.NodeByIP(s.FiveTuple.SrcIP)
+		node := rc.nodeByIP(s.FiveTuple.SrcIP)
 		if node == nil {
 			continue
 		}

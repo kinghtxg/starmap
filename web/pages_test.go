@@ -32,6 +32,8 @@ func TestPagesShareSkeleton(t *testing.T) {
 	pages := []string{
 		"index.html", "assets.html", "events.html", "whitelist.html",
 		"domains.html", "ingest.html", "settings.html", "logs.html", "about.html",
+		// V1.6 新增：变更视图与主动发现任务账
+		"changes.html", "tasks.html",
 	}
 	required := []struct {
 		frag string

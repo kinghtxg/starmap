@@ -37,7 +37,7 @@ func evalXFFSpoof(rc *ruleContext) []model.RiskEvent {
 		if !topology.IsPrivate(s.FiveTuple.SrcIP) {
 			continue
 		}
-		node := rc.d.Engine.NodeByIP(s.FiveTuple.SrcIP)
+		node := rc.nodeByIP(s.FiveTuple.SrcIP)
 		if node == nil {
 			continue
 		}

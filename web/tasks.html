@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>发现任务 · StarMap 星图</title>
+<link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+</head>
+<body>
+<div class="sm-app">
+  <header class="sm-topbar" id="smTopbar"></header>
+
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">发现任务</h1>
+          <p class="sm-sub">主动发现任务账 · 扫了什么、何时、扫出多少 · 可停止运行中的任务</p>
+        </div>
+        <div class="sm-toolbar">
+          <button class="sm-btn" data-role="operator" data-act="export" data-ico="download">导出 CSV</button>
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+        </div>
+      </div>
+
+      <div class="sm-content">
+        <div class="sm-grid sm-grid-4 sm-anim" id="statsBar"></div>
+
+        <section class="sm-card sm-anim" style="margin-top:14px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <div class="sm-card-hd">
+            <div class="sm-row is-center" style="gap:10px">
+              <h2>任务列表</h2>
+              <span class="sm-badge" id="cntBadge">0 个</span>
+            </div>
+            <div class="sm-toolbar">
+              <select class="sm-select is-sm sm-w-auto" id="fStatus" aria-label="状态筛选">
+                <option value="">全部状态</option>
+                <option value="running">运行中</option>
+                <option value="done">已完成</option>
+                <option value="error">失败</option>
+                <option value="cancelled">已停止</option>
+              </select>
+            </div>
+          </div>
+          <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+            <div class="sm-table-wrap">
+              <table class="sm-table" id="taskTable"></table>
+            </div>
+          </div>
+          <div class="sm-card-ft" id="pager"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 详情抽屉：操作按钮统一置于底部 -->
+<div class="sm-drawer-mask" id="drawer-mask" data-act="close-drawer"></div>
+<aside class="sm-drawer" id="drawer">
+  <div class="sm-drawer-hd">
+    <h3 id="drawerTitle">任务详情</h3>
+    <button class="sm-btn is-text is-icon is-sm" data-act="close-drawer" data-ico="close" title="关闭"></button>
+  </div>
+  <div class="sm-drawer-bd" id="drawerBody"></div>
+  <div class="sm-drawer-ft" id="drawerFt"></div>
+</aside>
+
+<script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
+<script>
+'use strict';
+
+var STATUS_LABEL = { running: '运行中', done: '已完成', error: '失败', cancelled: '已停止' };
+var STATUS_CLS = { running: 'is-info', done: 'is-success', error: 'is-danger', cancelled: 'is-warning' };
+
+var view = [];     // 当前页任务
+var total = 0;     // 当前筛选条件下的服务端总数
+var page = 1;
+var SIZE = 20;
+var seq = 0;       // 请求序号：快速切筛选时旧响应可能后到，必须丢弃
+
+function statusBadge(s) {
+  return '<span class="sm-badge ' + (STATUS_CLS[s] || '') + '">' + UI.esc(STATUS_LABEL[s] || s || '-') + '</span>';
+}
+
+// 耗时：运行中的任务没有结束时间，要按"到现在"算。
+// 否则表格里恒显示 0 秒，看起来像卡住了——而这恰恰是用户最想确认的事。
+function elapsed(t) {
+  if (!t || !t.started) return '—';
+  var start = new Date(t.started).getTime();
+  if (!isFinite(start)) return '—';
+  // 后端未结束的任务会回零值时间，不能直接 new Date() 后相减（会得到 1970 年）
+  var fin = t.finished ? new Date(t.finished).getTime() : 0;
+  var end = fin && fin > start ? fin : Date.now();
+  var s = Math.floor((end - start) / 1000);
+  if (s < 0) return '—';
+  if (s < 60) return s + ' 秒';
+  var m = Math.floor(s / 60);
+  if (m < 60) return m + ' 分 ' + (s % 60) + ' 秒';
+  var h = Math.floor(m / 60);
+  if (h < 24) return h + ' 时 ' + (m % 60) + ' 分';
+  return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 时';
+}
+
+function targetsText(list) {
+  if (!Array.isArray(list) || !list.length) return '—';
+  if (list.length <= 2) return list.join('、');
+  return list.slice(0, 2).join('、') + ' 等 ' + list.length + ' 项';
+}
+
+/* ---------- 加载 ---------- */
+function load() {
+  var tbl = document.getElementById('taskTable');
+  tbl.innerHTML = UI.skeletonRows(5);
+  var status = document.getElementById('fStatus').value;
+  var my = ++seq;
+  return API.tasks({ status: status, limit: SIZE, offset: (page - 1) * SIZE })
+    .then(function (data) {
+      if (my !== seq) return;
+      view = Array.isArray(data) ? data : [];
+      total = API.meta('/api/tasks').total;
+      if (total < view.length) total = view.length;
+      // 最后一页被清空（历史任务超上限被裁剪）→ 自动回退一页
+      if (!view.length && page > 1) { page--; return load(); }
+      render();
+    })
+    .catch(function (e) {
+      if (my !== seq) return;
+      view = []; total = 0;
+      tbl.innerHTML = UI.errorHTML(e);
+      document.getElementById('pager').innerHTML = '';
+      document.getElementById('cntBadge').textContent = '0 个';
+      renderStats([]);
+    });
+}
+
+function render() {
+  document.getElementById('cntBadge').textContent = total + ' 个';
+  renderStats(view);
+
+  var tbl = document.getElementById('taskTable');
+  if (!view.length) {
+    tbl.innerHTML = UI.emptyHTML('还没有发现任务',
+      '在「主机资产 → 端口记录」里点「深度发现」发起一轮扫描，结果会记在这里');
+    document.getElementById('pager').innerHTML = '';
+    return;
+  }
+
+  tbl.innerHTML =
+    // 列宽是通过的：1147px 的可用宽度下，固定列合计 ≈ 944，剩下的给「目标」。
+    // 早前有一版加了「档位」列且没设 dense，固定列合计超出容器，
+    // 最后一列「操作」被挤出可视区——表格能横向滚动，但用户不会去滚，
+    // 看到的就是"没有详情按钮"。列数宁少勿多，档位在详情抽屉里有。
+    '<table class="sm-table is-dense"><thead><tr>' +
+    '<th style="min-width:150px">任务 ID</th>' +
+    '<th style="min-width:120px">目标</th>' +
+    '<th style="min-width:78px">状态</th>' +
+    '<th style="min-width:140px">进度</th>' +
+    '<th style="min-width:86px">存活主机</th>' +
+    '<th style="min-width:86px">开放端口</th>' +
+    '<th style="min-width:74px">指纹</th>' +
+    '<th style="min-width:92px">耗时</th>' +
+    '<th style="min-width:130px">开始时间</th>' +
+    '<th style="min-width:104px" class="sm-td-ops">操作</th>' +
+    '</tr></thead><tbody>' +
+    view.map(function (t) {
+      var pct = t.total > 0 ? Math.round(t.done / t.total * 100) : 0;
+      // 进度条只在 running 时有意义：结束了的任务画满格会让人误以为"扫完了"，
+      // 而它可能是被停掉或失败在半路的。
+      var prog = t.status === 'running'
+        ? '<div class="sm-progress" title="' + UI.escAttr(t.done + '/' + t.total) + '"><i style="width:' + pct + '%"></i></div>' +
+          '<div class="sm-t-3" style="font-size:11px;margin-top:3px">' + t.done + '/' + t.total +
+          (t.current ? ' · ' + UI.esc(t.current) : '') + '</div>'
+        : '<span class="sm-t-2" style="font-size:12px">' + t.done + '/' + t.total + '</span>';
+      var ops = '<button class="sm-btn is-text is-sm" data-act="open" data-id="' + UI.escAttr(t.id) + '">详情</button>';
+      if (t.status === 'running') {
+        ops += '<button class="sm-btn is-text is-sm is-danger" data-role="operator" data-act="stop" ' +
+          'data-id="' + UI.escAttr(t.id) + '">停止</button>';
+      }
+      return '<tr>' +
+        '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(t.id) + '</span></td>' +
+        '<td><div class="sm-ellipsis" title="' + UI.escAttr((t.targets || []).join('、')) + '">' +
+          UI.esc(targetsText(t.targets)) + '</div></td>' +
+        '<td>' + statusBadge(t.status) + '</td>' +
+        '<td>' + prog + '</td>' +
+        '<td class="sm-mono">' + UI.fmtNum(t.alive || 0) + '</td>' +
+        '<td class="sm-mono">' + UI.fmtNum(t.open_ports || 0) + '</td>' +
+        '<td class="sm-mono">' + UI.fmtNum(t.fingerprints || 0) + '</td>' +
+        '<td class="sm-t-2" style="font-size:12px">' + UI.esc(elapsed(t)) + '</td>' +
+        '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtTime(t.started)) + '</td>' +
+        '<td class="sm-td-ops">' + ops + '</td>' +
+        '</tr>';
+    }).join('') +
+    '</tbody></table>';
+
+  document.getElementById('pager').innerHTML = UI.pagerHTML(total, page, SIZE, 'page');
+}
+
+// 统计卡片只统当前页：全站分项要额外扫三次库，
+// 而"最近 20 个任务的分布"对判断"最近扫描是否顺利"已经够用。
+// 文案里明确写「本页」，不让读者误以为是全站口径。
+function renderStats(list) {
+  var st = { running: 0, done: 0, error: 0, cancelled: 0 };
+  var hosts = 0, ports = 0;
+  list.forEach(function (t) {
+    if (st[t.status] !== undefined) st[t.status]++;
+    hosts += t.alive || 0;
+    ports += t.open_ports || 0;
+  });
+  var items = [
+    { k: '运行中', v: st.running, i: 'play', cls: st.running ? 'is-warn' : 'is-off', ex: '本页' },
+    { k: '已完成', v: st.done, i: 'check', cls: 'is-ok', ex: '本页' },
+    { k: '失败 / 已停止', v: st.error + st.cancelled, i: 'warn', cls: (st.error + st.cancelled) ? 'is-high' : 'is-off', ex: '本页' },
+    { k: '累计存活主机', v: hosts, i: 'node', cls: '', ex: '本页 · 端口 ' + UI.fmtNum(ports) }
+  ];
+  var host = document.getElementById('statsBar');
+  host.innerHTML = items.map(function (it) {
+    return '<div class="sm-stat ' + it.cls + '">' +
+      '<div class="sm-stat-ico">' + UI.ico(it.i) + '</div>' +
+      '<div style="min-width:0">' +
+      '<div class="sm-stat-val" data-v="' + it.v + '">0</div>' +
+      '<div class="sm-stat-key">' + UI.esc(it.k) + '</div>' +
+      '<div class="sm-stat-extra">' + UI.esc(it.ex) + '</div>' +
+      '</div></div>';
+  }).join('');
+  host.querySelectorAll('.sm-stat-val').forEach(function (el) {
+    UI.countTo(el, Number(el.getAttribute('data-v')) || 0);
+  });
+}
+
+/* ---------- 详情 ---------- */
+function kv(k, v) {
+  return '<div class="sm-kv"><div class="sm-kv-k">' + UI.esc(k) + '</div><div class="sm-kv-v">' + v + '</div></div>';
+}
+
+function openTask(id) {
+  var t = null;
+  view.forEach(function (x) { if (x.id === id) t = x; });
+  if (!t) {
+    // 列表刚被别处刷掉（比如历史任务被裁剪）时要重拉，而不是弹一个空抽屉
+    UI.toast('任务已不在当前列表，请刷新', 'warn');
+    return;
+  }
+
+  document.getElementById('drawerTitle').textContent = '任务 ' + id;
+  var html =
+    '<div class="sm-grid sm-grid-2">' +
+    kv('状态', statusBadge(t.status)) +
+    kv('档位', UI.esc(t.profile_label || t.profile || '—')) +
+    kv('主机总数', UI.fmtNum(t.total || 0)) +
+    kv('已完成', UI.fmtNum(t.done || 0)) +
+    kv('存活主机', UI.fmtNum(t.alive || 0)) +
+    kv('开放端口', UI.fmtNum(t.open_ports || 0)) +
+    kv('识别指纹', UI.fmtNum(t.fingerprints || 0)) +
+    kv('耗时', UI.esc(elapsed(t))) +
+    kv('发起人', UI.esc(t.created_by || '—')) +
+    kv('开始时间', UI.esc(UI.fmtTime(t.started))) +
+    kv('结束时间', t.finished ? UI.esc(UI.fmtTime(t.finished)) : '—') +
+    '</div>' +
+    '<div class="sm-divider"></div>' +
+    '<div class="sm-label" style="margin-bottom:6px">扫描目标</div>' +
+    '<div class="sm-mono" style="font-size:12px;word-break:break-all">' +
+    UI.esc((t.targets || []).join('、') || '—') + '</div>';
+
+  if (t.error) {
+    html += '<div class="sm-divider"></div>' +
+      '<div class="sm-alert is-warn"><div class="sm-alert-body">' +
+      '<b>任务信息</b><div style="margin-top:6px">' + UI.esc(t.error) + '</div></div></div>';
+  }
+
+  if (Array.isArray(t.hosts) && t.hosts.length) {
+    html += '<div class="sm-divider"></div>' +
+      '<div class="sm-label" style="margin-bottom:8px">活跃主机（' + t.hosts.length +
+      (t.truncated ? '+' : '') + '）</div>' +
+      '<div class="sm-table-wrap"><table class="sm-table"><thead><tr>' +
+      '<th>IP</th><th>端口</th><th>识别</th></tr></thead><tbody>' +
+      t.hosts.map(function (h) {
+        return '<tr><td class="sm-mono" style="font-size:12px">' + UI.esc(h.ip) + '</td>' +
+          '<td class="sm-mono" style="font-size:12px">' + UI.esc((h.ports || []).join(', ')) + '</td>' +
+          '<td style="font-size:12px">' + UI.esc((h.services || []).join(' / ') || h.title || '—') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  document.getElementById('drawerBody').innerHTML = html;
+  document.getElementById('drawerFt').innerHTML =
+    (t.status === 'running'
+      ? '<button class="sm-btn is-danger" data-role="operator" data-act="stop" data-id="' +
+        UI.escAttr(t.id) + '">停止任务</button>'
+      : '') +
+    '<button class="sm-btn" data-act="close-drawer" style="margin-left:auto">关闭</button>';
+  UI.openDrawer('drawer');
+}
+
+/* ---------- 停止 ---------- */
+function stopTask(id) {
+  UI.confirm({
+    title: '停止任务',
+    content: '停止后已扫完的结果会保留，未扫的主机不再继续。当前正在探测的那台主机收尾后退出。',
+    okText: '停止'
+  })
+    .then(function (ok) {
+      if (!ok) return null;
+      return API.cancelTask(id);
+    })
+    .then(function (r) {
+      if (!r) return;
+      UI.toast('已请求停止', 'ok');
+      load();
+    })
+    .catch(function (e) { UI.toast(e.message || '停止失败', 'err'); });
+}
+
+/* ---------- 事件绑定 ---------- */
+UI.on('refresh', load);
+UI.on('open', function (el) { openTask(el.getAttribute('data-id')); });
+UI.on('close-drawer', function () { UI.closeDrawer('drawer'); });
+UI.on('stop', function (el) { stopTask(el.getAttribute('data-id')); });
+UI.on('export', function () {
+  // 导出的筛选条件要跟着当前状态走，否则"筛了失败任务，导出的却是全部"
+  // 走 API.download 而不是 location.href：失败时能弹提示，不会整页跳到 JSON 错误
+  API.download('tasks', { status: document.getElementById('fStatus').value }).then(function (r) {
+    UI.toast('已导出 ' + r.name, 'ok');
+  }).catch(function (e) { UI.toast(e.message, 'err'); });
+});
+UI.on('page', function (el) {
+  // 必须重新请求：view 里只有当前页的 20 条，本地翻页翻不出第 2 页
+  var p = Number(el.getAttribute('data-page')) || 1;
+  if (p === page) return;
+  page = p;
+  load();
+});
+
+document.getElementById('fStatus').addEventListener('change', function () { page = 1; load(); });
+document.getElementById('drawer-mask').addEventListener('click', function () { UI.closeDrawer('drawer'); });
+
+document.addEventListener('DOMContentLoaded', load);
+
+// 有任务在跑时自动刷新：用户开这个页面就是为了看进度，让他手动点等于没做这件事。
+// 全部结束后循环空转（只是判断一下数组），不发请求。
+setInterval(function () {
+  if (document.hidden) return; // 后台标签页不刷新，省掉无意义的请求
+  var anyRunning = view.some(function (t) { return t.status === 'running'; });
+  if (anyRunning) load();
+}, 3000);
+</script>
+</body>
+</html>

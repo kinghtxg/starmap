@@ -317,6 +317,12 @@ type SystemConfig struct {
 	SessionIdleSeconds int64 `json:"session_idle_seconds" yaml:"session_idle_seconds"`
 	// SessionMaxAgeSeconds 单会话最长存活（默认 21600 秒 = 6 小时），防不关闭的长连接撑爆。
 	SessionMaxAgeSeconds int64 `json:"session_max_age_seconds" yaml:"session_max_age_seconds"`
+	// SessionRetentionDays 会话历史表（sessions）保留天数（默认 30，0 表示不清理）。
+	//
+	// 这张表记的是"历史上出现过的每一条连接"，被动环境里增长最快、也最没人看：
+	// 现场实测一台机器跑 3 天攒了 60 万行 / 148MB，按此线性外推一年约 18GB。
+	// 它和 SessionMaxAgeSeconds 是两件事：后者管内存里的活跃会话，它管落库的历史。
+	SessionRetentionDays int `json:"session_retention_days" yaml:"session_retention_days"`
 	// 可观测性（V1.0）。
 	// LogLevel debug|info|warn|error（默认 info）；LogFormat text|json（默认 text）。
 	LogLevel  string `json:"log_level" yaml:"log_level"`
@@ -515,4 +521,49 @@ type LedgerEntry struct {
 	Description string    `json:"description"` // 备注
 	Batch       string    `json:"batch"`       // 导入批次（文件名）
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// ---------- 主动发现任务（V1.6） ----------
+
+// DiscoverTask 一轮主动发现的**持久化视图**。
+//
+// 为什么需要它：1.2 起任务状态只存在内存里（`discTasks`），进程一重启就没了。
+// 运维问「上周三扫的 10.0.0.0/24 跑完了吗、扫出多少端口」，答案只在日志里翻。
+// 灯塔那类产品的任务页是第一入口，靠的就是这份历史。
+//
+// 落库的是**任务账**（扫了什么、何时、结果计数），不是扫描结果本身：
+// 端口/指纹早已写进 ports 表，重复存一份只会让两处数据开始漂移。
+type DiscoverTask struct {
+	ID           string    `json:"id"`
+	Targets      []string  `json:"targets"`
+	Profile      string    `json:"profile"`
+	ProfileLabel string    `json:"profile_label"`
+	Status       string    `json:"status"` // running | done | error | cancelled
+	Total        int       `json:"total"`
+	Done         int       `json:"done"`
+	Alive        int       `json:"alive"`
+	OpenPorts    int       `json:"open_ports"`
+	Fingerprints int       `json:"fingerprints"`
+	Error        string    `json:"error,omitempty"`
+	CreatedBy    string    `json:"created_by,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	FinishedAt   time.Time `json:"finished_at,omitempty"`
+}
+
+// DiscoverTaskStatusCancelled 主动取消（人点了"停止"）。
+// 与 error 分开：一个是被中断，一个是跑挂了，运维看到的处置动作不一样。
+const DiscoverTaskStatusCancelled = "cancelled"
+
+// ---------- 趋势统计（V1.6） ----------
+
+// TrendPoint 某一天的新增计数。
+//
+// 只统计"新增"不统计"存量"：存量在 /api/stats 已经有了，趋势图要回答的是
+// 「这周网里长出了多少东西」。日期用 YYYY-MM-DD 字符串，不做时区换算——
+// 库里存的是本地时间，换算只会引入一层没人对得上的偏移。
+type TrendPoint struct {
+	Date   string `json:"date"`   // YYYY-MM-DD
+	Assets int    `json:"assets"` // 当天新登记的资产
+	Ports  int    `json:"ports"`  // 当天首次发现的端口
+	Events int    `json:"events"` // 当天新建的风险事件
 }

@@ -165,6 +165,73 @@
     ledgerClear: () => req('DELETE', '/api/ledger'),
     // 七层转发识别（V1.8）：代理节点 + 背后真实客户端
     proxies: () => req('GET', '/api/proxies'),
+    // 主动发现任务账（V1.6）：历史任务列表 / 详情 / 取消
+    tasks: (params = {}) => {
+      const qs = new URLSearchParams();
+      if (params.status) qs.set('status', params.status);
+      if (params.limit) qs.set('limit', params.limit);
+      if (params.offset) qs.set('offset', params.offset);
+      const s = qs.toString();
+      return req('GET', '/api/tasks' + (s ? '?' + s : ''));
+    },
+    task: (id) => req('GET', '/api/tasks/' + encodeURIComponent(id)),
+    cancelTask: (id) => req('POST', '/api/tasks/' + encodeURIComponent(id) + '/cancel'),
+    // 变更视图（V1.6）：窗口内新增 / 不再活动的端口
+    changes: (days) => req('GET', '/api/changes' + (days ? '?days=' + Number(days) : '')),
+    // 趋势（V1.6）：最近 N 天新增资产/端口/事件
+    trend: (days) => req('GET', '/api/trend' + (days ? '?days=' + Number(days) : '')),
+    // 导出（V1.6）：只负责拼 URL，真正的下载走下面的 download()
+    exportURL: (kind, params = {}) => {
+      const qs = new URLSearchParams();
+      Object.keys(params).forEach((k) => {
+        if (params[k]) qs.set(k, params[k]);
+      });
+      const s = qs.toString();
+      return '/api/export/' + kind + '.csv' + (s ? '?' + s : '');
+    },
+    // 下载 CSV（V1.6）。
+    //
+    // 为什么不直接 location.href = exportURL()：
+    // 服务端返回 401/403（会话过期、只读账号）时，浏览器会把**整页**跳到那段
+    // JSON 错误上，用户从导出页被踢到一个白底黑字的 {"error":"..."} 回不来。
+    // fetch 能先看状态码，失败时弹 toast、页面原地不动。
+    //
+    // 内存边界：导出在服务端被 exportMaxRows（20 万行）钉死，单次响应最多
+    // 几十 MB，blob 放内存里没问题；不设上限才是真的会把标签页撑爆。
+    download: async (kind, params = {}) => {
+      const url = API.exportURL(kind, params);
+      let resp;
+      try {
+        resp = await fetch(url, { credentials: 'same-origin' });
+      } catch (e) {
+        throw new Error('无法连接后端服务（' + e.message + '）');
+      }
+      if (!resp.ok) {
+        let msg = 'HTTP ' + resp.status;
+        try {
+          const data = await resp.json();
+          if (data && data.error) msg = data.error;
+        } catch (_) { /* ignore */ }
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      // 文件名以服务端 Content-Disposition 为准（带时间戳，导出多次不会互相覆盖）
+      let name = 'starmap-' + kind + '.csv';
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = /filename="?([^";]+)"?/.exec(cd);
+      if (m && m[1]) name = m[1];
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = name;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // 立即 revoke 在部分浏览器里会让下载拿不到数据，延后释放
+      setTimeout(() => URL.revokeObjectURL(href), 10000);
+      return { name: name, bytes: blob.size };
+    },
   };
 
   global.API = API;

@@ -450,6 +450,10 @@
   var NAV = [
     { href: 'index.html', label: '拓扑总览', icon: 'topo', group: '测绘' },
     { href: 'assets.html', label: '主机资产', icon: 'asset', group: '测绘' },
+    // 变更与任务是"时间维度"的两个入口（V1.6）。放在测绘组而不是运维组：
+    // 它们回答的是"网里变了什么"，属于测绘结论，不是运维动作。
+    { href: 'changes.html', label: '变更', icon: 'clock', group: '测绘' },
+    { href: 'tasks.html', label: '发现任务', icon: 'drill', group: '测绘' },
     { href: 'events.html', label: '风险事件', icon: 'alert', group: '测绘' },
     { href: 'whitelist.html', label: '白名单', icon: 'shield', group: '测绘' },
     { href: 'domains.html', label: '网络域', icon: 'domain', group: '测绘' },

@@ -49,6 +49,7 @@ func Default() model.SystemConfig {
 		SessionMaxCount:      200000,    // 20 万条会话上限
 		SessionIdleSeconds:   300,       // 静默 5 分钟回收
 		SessionMaxAgeSeconds: 21600,     // 单会话最长 6 小时
+		SessionRetentionDays: 30,        // 会话历史保留 30 天（只清库，不影响内存会话表）
 		NmapPath:             "",        // 默认 "nmap"，空则运行时按 "nmap" 探测
 		ScanPorts:            "1-65535", // 主动扫描默认全端口
 		ScanRate:             "T4",      // 扫描速率
@@ -146,6 +147,9 @@ func Load(path string) (model.SystemConfig, error) {
 	}
 	if fileCfg.SessionMaxAgeSeconds != 0 {
 		cfg.SessionMaxAgeSeconds = fileCfg.SessionMaxAgeSeconds
+	}
+	if fileCfg.SessionRetentionDays != 0 {
+		cfg.SessionRetentionDays = fileCfg.SessionRetentionDays
 	}
 	if fileCfg.NmapPath != "" {
 		cfg.NmapPath = fileCfg.NmapPath

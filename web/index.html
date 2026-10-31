@@ -551,6 +551,7 @@ function drilldown(cidr) {
     parentSnapshot = snapshot;
     breadcrumb.push(cidr);
     buildGraph(data);
+    renderTruncationNotice(null); // 下钻视图没有"被截断"这回事，别把全网的提示带进来
     document.getElementById('btnBack').classList.remove('sm-hide');
     document.getElementById('btnBack').textContent = '← 返回' + (breadcrumb.length > 1 ? '上级' : '全网');
     UI.toast('已进入子网 ' + cidr, 'ok');
@@ -719,6 +720,32 @@ function loadSubnets() {
   });
 }
 
+/* 截断提示（V1.5.2）：服务端为防止负载爆炸会限制返回的节点/边数量，
+ * 上限只在"规则大面积命中"这类病态规模下才会触发。
+ * 但截断必须让用户看见——静默截断会让运维以为"全网就这么点设备"，
+ * 这比返回慢十倍更危险。 */
+function renderTruncationNotice(data) {
+  var host = document.getElementById('topo');
+  if (!host) return;
+  var old = document.getElementById('topoTruncNotice');
+  if (old && old.parentNode) old.parentNode.removeChild(old);
+  if (!data || !data.Truncated) return;
+  var el = document.createElement('div');
+  el.id = 'topoTruncNotice';
+  el.className = 'sm-alert is-info';
+  el.style.cssText = 'position:absolute;left:16px;top:16px;z-index:6;max-width:400px;';
+  el.innerHTML =
+    '<span class="sm-alert-ico">' + UI.ico('info') + '</span>' +
+    '<div class="sm-alert-body">' +
+    '<div style="font-weight:600">节点过多，已按风险优先展示</div>' +
+    '<div class="sm-t-3" style="font-size:12px;margin-top:2px">' +
+    '节点 ' + UI.fmtNum(data.Nodes ? data.Nodes.length : 0) + ' / ' + UI.fmtNum(data.TotalNodes || 0) +
+    '，边 ' + UI.fmtNum(data.Edges ? data.Edges.length : 0) + ' / ' + UI.fmtNum(data.TotalEdges || 0) +
+    '。可下钻到具体网段查看全量。' +
+    '</div></div>';
+  host.appendChild(el);
+}
+
 /* ---------- 加载 ---------- */
 function load() {
   if (!topo) {
@@ -737,6 +764,7 @@ function load() {
       return;
     }
     buildGraph(data);
+    renderTruncationNotice(data);
     openNodeFromURL();
   }).catch(function (e) {
     if (topo) topo.showOverlay(UI.errorHTML(e));

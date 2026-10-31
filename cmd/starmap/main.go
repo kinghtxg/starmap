@@ -158,24 +158,9 @@ func main() {
 	engine.RunAging(ctx, time.Minute)
 	// 拓扑批量落盘（P0-2）：2s 一次聚合写库，避免每个报文都写；ctx 取消时补一次 flush
 	engine.RunPersist(ctx, 2*time.Second)
-	// 审计日志保留期清理（§10.8，每日一次）
-	go func() {
-		t := time.NewTicker(24 * time.Hour)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if cfg.AuditRetentionDays > 0 {
-					cutoff := time.Now().AddDate(0, 0, -cfg.AuditRetentionDays)
-					if n, err := st.DeleteAuditLogsBefore(cutoff); err == nil && n > 0 {
-						slog.Info("清理超期审计日志", "deleted", n, "retention_days", cfg.AuditRetentionDays)
-					}
-				}
-			}
-		}
-	}()
+	// 审计日志保留期清理已统一到 maintenanceLoop（那里读的是可热改的配置）。
+	// 此前这里还有一个 24h 的独立 ticker 干同一件事，且用的是**启动时**的配置——
+	// 后台把保留期从 90 天改成 30 天后，这个 ticker 仍然按 90 天清，属于"改了没生效"的典型。
 	// 账外资产离线清理（V1.2）：未归档主机离线超阈值 → 自动从拓扑与资产库删除（10 分钟一次）
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
@@ -572,6 +557,9 @@ func mergeRuntimeConfig(cfg, saved *model.SystemConfig) {
 	if saved.SessionMaxAgeSeconds > 0 {
 		cfg.SessionMaxAgeSeconds = saved.SessionMaxAgeSeconds
 	}
+	if saved.SessionRetentionDays > 0 {
+		cfg.SessionRetentionDays = saved.SessionRetentionDays
+	}
 	// 开关项
 	cfg.ProbeEnabled = saved.ProbeEnabled
 	cfg.CaptureEnabled = saved.CaptureEnabled
@@ -718,6 +706,24 @@ func maintenanceLoop(ctx context.Context, st *store.Store, box *config.Box) {
 			} else if n > 0 {
 				slog.Info("本地情报已按保留期清理", "deleted", n, "days", days)
 			}
+		}
+		// 会话历史（V1.5.2）：被动环境里增长最快的一张表，此前完全没有回收路径。
+		// 实测 3 天 60 万行 / 148MB，不清理一年约 18GB，而界面上看不出任何异常。
+		if days := cfg.SessionRetentionDays; days > 0 {
+			cutoff := now.AddDate(0, 0, -days)
+			if n, err := st.DeleteSessionsBefore(cutoff); err != nil {
+				slog.Warn("会话历史清理失败", "err", err)
+			} else if n > 0 {
+				slog.Info("会话历史已按保留期清理", "deleted", n, "days", days)
+			}
+		}
+		// 端口状态演进（V1.5.2）：超过 30 天没再观测到的 open 端口标为 stale。
+		// 不删行——"曾经开过"本身是回溯证据；但必须和"当前在开"区分开，
+		// 否则端口列表会永久腐烂，一条三年前的 3389 和今天的 3389 长得一模一样。
+		if n, err := st.MarkStalePorts(now.Add(-store.PortStaleAfter)); err != nil {
+			slog.Warn("端口状态刷新失败", "err", err)
+		} else if n > 0 {
+			slog.Info("端口已标记为 stale", "count", n, "idle_days", int(store.PortStaleAfter.Hours()/24))
 		}
 	}
 

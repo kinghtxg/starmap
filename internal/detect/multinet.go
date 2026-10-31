@@ -40,7 +40,7 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 
 	// ---- A. 网段维度：遍历全量内网节点，按节点 IP 计算覆盖的 /24 网段 ----
 	// 用 AllNodes 而非 Snapshot：Snapshot 会隐藏已聚合网段的成员（V1.4 P0 修复）
-	all := rc.d.Engine.AllNodes()
+	all := rc.allNodes()
 	for i := range all {
 		n := &all[i]
 		subnets := map[string]bool{}
@@ -91,7 +91,7 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 		if peer == s.FiveTuple.SrcIP || !topology.IsPrivate(peer) || isAuxPeer(peer) {
 			continue
 		}
-		peerDomain, ones := rc.d.Engine.MatchDomainPrefix(peer)
+		peerDomain, ones := rc.matchDomain(peer)
 		if peerDomain == "" || ones == 0 {
 			continue
 		}
@@ -103,7 +103,7 @@ func evalMultiNet(rc *ruleContext) []model.RiskEvent {
 	// 节点自身归属域只在"非通配"时才算进跨域集合，
 	// 否则一个节点自己就可能凑出 {internet, internet} 这种假跨域。
 	for id, node := range nodes {
-		if d := ownBusinessDomain(rc.d.Engine, node); d != "" {
+		if d := ownBusinessDomain(rc, node); d != "" {
 			get(id).domains[d] = true
 		}
 	}
@@ -165,12 +165,12 @@ func isAuxPeer(ipStr string) bool {
 
 // ownBusinessDomain 返回节点自身归属的**业务域**（通配域不算）。
 // 节点可能挂了多个地址（v4/v6 双栈、多网卡），取第一个命中了实域的结果。
-func ownBusinessDomain(e *topology.Engine, n *model.Node) string {
+func ownBusinessDomain(rc *ruleContext, n *model.Node) string {
 	for _, ip := range n.IPs {
 		if !topology.IsPrivate(ip) || isAuxPeer(ip) {
 			continue
 		}
-		if name, ones := e.MatchDomainPrefix(ip); name != "" && ones > 0 {
+		if name, ones := rc.matchDomain(ip); name != "" && ones > 0 {
 			return name
 		}
 	}

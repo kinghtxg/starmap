@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,10 +86,15 @@ type Server struct {
 	scanTasks map[string]*scanTask
 	scanSeq   int64
 
-	// 主动发现任务（1.2）
-	discMu    sync.Mutex
-	discTasks map[string]*discoverTask
-	discSeq   int64
+	// 主动发现任务（1.2；1.6 起持久化到 discover_tasks）
+	discMu     sync.Mutex
+	discTasks  map[string]*discoverTask
+	discCancel map[string]context.CancelFunc
+	discSeq    int64
+	// taskMu 只保护库里那份任务账的写（开始/结束/取消）与裁剪。
+	// 与 discMu 分开：discMu 是高频进度锁（每台主机一次），
+	// 把 SQLite 写也塞进同一把锁等于让每台主机的进度更新都排队等磁盘。
+	taskMu sync.Mutex
 
 	// 资产同步节流（见 syncAssetsThrottled）：
 	// syncAssets 是"全节点 × 逐台查库 + 逐台写库"的 O(N) 操作，
@@ -107,6 +113,19 @@ type Server struct {
 	tiMu sync.Mutex
 	tiC  *ti.Client
 	tiFP string
+
+	// 趋势统计短缓存（V1.6）。趋势查询按天扫三张表，而仪表盘会随页面停留
+	// 反复刷新，缓存一分钟能把重复扫描压到"每分钟一次"。
+	trendMu    sync.Mutex
+	trendCache []model.TrendPoint
+	trendDays  int
+	trendAt    time.Time
+
+	// 导出并发名额（V1.6）。导出是"翻页扫全表"，本身不占锁；
+	// 十个并发导出就是十份全表扫描同时压 SQLite，很容易把正常巡检拖慢。
+	// 名额满时直接回 429 而不是排队——排队会让浏览器一直转圈，
+	// 用户以为服务卡死了，再点几次又把并发推得更高。
+	exportSem chan struct{}
 }
 
 // scanTask 主动端口扫描任务状态。
@@ -122,6 +141,17 @@ type scanTask struct {
 
 // NewRouter 构建 Gin 引擎与全部路由。
 func NewRouter(d Deps) *gin.Engine {
+	r, _ := newRouterWithServer(d)
+	return r
+}
+
+// newRouterWithServer 同 NewRouter，但把 *Server 一并交出来。
+//
+// 存在的理由：有一类行为只能在"进程内有活任务"时才成立——比如取消一个正在跑的
+// 发现任务（需要内存里有任务、并且 cancel 句柄在）。通过 HTTP 构造这种状态
+// 得先起一轮真实扫描，测试会在网络超时上花掉几十秒。白盒拿到 Server
+// 就能直接摆出这个状态，测的是取消逻辑本身。
+func newRouterWithServer(d Deps) (*gin.Engine, *Server) {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	// 节点 ID 里带 "/"：ext:8.8.8.0/24、subnet:10.0.0.0/24。前端用 encodeURIComponent
@@ -132,10 +162,20 @@ func NewRouter(d Deps) *gin.Engine {
 	// "ext:8.8.8.0/24"。这只影响"转义后与默认转义不同"的请求，普通路径行为不变。
 	r.UseRawPath = true
 	r.UnescapePathValues = true
-	s := &Server{d: d, scanTasks: map[string]*scanTask{}, discTasks: map[string]*discoverTask{}}
+	s := &Server{
+		d:          d,
+		scanTasks:  map[string]*scanTask{},
+		discTasks:  map[string]*discoverTask{},
+		discCancel: map[string]context.CancelFunc{},
+		exportSem:  make(chan struct{}, exportConcurrency),
+	}
 	if s.d.Version == "" {
 		s.d.Version = version.String()
 	}
+	// 上一进程遗留的"运行中"任务在这里收尾一次。放在建路由时而不是 main 里：
+	// 测试直接 NewRouter 也能覆盖到这段逻辑，且"本进程开始接管任务账"这件事
+	// 与 Server 的生命周期本来就是同一时刻。
+	s.reapInterruptedTasks()
 	// 访问日志 + request_id 必须最外层：Recovery 在它内层，panic 被兜住后
 	// 这里仍能拿到 500 状态并打出完整日志（若顺序反过来，panic 会跳过本层收尾逻辑）。
 	r.Use(logging.Middleware())
@@ -187,6 +227,17 @@ func NewRouter(d Deps) *gin.Engine {
 		ro.GET("/ports/scan/:id", s.scanPortsStatus)
 		ro.GET("/discover/plan", s.discoverPlan)
 		ro.GET("/discover/status/:id", s.discoverStatus)
+		// 主动发现任务账（V1.6）：列表/详情/取消
+		ro.GET("/tasks", s.listTasks)
+		ro.GET("/tasks/:id", s.getTask)
+		ro.GET("/changes", s.listChanges)
+		// 资产台账导出（V1.6）。CSV 下载在浏览器里是 GET，
+		// 但导出的是"全网资产地图"，不该给只读巡检账号——放到 rw 组。
+		rw.GET("/export/assets.csv", s.exportGuard(), s.exportAssets)
+		rw.GET("/export/ports.csv", s.exportGuard(), s.exportPorts)
+		rw.GET("/export/events.csv", s.exportGuard(), s.exportEvents)
+		rw.GET("/export/tasks.csv", s.exportGuard(), s.exportTasks)
+		ro.GET("/trend", s.trendStats)
 		ro.GET("/ledger", s.listLedger)
 		ro.GET("/ledger/diff", s.ledgerDiff)
 		ro.GET("/proxies", s.listProxies)
@@ -212,6 +263,7 @@ func NewRouter(d Deps) *gin.Engine {
 		rw.PUT("/assets/:key", s.updateAsset)
 		rw.POST("/ports/scan", s.scanPorts)
 		rw.POST("/discover/run", s.discoverRun)
+		rw.POST("/tasks/:id/cancel", s.cancelTask)
 		rw.POST("/ledger/import", s.ledgerImport)
 		// 威胁情报查询：语义上是"读"，但会把公网地址发给第三方服务并消耗配额，
 		// 所以不放给 viewer（巡检/审计账号没有对外披露的授权）。
@@ -245,7 +297,7 @@ func NewRouter(d Deps) *gin.Engine {
 
 	// 静态资源（embed.FS 单二进制分发）
 	r.NoRoute(s.staticHandler)
-	return r
+	return r, s
 }
 
 // ---------- middleware ----------
@@ -635,15 +687,46 @@ func (s *Server) topologySnapshot(c *gin.Context) {
 	// 情报结论批量补一次（不是每节点查一次库）。Snapshot 返回的是副本，可安全改写。
 	s.annotateIntel(snap.Nodes)
 	wl := s.whitelistEntries()
-	nodes := make([]nodeJSON, 0, len(snap.Nodes))
-	for i := range snap.Nodes {
-		nodes = append(nodes, buildNodeJSON(&snap.Nodes[i], wl))
+
+	totalNodes, totalEdges := len(snap.Nodes), 0
+	nodesIn := snap.Nodes
+	truncated := false
+	if len(nodesIn) > maxTopologyNodes {
+		nodesIn = capTopologyNodes(nodesIn, maxTopologyNodes)
+		truncated = true
 	}
+
+	nodes := make([]nodeJSON, 0, len(nodesIn))
+	keep := make(map[string]struct{}, len(nodesIn))
+	for i := range nodesIn {
+		nodes = append(nodes, buildNodeJSON(&nodesIn[i], wl))
+	}
+	for i := range nodes {
+		keep[nodes[i].ID] = struct{}{}
+	}
+
 	vedges := s.d.Engine.SnapshotEdgePairs()
+	totalEdges = len(vedges)
 	edges := make([]edgeJSON, 0, len(vedges))
 	for _, e := range vedges {
+		if truncated {
+			// 截断后只保留两端都在返回集合里的边，否则前端会画出指向不存在节点的悬空边。
+			if _, ok := keep[e.Src]; !ok {
+				continue
+			}
+			if _, ok := keep[e.Dst]; !ok {
+				continue
+			}
+		}
 		edges = append(edges, toEdgeJSON(e))
 	}
+	if len(edges) > maxTopologyEdges {
+		// 边比节点多得多时优先留"有分量"的：大流量边承载了主要结构信息。
+		sort.SliceStable(edges, func(i, j int) bool { return edges[i].Bytes > edges[j].Bytes })
+		edges = edges[:maxTopologyEdges]
+		truncated = true
+	}
+
 	cfg := s.cfg()
 	c.JSON(http.StatusOK, gin.H{
 		"Nodes": nodes,
@@ -655,6 +738,11 @@ func (s *Server) topologySnapshot(c *gin.Context) {
 			"ActiveEdges": snap.Stats.ActiveEdges,
 			"TotalBytes":  snap.Stats.TotalBytes,
 		},
+		// 截断必须是显式的：否则界面把"只画了 4000 个"当成全景，
+		// 运维会以为剩下的主机不存在——比返回慢十倍更坏。
+		"Truncated":  truncated,
+		"TotalNodes": totalNodes,
+		"TotalEdges": totalEdges,
 		// 归属判定的依据要能自证：数据从哪来、覆盖多少段、什么时候生成的。
 		// 用户看到"国外"标红时，第一反应就是"你凭什么说它是国外"。
 		"Geo": geo.Info(),
@@ -1279,14 +1367,21 @@ func (s *Server) ingestProbe(c *gin.Context) {
 	}
 
 	sessions := s.syncTopology()
-	events := s.evaluateAsync()
+	// 检测放到后台：上报是高频路径，同步跑一轮全量检测会让单次上报的耗时
+	// 等于一轮检测（实测 1000 会话 13 秒、3000 会话 42 秒），探针会被自己的上报拖死。
+	// 这里只踢一脚，由 Detector.Run 在 2 秒内合并执行；事件照旧会出现在告警页。
+	s.kickDetection()
 	s.d.Reviewer.Audit(s.actor(c), "ingest_probe", report.ProbeID,
 		"accepted="+strconv.Itoa(accepted))
 	c.JSON(http.StatusOK, gin.H{
-		"accepted":   accepted,
-		"total":      len(report.Packets) + len(report.Flows),
-		"sessions":   sessions,
-		"new_events": events,
+		"accepted": accepted,
+		"total":    len(report.Packets) + len(report.Flows),
+		"sessions": sessions,
+		// 保留字段兼容旧探针：检测已异步化，本轮没有「新建事件数」可报，
+		// 真实事件数以 /api/events 为准。上一版这里恒等于全量检测结果，
+		// 但代价是把上报接口变成了全量检测的同步入口。
+		"new_events": 0,
+		"eval_async": true,
 	})
 }
 
@@ -1434,14 +1529,20 @@ func (s *Server) syncTopology() int {
 		return 0
 	}
 	res := s.d.Aggregator.DrainNow()
+	// 首轮抽出的会话才落库：去重判定已收敛在聚合器内部（V1.0），
+	// 外层不再维护 savedSessions 这张只会越长越大的表。
+	// 本批统一收齐后一次事务写入——逐条写等于每行一次提交，
+	// 一批上报里几百条新会话就把接口耗时按行数线性拉长。
+	var fresh []model.Session
 	for i := range res.Entries {
 		e := &res.Entries[i]
 		s.d.Engine.Ingest(&e.Session)
-		// 首次抽出才落库：去重判定已收敛在聚合器内部（V1.0），
-		// 外层不再维护 savedSessions 这张只会越长越大的表。
 		if e.First && s.d.Store != nil {
-			_, _ = s.d.Store.SaveSession(&e.Session)
+			fresh = append(fresh, e.Session)
 		}
+	}
+	if len(fresh) > 0 {
+		_ = s.d.Store.SaveSessions(fresh)
 	}
 	sessions := res.Sessions()
 	// 流量角度：提取内网主机端口（V1.2）
@@ -1453,6 +1554,9 @@ func (s *Server) syncTopology() int {
 }
 
 // evaluateAsync 同步执行一轮检测评估，返回新建事件数。
+//
+// 只用于用户主动发起的一次性动作（PCAP 导入）：他点了「导入」，就期望
+// 立刻看到结果。高频路径（探针上报）请用 kickDetection。
 func (s *Server) evaluateAsync() int {
 	if s.d.Detector == nil {
 		return 0
@@ -1462,6 +1566,15 @@ func (s *Server) evaluateAsync() int {
 		return 0
 	}
 	return len(created)
+}
+
+// kickDetection 请求后台评估器尽快跑一轮（非阻塞）。
+// 探针上报这类持续高频写入走这里，避免把请求线程绑在全量检测上。
+func (s *Server) kickDetection() {
+	if s.d.Detector == nil {
+		return
+	}
+	s.d.Detector.Kick()
 }
 
 // CountPacket 抓包来源计数（main 抓包泵调用）。
@@ -1628,6 +1741,8 @@ func (s *Server) configToMap(cfg *model.SystemConfig) gin.H {
 		"session_max_count":       cfg.SessionMaxCount,
 		"session_idle_seconds":    cfg.SessionIdleSeconds,
 		"session_max_age_seconds": cfg.SessionMaxAgeSeconds,
+		// 会话历史保留期（V1.5.2）：sessions 表的唯一回收开关
+		"session_retention_days": cfg.SessionRetentionDays,
 		// 可观测性（V1.0）
 		"log_level":         cfg.LogLevel,
 		"log_format":        cfg.LogFormat,
@@ -1885,6 +2000,9 @@ func (s *Server) putConfig(c *gin.Context) {
 		if v, ok := numFrom(m, "session_max_age_seconds"); ok && v > 0 {
 			cfg.SessionMaxAgeSeconds = int64(v)
 		}
+		if v, ok := numFrom(m, "session_retention_days"); ok && v > 0 {
+			cfg.SessionRetentionDays = int(v)
+		}
 		// 可观测性（V1.0）：日志级别改完立即生效（LevelVar），不需要重启。
 		// 日志格式与 /metrics 开关涉及 Handler / 路由注册，只能落盘等下次启动——
 		// 这里显式不处理，前端提交后回显仍是旧值，避免"看着改了其实没变"。
@@ -2090,44 +2208,22 @@ func (s *Server) syncAssets() {
 	// V1.4 P0 修复：改用 AllNodes 遍历全量内网节点。
 	// 此前用 Snapshot 会把"已聚合 /24 网段"的成员节点隐藏掉，导致
 	// 网段内超过聚合阈值的主机永远进不了资产库（账外资产发现静默失效）。
-	nodes := s.d.Engine.AllNodes()
-	now := time.Now()
-	for i := range nodes {
-		n := &nodes[i]
+	//
+	// V1.5.2：整批交给存储层一条批处理完成。此前是逐节点 SELECT + UPSERT，
+	// 2 万台主机 = 4 万条独立语句，而这个函数在资产页每次加载都被调用——
+	// 慢到只能靠 2 秒节流掩盖。现在是一次事务 + 一条 upsert 语句。
+	all := s.d.Engine.AllNodes()
+	nodes := make([]model.Node, 0, len(all))
+	for i := range all {
+		n := &all[i]
 		if n.NodeKey == "" || strings.HasPrefix(n.NodeKey, "ext:") {
 			continue
 		}
-		existing, err := s.d.Store.AssetByKey(n.NodeKey)
-		if err != nil {
-			continue
-		}
-		if existing == nil {
-			// 新发现主机 → 登记为账外资产（未归档）
-			// Location 先取探针位置，让用户能看到"这台设备从哪个位置被看到"；
-			// 后续归档登记时由用户填写真实物理位置覆盖。
-			a := &model.Asset{
-				NodeKey:   n.NodeKey,
-				IPs:       n.IPs,
-				MAC:       n.MAC,
-				Status:    model.AssetUnarchived,
-				Location:  n.Location,
-				FirstSeen: n.FirstSeen,
-				LastSeen:  n.LastSeen,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}
-			_, _ = s.d.Store.UpsertAsset(a)
-		} else {
-			// 已存在 → 刷新 IP/MAC/last_seen
-			existing.IPs = n.IPs
-			existing.MAC = n.MAC
-			existing.LastSeen = n.LastSeen
-			// 未归档资产跟随探针位置；已归档资产保留用户填写的物理位置，不覆盖
-			if existing.Status == model.AssetUnarchived && n.Location != "" {
-				existing.Location = n.Location
-			}
-			_, _ = s.d.Store.UpsertAsset(existing)
-		}
+		nodes = append(nodes, *n)
+	}
+	now := time.Now()
+	if _, err := s.d.Store.SyncAssetsFromNodes(nodes, now); err != nil {
+		logging.FromContext(context.Background()).Warn("资产同步失败", logging.Err(err))
 	}
 }
 
@@ -2428,6 +2524,32 @@ func (s *Server) assetStats(c *gin.Context) {
 	})
 }
 
+// ensureAssetRow 确保某个节点在资产库里有对应行，没有就地从拓扑同步一条。
+//
+// 资产行原本只在 `/api/assets` 被访问时批量懒同步。这对"归档"这个动作是个陷阱：
+// 新发现的主机还没人打开过资产页，用户直接从拓扑点进来归档，
+// UPDATE 匹配 0 行——接口 200、审计有记录、界面刷新后归属还是空。
+// 归档是写操作，写入前必须自己保证前置条件，不能指望"别的页面可能被打开过"。
+//
+// 返回 false 表示该 node_key 在拓扑里也不存在（调用方应回 404）。
+func (s *Server) ensureAssetRow(nodeKey string) bool {
+	if s.d.Store == nil || nodeKey == "" {
+		return false
+	}
+	if a, err := s.d.Store.AssetByKey(nodeKey); err == nil && a != nil {
+		return true
+	}
+	if s.d.Engine == nil {
+		return false
+	}
+	n := s.d.Engine.NodeByKey(nodeKey)
+	if n == nil {
+		return false
+	}
+	_, err := s.d.Store.SyncAssetsFromNodes([]model.Node{*n}, time.Now())
+	return err == nil
+}
+
 func (s *Server) archiveAsset(c *gin.Context) {
 	var body struct {
 		NodeKey     string `json:"node_key"`
@@ -2452,6 +2574,10 @@ func (s *Server) archiveAsset(c *gin.Context) {
 		!checkField(c, "department", body.Department, maxNameLen) ||
 		!checkField(c, "location", body.Location, maxNameLen) ||
 		!checkField(c, "description", body.Description, maxDescLen) {
+		return
+	}
+	if !s.ensureAssetRow(body.NodeKey) {
+		fail(c, http.StatusNotFound, "节点不存在: "+body.NodeKey)
 		return
 	}
 	if err := s.d.Store.ArchiveAsset(body.NodeKey, body.Owner, body.Department, body.Location, body.Hostname, body.OS, body.Description, s.actor(c)); err != nil {
@@ -2483,6 +2609,10 @@ func (s *Server) updateAsset(c *gin.Context) {
 		!checkField(c, "department", body.Department, maxNameLen) ||
 		!checkField(c, "location", body.Location, maxNameLen) ||
 		!checkField(c, "description", body.Description, maxDescLen) {
+		return
+	}
+	if !s.ensureAssetRow(key) {
+		fail(c, http.StatusNotFound, "节点不存在: "+key)
 		return
 	}
 	if err := s.d.Store.UpdateAsset(key, body.Owner, body.Department, body.Location, body.Hostname, body.OS, body.Description); err != nil {
@@ -2668,4 +2798,69 @@ func (s *Server) extractPortsFromSessions(sessions []model.Session) {
 	if len(ports) > 0 {
 		_ = s.d.Store.UpsertPorts(ports)
 	}
+}
+
+// 拓扑快照的安全阀（V1.5.2）。
+//
+// 这组上限不是"性能优化"，是可用性底线：
+//   - 检测规则在某些网络形态下会大面积命中（如 client 与 server 分属两个域时，
+//     多网融合规则会对几乎每台主机成立），中高风险节点按设计又不参与 /24 聚合；
+//   - 于是节点数会从"几百个聚合节点"膨胀到"几万台主机"。
+//   - 实测 7.4 万节点时 /api/topology 返回 67 MB、耗时 24.8 秒，浏览器直接卡死。
+//
+// 上限取得足够宽（真实落地的聚合拓扑通常只有几百个节点），只在病态情况下生效，
+// 并且一定带 Truncated 标记——静默截断比返回慢更危险。
+const (
+	maxTopologyNodes = 4000
+	maxTopologyEdges = 20000
+)
+
+// capTopologyNodes 挑出"最该被看见"的一批节点，保持原有相对顺序稳定。
+//
+// 取舍：
+//   - 聚合节点（Members>0）代表"整个网段"，全留——丢了它拓扑就没有结构了；
+//   - 其余按 风险等级 → 是否在线 → 网段成员数 → ID 排序，取前 budget 个。
+func capTopologyNodes(nodes []model.Node, budget int) []model.Node {
+	groups := make([]model.Node, 0, len(nodes)/8+8)
+	hosts := make([]model.Node, 0, len(nodes))
+	for i := range nodes {
+		if nodes[i].Members > 0 {
+			groups = append(groups, nodes[i])
+		} else {
+			hosts = append(hosts, nodes[i])
+		}
+	}
+	rank := func(level string) int {
+		switch level {
+		case model.RiskHigh:
+			return 3
+		case model.RiskMid:
+			return 2
+		case model.RiskLow:
+			return 1
+		}
+		return 0
+	}
+	sort.SliceStable(hosts, func(i, j int) bool {
+		ri, rj := rank(hosts[i].RiskLevel), rank(hosts[j].RiskLevel)
+		if ri != rj {
+			return ri > rj
+		}
+		if hosts[i].Active != hosts[j].Active {
+			return hosts[i].Active
+		}
+		return hosts[i].ID < hosts[j].ID
+	})
+
+	out := make([]model.Node, 0, budget)
+	out = append(out, groups...)
+	if len(out) >= budget {
+		return out[:budget]
+	}
+	remain := budget - len(out)
+	if remain > len(hosts) {
+		remain = len(hosts)
+	}
+	out = append(out, hosts[:remain]...)
+	return out
 }

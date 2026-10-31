@@ -50,10 +50,16 @@ type Host struct {
 
 // Item 一条对照结果。
 type Item struct {
-	Kind       string    `json:"kind"`
-	IP         string    `json:"ip"`        // 观测到的 IP（Ghost 为台账 IP）
-	LedgerIP   string    `json:"ledger_ip"` // 台账登记的 IP（Unmanaged 为空）
+	Kind     string `json:"kind"`
+	IP       string `json:"ip"`        // 观测到的 IP（Ghost 为台账 IP）
+	LedgerIP string `json:"ledger_ip"` // 台账登记的 IP（Unmanaged 为空）
+	// MAC 是**观测到的** MAC（网内真实证据）。
+	// LedgerMAC 是台账登记的 MAC。两者分开列，绝不互相覆盖：
+	// 把它们合并成一个字段，就等于让台账里的一行字去覆盖现场证据，
+	// 而账实对照的全部价值恰恰在"两者不一致"这件事上。
 	MAC        string    `json:"mac"`
+	LedgerMAC  string    `json:"ledger_mac,omitempty"`
+	MACMatched string    `json:"mac_matched,omitempty"` // yes|no|unknown（台账或观测缺 MAC 时为 unknown）
 	Hostname   string    `json:"hostname"`
 	OS         string    `json:"os"`
 	Department string    `json:"department"`
@@ -233,6 +239,29 @@ func normalizeMAC(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// macVerdict 台账 MAC 与观测 MAC 的比较结论。
+type macVerdict int
+
+const (
+	// macUnknown 至少一侧没有 MAC，无法判定。缺证据不等于证据缺失，
+	// 这种情况按"没发现问题"处理（判 Managed），而不是反过来给人栽一个"账外"。
+	macUnknown macVerdict = iota
+	macAgree
+	macConflict
+)
+
+// compareMAC 比较台账与观测到的 MAC。
+func compareMAC(ledgerMAC, observedMAC string) macVerdict {
+	lm, om := normalizeMAC(ledgerMAC), normalizeMAC(observedMAC)
+	if lm == "" || om == "" {
+		return macUnknown
+	}
+	if lm == om {
+		return macAgree
+	}
+	return macConflict
+}
+
 // Diff 对照台账与观测主机，产出四类差异。
 func Diff(entries []model.LedgerEntry, hosts []Host) Result {
 	res := Result{
@@ -255,15 +284,28 @@ func Diff(entries []model.LedgerEntry, hosts []Host) Result {
 	used := make([]bool, len(entries))
 
 	for _, h := range hosts {
-		// 1) 先按观测 IP 直接命中
+		// 1) 按观测 IP 命中，但必须过 MAC 校验。
+		//
+		// IP 不是设备身份，它只是一个可被重复分配的地址。DHCP 环境里同一分钟
+		// 前后就可能是两台不同的机器。所以在"IP 对上"之后还要问一句"还是那台吗"：
+		//   - 台账没登记 MAC / 观测不到 MAC → 无法判定，按命中处理（不能因为缺证据就翻案）
+		//   - MAC 一致 → 命中
+		//   - MAC 明确不符 → **不占用这条台账**，继续往下走 MAC 匹配 / 判账外。
+		//     这一步是账外资产能不能被发现的关键：旧实现只要 IP 命中就认账，
+		//     于是"老张的机器下线了、IP 被一台新设备占了"会被报成"老张的 PC 在册在网"，
+		//     影子设备被静默洗白。
 		hit := -1
 		for _, ip := range h.IPs {
-			if i, ok := byIP[ip]; ok && !used[i] {
+			i, ok := byIP[ip]
+			if !ok || used[i] {
+				continue
+			}
+			if compareMAC(entries[i].MAC, h.MAC) != macConflict {
 				hit = i
 				break
 			}
 		}
-		// 2) IP 没命中，再按 MAC 命中（同机换 IP）
+		// 2) IP 没命中（或命中但 MAC 冲突），再按 MAC 命中（同机换 IP）
 		macHit, macMatched := -1, false
 		if hit < 0 {
 			if m := normalizeMAC(h.MAC); m != "" {
@@ -318,7 +360,9 @@ func Diff(entries []model.LedgerEntry, hosts []Host) Result {
 	return res
 }
 
-// item 组装单条结果：台账信息优先（人工登记更权威），缺失字段回落到观测值。
+// item 组装单条结果：归属信息（部门/责任人/位置）台账优先——那是人工登记的、
+// 观测侧拿不到的东西；而 MAC、主机名、OS 这类**现场证据**观测优先，
+// 台账值另存 LedgerMAC，供人对照。
 func item(kind string, h Host, e *model.LedgerEntry, ip string) Item {
 	it := Item{
 		Kind:      kind,
@@ -334,8 +378,16 @@ func item(kind string, h Host, e *model.LedgerEntry, ip string) Item {
 	}
 	if e != nil {
 		it.LedgerIP = e.IP
-		if e.MAC != "" {
-			it.MAC = e.MAC
+		it.LedgerMAC = e.MAC
+		// 注意：这里绝不能用台账 MAC 覆盖观测 MAC（V1.5.1 就是这么做的，
+		// 结果影子设备的真实 MAC 被一行人工登记抹掉，报告上只剩"这是个在册设备"）。
+		switch compareMAC(e.MAC, h.MAC) {
+		case macAgree:
+			it.MACMatched = "yes"
+		case macConflict:
+			it.MACMatched = "no"
+		default:
+			it.MACMatched = "unknown"
 		}
 		if it.Hostname == "" {
 			it.Hostname = e.Hostname
