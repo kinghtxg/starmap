@@ -24,11 +24,9 @@ import (
 func fakeTI(t *testing.T, hits *int32) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 这里只需要计数：判定结果由固定响应给出，
+		// 请求里的 ip 取出来也没人用（staticcheck SA4006 就是这么发现的）
 		atomic.AddInt32(hits, 1)
-		ip := r.URL.Query().Get("ip")
-		if ip == "" {
-			ip = strings.TrimPrefix(r.URL.Path, "/")
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"score":95,"verdict":"malicious","tags":["c2","scan"]}`))
 	}))

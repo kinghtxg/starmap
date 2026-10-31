@@ -51,6 +51,10 @@ func bulkFlows(n, startID int) []map[string]any {
 
 // TestProbeIngestLatencyDoesNotGrowWithState 上报延迟不得随会话规模线性增长。
 func TestProbeIngestLatencyDoesNotGrowWithState(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	h, _ := newTestRouter(t, testCfg())
 
 	// ① 先把状态堆到 3000 个会话（旧实现每加一批，下一批就更慢）

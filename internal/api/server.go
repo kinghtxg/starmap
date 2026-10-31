@@ -102,6 +102,10 @@ type Server struct {
 	assetMu       sync.Mutex
 	assetSyncing  bool
 	lastAssetSync time.Time
+	// assetDone 是"正在跑的那一轮同步"的完成信号（跑完即 close）。
+	// 读接口靠它等一轮正在进行的同步结束：探针上报把同步推到后台之后，
+	// 用户紧接着打开资产页，不该拿到一份"同步还没跑完"的旧列表。
+	assetDone chan struct{}
 
 	// 白名单短缓存（V1.5）：拓扑每次刷新都要判断"这些节点是否已加白"，
 	// 逐个查库没必要；但改完白名单要能立刻生效，所以 TTL 只取 2 秒。
@@ -523,10 +527,6 @@ type nodeJSON struct {
 	IntelTags    []string `json:"IntelTags,omitempty"`
 }
 
-func toNodeJSON(n *model.Node) nodeJSON {
-	return buildNodeJSON(n, nil)
-}
-
 // buildNodeJSON 构造前端节点契约；wl 用于标记"该设备已被加白"。
 //
 // 为什么白名单要出现在节点上：拓扑会把国外/隧道/风险设备标红外置，
@@ -645,13 +645,15 @@ func (s *Server) tiClient() *ti.Client {
 
 // primaryNodeIP 取节点用于情报查询的地址（外部聚合节点存的是 /24，取网络地址）。
 func primaryNodeIP(n *model.Node) string {
-	for _, ip := range n.IPs {
-		if i := strings.IndexByte(ip, '/'); i >= 0 {
-			return ip[:i]
-		}
-		return ip
+	if len(n.IPs) == 0 {
+		return ""
 	}
-	return ""
+	ip := n.IPs[0]
+	// 外部聚合节点存的是 /24，取网络地址
+	if i := strings.IndexByte(ip, '/'); i >= 0 {
+		return ip[:i]
+	}
+	return ip
 }
 
 type edgeJSON struct {
@@ -2484,24 +2486,48 @@ const assetSyncInterval = 5 * time.Second
 // 1 万台主机就是 2 万次 SQLite 往返；而 store 用单连接（MaxOpenConns=1），
 // 这段时间里所有其它请求（拓扑、事件、端口）都在排队。这不是"慢一点"，是整站卡住。
 //
-// 并发进来的第二个调用直接返回（读到的是上一轮结果）：宁可让访问者看到 5 秒前的资产快照，
-// 也不要让它排队等 2 万次 SQL——后者会把连接池占满，连带把只读接口一起拖死。
+// 并发进来的第二个调用不会重复跑一遍：要么等正在跑的那一轮结束（拿到的是
+// 刚同步完的数据），要么直接返回（节流窗口内，最多旧 5 秒）。
 func (s *Server) syncAssetsThrottled() {
-	s.assetMu.Lock()
-	if s.assetSyncing || time.Since(s.lastAssetSync) < assetSyncInterval {
-		s.assetMu.Unlock()
+	ch, owner := s.beginAssetSync()
+	if owner {
+		s.syncAssets()
+		s.endAssetSync(ch)
 		return
 	}
-	s.assetSyncing = true
-	s.lastAssetSync = time.Now()
-	s.assetMu.Unlock()
+	if ch != nil {
+		// 有一轮后台同步在跑：等它结束。探针上报把它推到后台之后，
+		// 用户紧接着打开资产页，不该看到一份"同步还没跑完"的列表。
+		<-ch
+	}
+}
 
-	defer func() {
-		s.assetMu.Lock()
-		s.assetSyncing = false
-		s.assetMu.Unlock()
-	}()
-	s.syncAssets()
+// beginAssetSync 判断这一轮该不该跑：
+//   - owner=true  → 调用方负责跑，跑完必须调用 endAssetSync(ch)
+//   - owner=false → 不需要跑；ch 非 nil 表示有一轮正在跑，可以等它
+func (s *Server) beginAssetSync() (ch chan struct{}, owner bool) {
+	s.assetMu.Lock()
+	defer s.assetMu.Unlock()
+	if s.assetSyncing {
+		return s.assetDone, false
+	}
+	if time.Since(s.lastAssetSync) < assetSyncInterval {
+		return nil, false
+	}
+	s.assetSyncing = true
+	// 先把时间戳推进，避免这一轮还没跑完时每个请求又各起一个 goroutine
+	s.lastAssetSync = time.Now()
+	s.assetDone = make(chan struct{})
+	return s.assetDone, true
+}
+
+// endAssetSync 收尾：放开名额并唤醒等着的人。
+func (s *Server) endAssetSync(ch chan struct{}) {
+	s.assetMu.Lock()
+	s.assetSyncing = false
+	s.assetDone = nil
+	s.assetMu.Unlock()
+	close(ch)
 }
 
 // syncAssetsInBackground 高频路径（探针上报）专用：触发的是一次后台同步，
@@ -2514,22 +2540,12 @@ func (s *Server) syncAssetsThrottled() {
 // 读接口仍然用阻塞版（syncAssetsThrottled）：用户点开资产页，就该看到含最新
 // 节点的列表，不能拿一份"同步还没跑完"的旧数据糊弄他。
 func (s *Server) syncAssetsInBackground() {
-	s.assetMu.Lock()
-	if s.assetSyncing || time.Since(s.lastAssetSync) < assetSyncInterval {
-		s.assetMu.Unlock()
+	ch, owner := s.beginAssetSync()
+	if !owner {
 		return
 	}
-	s.assetSyncing = true
-	// 先把时间戳推进，避免后台同步还没跑完时每个请求又各起一个 goroutine
-	s.lastAssetSync = time.Now()
-	s.assetMu.Unlock()
-
 	go func() {
-		defer func() {
-			s.assetMu.Lock()
-			s.assetSyncing = false
-			s.assetMu.Unlock()
-		}()
+		defer s.endAssetSync(ch)
 		s.syncAssets()
 	}()
 }

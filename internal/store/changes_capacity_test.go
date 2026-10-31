@@ -58,6 +58,10 @@ func seedPortsBulk(t *testing.T, s *Store, n int, base time.Time) {
 // first_seen 得回表逐行取；换成 (last_seen, first_seen) 复合索引后降到 40ms。
 // 上界取 200ms 是为了守住这个索引不被后人"优化"掉。
 func TestPortChangesCostDoesNotScaleWithTable(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	st := newChangeStore(t)
 	now := time.Now()
 	seedPortsBulk(t, st, 50000, now)
@@ -89,6 +93,10 @@ func TestPortChangesCostDoesNotScaleWithTable(t *testing.T) {
 // 这是变更页最常用的姿势："今天网里多了什么"。它与宽窗口的成本差
 // 必须来自结果集大小，而不是表总量。
 func TestPortChangesNarrowWindowFast(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	st := newChangeStore(t)
 	now := time.Now()
 	seedPortsBulk(t, st, 50000, now)
@@ -108,6 +116,10 @@ func TestPortChangesNarrowWindowFast(t *testing.T) {
 
 // TestTrendStatsCostBounded 30 天趋势在 5 万行端口表上的成本上界。
 func TestTrendStatsCostBounded(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	st := newChangeStore(t)
 	now := time.Now()
 	seedPortsBulk(t, st, 50000, now)
@@ -136,6 +148,10 @@ func TestTrendStatsCostBounded(t *testing.T) {
 
 // TestPruneDiscoverTasksCostBounded 任务账满 2000 条时的列表与裁剪成本。
 func TestPruneDiscoverTasksCostBounded(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	st := newTaskStore(t)
 	base := time.Now().Add(-2000 * time.Minute)
 
@@ -190,6 +206,10 @@ func TestPruneDiscoverTasksCostBounded(t *testing.T) {
 
 // TestMarkStalePortsScales 端口状态刷新在 5 万行上的成本（维护循环每轮都会调）。
 func TestMarkStalePortsScales(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	st := newChangeStore(t)
 	now := time.Now()
 	seedPortsBulk(t, st, 50000, now)

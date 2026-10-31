@@ -80,6 +80,10 @@ func buildScale(t *testing.T, n int) (*Detector, []model.Session) {
 
 // TestEvaluateCostAtScale 拆解单轮评估各阶段耗时。
 func TestEvaluateCostAtScale(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	if testing.Short() {
 		t.Skip("规模基准跳过 -short")
 	}
@@ -128,6 +132,10 @@ func TestEvaluateCostAtScale(t *testing.T) {
 // （新接入的设备、刚导入的一段历史流量），候选数在一个周期内暴涨。
 // 这条用例保证候选再多，单轮也不会跑成秒级。
 func TestEvaluateCostWithManyCandidates(t *testing.T) {
+	// -race 下慢 5~10 倍，耗时预算必然误报；这条断言只在普通构建里有效
+	if raceEnabled {
+		t.Skip("-race 构建下跳过耗时断言")
+	}
 	if testing.Short() {
 		t.Skip("规模基准跳过 -short")
 	}
