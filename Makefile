@@ -32,7 +32,8 @@ help:
 	@echo "make ui        前端交互冒烟（真浏览器，需已灌数据的实例）"
 	@echo "make ci        完整流水线（lint + race + cover）"
 	@echo "make visual    视觉闸门（逐页实测溢出/裁切/出界，两种视口）"
-	@echo "make release-check  发布前闸门（ci + ui + visual）"
+	@echo "make writes    写入口回归（每个写操作真点一遍 + 服务端回读，自清理）"
+	@echo "make release-check  发布前闸门（ci + visual + ui + writes）"
 	@echo "make e2e       端到端验收（上传 pcap 断言事件/拓扑/复核）"
 	@echo "make e2e-probe 探针验收（探针上报 vs 直接上传，事件必须对得上）"
 	@echo "make clean     清理产物"
@@ -125,9 +126,20 @@ visual:
 	STARBASE=$(BASE) $(PYTHON) scripts/visual-audit.py
 	STARBASE=$(BASE) $(PYTHON) scripts/visual-audit.py --wide
 
-# 发布前一把过：代码层闸门 + 交互层闸门 + 视觉闸门。
+# 写入口回归：把每个写操作真点一遍，再用服务端回读验收。
+# 与 make ui 的分工：ui 管"点下去会怎样"（导航/分页/搜索/角色门禁），这个管
+# "写进去的东西是不是真的落库了"。toast 提示成功、接口 200、数据没落库，
+# 是光靠接口测试和肉眼都发现不了的一类失败。
+# 用例自造数据自清理（创建即删除、改完还原），可以对着有数据的实例反复跑。
+.PHONY: writes
+writes:
+	@echo "目标实例: $(BASE)"
+	BASE=$(BASE) $(PYTHON) scripts/ui-writes.py
+
+# 发布前一把过：代码层闸门 + 交互层闸门 + 视觉闸门 + 写入口闸门。
+# 顺序有意：writes 会改配置、造事件，放最后，免得给前面两步留下脏状态。
 .PHONY: release-check
-release-check: ci ui visual
+release-check: ci visual ui writes
 
 .PHONY: clean
 clean:

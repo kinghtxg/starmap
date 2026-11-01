@@ -254,9 +254,11 @@ make lint
 
 # 前端（发布前手动闸门，需 Playwright + msedge）
 python scripts/ui-smoke.py      # 真浏览器跑导航 / 下钻 / 登录 / 角色门禁 / 分页搜索
+python scripts/ui-writes.py     # 写入口回归：每个写操作真点一遍 + 服务端回读，自清理
+python scripts/visual-audit.py  # 视觉闸门：逐页实测溢出 / 裁切 / 出界 / 控件过小
 python scripts/shot.py          # 采集 README 截图（顺带收集控制台错误）
 make ci                                            # lint + race + coverage 一条命令
-make release-check                                 # ci + ui，发布前完整闸门
+make release-check                                 # ci + visual + ui + writes，发布前完整闸门
 
 # 生成合成 PCAP 测试数据（5 类场景 → testdata/out/）
 go run testdata/gen_pcap.go
