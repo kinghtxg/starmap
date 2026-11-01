@@ -351,8 +351,11 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 ## 截图
 
 以下截图由 `scripts/shot.py` 在本机真实运行的服务上采集（数据来源：`testdata/out/` 的 5 个合成 PCAP
-+ `testdata/simprobe.go` 模拟的政务网探针上报 + `testdata/ledger-sample.csv` 台账），
-UI 设计基准与「刻本」同一套令牌。
++ `testdata/simprobe.go` 模拟的政务网探针上报 + 导入的资产台账），复现步骤见
+[docs/screenshots/README.md](docs/screenshots/README.md)。UI 设计基准与「刻本」同一套令牌。
+
+同一批页面还要过 `scripts/visual-audit.py` 的闸门：逐页实测横向溢出、文字被裁、元素出界、
+控件过小、控制台异常与 4xx，不靠肉眼看图（缩放会把"正常"看成"被裁"，也会把"被裁"看成"正常"）。
 
 | 拓扑总览 | 主机资产 | 风险事件 |
 |---|---|---|
@@ -366,14 +369,36 @@ UI 设计基准与「刻本」同一套令牌。
 |---|---|---|
 | ![settings](docs/screenshots/settings.png) | ![logs](docs/screenshots/logs.png) | ![login](docs/screenshots/login.png) |
 
+| 站点资产（一级资产视图） | 网络变更 | 发现任务账 |
+|---|---|---|
+| ![sites](docs/screenshots/sites.png) | ![changes](docs/screenshots/changes.png) | ![tasks](docs/screenshots/tasks.png) |
+
+**一级资产**把散在端口记录里的 Web 站点归纳成可管理的对象：业务标题、技术栈、证书剩余天数、
+明文/自签等特征标签，以及**人工标注**（名称 / 归属单位 / 标签 / 备注）——同一台 IP 换端口再出现时标注不丢。
+抽屉里给的是这份站点的证书情报与标注表单：
+
+![site-detail](docs/screenshots/site-detail.png)
+
+**发现任务账**把"扫过什么、什么时候、扫出多少"落库，进程重启也不丢；仍在跑的任务可以就地停止，
+每次任务的端口结果在抽屉里按主机列出：
+
+![task-detail](docs/screenshots/task-detail.png)
+
+**资产测绘报告**是一份自包含 HTML（`GET /api/report`）：单个文件即可离线保存或发邮件，
+证书到期、风险站点、暴露面统计都在里面，直接打印就是可交付的周报：
+
+![report](docs/screenshots/report.png)
+
 **下钻到某个 /24**：网段内主机间链路完整保留，并把其它聚合网段 / 外部 `/24` 补为上下文节点。
 图中 `10.10.1.50` 是模拟的"一机两网"设备（红虚环 = 风险锚点，不参与聚合），
 同时连着本网段与 `172.16.5.0/24`（细点线为归属边）：
 
 ![drilldown](docs/screenshots/topology-drill.png)
 
-**台账对照**：导入 `testdata/ledger-sample.csv` 后的账实差异——9 条台账 vs 25 台实测主机：
-在册在网 6 台、**台账外 18 台**、僵尸记录 2 条、IP 不符 1 条。台账外设备按风险排序，违规设备排在最前：
+**台账对照**：导入 `testdata/` 结构的台账后做账实差异——截图这一轮是 12 条台账 vs 18 台实测主机：
+在册在网 9 台、**台账外 8 台**、僵尸记录 2 条、IP 不符 1 条。台账外设备按风险排序，违规设备排在最前。
+注意"IP 对上"之后还要过一遍 MAC 校验：老张的机器下线、IP 被新设备占用时，只有 MAC 校验才能把它报成
+「台账僵尸 + 账外设备」，而不是洗白成"在册在网"：
 
 ![ledger](docs/screenshots/ledger.png)
 
