@@ -30,6 +30,14 @@
     <div class="sm-content">
       <div class="sm-stack sm-anim" id="form"></div>
     </div>
+
+    <!-- 吸底操作条：页头工具栏滚出视口后接管（判定见页面底部脚本）。
+         配置项多到一屏放不下，唯一保存入口不能跟着内容一起滚走。 -->
+    <div class="sm-actionbar" id="actionbar">
+      <span class="sm-actionbar-txt">改完记得保存，保存后立即联动拓扑引擎与检测引擎</span>
+      <button class="sm-btn" data-act="reload" data-ico="refresh">重新加载</button>
+      <button class="sm-btn is-primary" data-role="admin" data-act="save" data-ico="check">保存配置</button>
+    </div>
   </main>
   </div>
 </div>
@@ -258,6 +266,19 @@ document.addEventListener('change', function (e) {
 });
 
 document.addEventListener('DOMContentLoaded', load);
+
+/* 吸底操作条的出现时机：页头工具栏离开视口才顶上。
+   不用 scroll 事件判 scrollY，是因为页头高度随视口宽度换行而变
+   （窄屏 h1 与按钮会折行），写死阈值必然在某些宽度下错判。 */
+(function () {
+  var bar = document.getElementById('actionbar');
+  var hd = document.querySelector('.sm-pagehd .sm-toolbar');
+  if (!bar || !hd) return;
+  if (!window.IntersectionObserver) { bar.classList.add('is-on'); return; }
+  new IntersectionObserver(function (es) {
+    bar.classList.toggle('is-on', !es[0].isIntersecting);
+  }, { threshold: 0 }).observe(hd);
+})();
 </script>
 </body>
 </html>

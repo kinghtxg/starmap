@@ -193,3 +193,57 @@ func TestCancelRunningTaskCancelsContext(t *testing.T) {
 		t.Fatal("取消请求返回 202 但 ctx 没有被取消——扫描会在后台继续跑完")
 	}
 }
+
+// TestTaskTimesSerializedUTC 任务账的两个时间字段必须与全站同口径：UTC、零值不输出。
+//
+// 这条守的是两个曾经同时存在的问题：
+//  1. 内存态任务的时间来自 time.Now()，序列化会带本机时区（+08:00），而同一
+//     条任务重启后从 discover_tasks 读出来是 Z —— 同一个字段两种格式，任何
+//     按字符串比对的消费方都会判断错。
+//  2. 未结束任务的 Finished 是零值，omitempty 对结构体无效，于是运行中的任务
+//     回 "finished":"0001-01-01T00:00:00Z"。前端用 `t.finished ? ...` 判断，
+//     非空即为真 → 详情里把结束时间印成 0001 年。
+//
+// 这里刻意用 FixedZone(+8) 构造内存态任务，否则在 UTC 时区的 CI 上旧实现
+// 也回 Z，"带时区"这个缺陷会被时间掩盖掉。
+func TestTaskTimesSerializedUTC(t *testing.T) {
+	h, st, srv := newTaskRouter(t)
+	seedTask(t, st, "hist-1", "done", time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+	// 列表以库里的任务账为骨架，内存态只覆盖同 ID 那条的实时进度，
+	// 所以运行中的任务在库里也要有一行（真实路径就是这样：先记账再跑）。
+	seedTask(t, st, "live-1", "running", time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+
+	east8 := time.FixedZone("CST", 8*3600)
+	srv.discMu.Lock()
+	srv.discTasks["live-1"] = &discoverTask{
+		ID: "live-1", Status: "running", Total: 1,
+		Started: time.Date(2026, 3, 4, 13, 6, 7, 0, east8),
+	}
+	srv.discMu.Unlock()
+
+	w := doReq(t, h, http.MethodGet, "/api/tasks", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 %d: %s", w.Code, w.Body.String())
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("应回 2 条任务，实际 %d: %s", len(list), w.Body.String())
+	}
+	for _, it := range list {
+		id, _ := it["id"].(string)
+		started, _ := it["started"].(string)
+		if !strings.HasSuffix(started, "Z") {
+			t.Fatalf("任务 %s 的 started 不是 UTC（%q）——内存态带本机时区就说明没归一化", id, started)
+		}
+		if _, err := time.Parse(time.RFC3339, started); err != nil {
+			t.Fatalf("任务 %s 的 started 不能按 RFC3339 解析: %v", id, err)
+		}
+		// running 的任务不该有结束时间：键要么不存在，要么是空串。
+		if fin, ok := it["finished"]; ok && fin != "" {
+			t.Fatalf("任务 %s 未结束却有 finished=%v（零值时间被序列化出来了）", id, fin)
+		}
+	}
+}

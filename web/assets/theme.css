@@ -369,6 +369,37 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-xs);
 .sm-content { padding: 0 24px 28px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .sm-content.sm-content-flush { padding: 0; }
 
+/* 3.3.1 吸底操作条：长表单页专用（配置页 30+ 项）。
+   页头那颗「保存」是这类页面唯一的写入入口，但页头不吸顶——滚到底部时
+   它已在视口外 4000px 以上，用户改完最后一项必须滚回顶部才能保存。
+   这里用 sticky bottom 让操作条在页头滚出视口后接管，页面回到顶部时隐藏，
+   避免同一屏出现两套保存按钮。
+   sticky 元素仍在文档流里占位，所以不会盖住最后一组配置项。 */
+.sm-actionbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: auto;
+  padding: 10px 24px;
+  background: var(--sm-bg);
+  border-top: 1px solid var(--sm-border);
+  box-shadow: 0 -6px 18px rgba(31, 35, 41, .06);
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+  transition: opacity var(--sm-t-base) var(--sm-ease), transform var(--sm-t-base) var(--sm-ease);
+}
+.sm-actionbar.is-on { opacity: 1; transform: none; pointer-events: auto; }
+.sm-actionbar-txt { margin-right: auto; font-size: var(--sm-font-xs); color: var(--sm-text-3); }
+@media (max-width: 960px) {
+  .sm-actionbar { padding: 10px 16px; }
+  .sm-actionbar-txt { display: none; }
+}
+
 /* 3.4 页脚（刻本底部版权条） */
 .sm-footer {
   flex: none;

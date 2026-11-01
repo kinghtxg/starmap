@@ -70,10 +70,16 @@
 
   /* ---------- 格式化 ---------- */
   function pad(n) { return n < 10 ? '0' + n : String(n); }
+  // 时间格式化统一走这里，顺带挡住零值：Go 的 time.Time 零值序列化是
+  // 0001-01-01T00:00:00Z，而这类字段的调用方往往用 `x ? fn(x) : '—'` 判断，
+  // 非空字符串恒为真，于是"还没发生的事"被印成一个具体时间（换算到东八区
+  // 还是 0001-01-01 07:56:02）。渲染层不该把"没有"画成"有"。
+  function isZeroTime(d) { return d.getFullYear() <= 1; }
   function fmtTime(t) {
     if (!t) return '-';
     var d = new Date(t);
     if (isNaN(d.getTime())) return esc(t);
+    if (isZeroTime(d)) return '-';
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
       pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
@@ -81,6 +87,7 @@
     if (!t) return '-';
     var d = new Date(t);
     if (isNaN(d.getTime())) return esc(t);
+    if (isZeroTime(d)) return '-';
     return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
   function fmtBytes(n) {

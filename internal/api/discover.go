@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sort"
@@ -54,6 +55,39 @@ type discoverTask struct {
 	Finished     time.Time          `json:"finished,omitempty"`
 	CreatedBy    string             `json:"created_by,omitempty"`
 	Hosts        []discoverHostJSON `json:"hosts,omitempty"`
+}
+
+// MarshalJSON 在出口处统一时间口径。
+//
+// 这个 DTO 有两处来源，时间字段天然不同型：内存态是 time.Now()（本地时区，
+// 序列化带 +08:00），从 discover_tasks 读出来的那份是库里的 UTC。同一个字段
+// 在「刚跑完」和「重启后再看」两种情形下格式不同，任何按字符串比对的消费方
+// 都会踩到；全站其它接口都是 RFC3339 UTC，任务账没有理由例外。
+//
+// 另外，未结束任务的 Finished 是零值，而 omitempty 对结构体无效——直接序列化
+// 出去就是 0001-01-01T00:00:00Z。前端判断的是 `t.finished ? ...`（字符串非空
+// 即为真），于是运行中的任务在详情里会显示「结束时间 0001-01-01 07:56:02」。
+// 零值在这里输出为空串，语义回到「还没有结束时间」。
+func (t discoverTask) MarshalJSON() ([]byte, error) {
+	type plain discoverTask // 避免递归调用本方法
+	out := struct {
+		plain
+		Started  string `json:"started"`
+		Finished string `json:"finished,omitempty"`
+	}{
+		plain:    plain(t),
+		Started:  timeOrEmpty(t.Started),
+		Finished: timeOrEmpty(t.Finished),
+	}
+	return json.Marshal(out)
+}
+
+// timeOrEmpty 零值时间回空串，其余按全站口径转 UTC RFC3339。
+func timeOrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // discoverHostJSON 单主机结果。只回活跃主机：/24 一次就是 254 条，
