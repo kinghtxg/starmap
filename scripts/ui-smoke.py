@@ -27,11 +27,15 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-BASE = os.environ.get("BASE", "http://127.0.0.1:18097")
-AUTH_BASE = os.environ.get("AUTH_BASE", "http://127.0.0.1:18096")
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
-VIEWER_USER = os.environ.get("VIEWER_USER", "auditor")
-PASSWORD = os.environ.get("PASSWORD", "StarMap@2026")
+BASE = os.environ.get("BASE") or "http://127.0.0.1:18097"
+# 注意用 or 而不是 get 的默认值：传 AUTH_BASE=（空串）时 get 会认为键存在并返回 ""，
+# 于是拼出 "/login" 这种非法 URL 直接崩，而不是按文档说的"跳过认证部分"。
+AUTH_BASE = os.environ.get("AUTH_BASE")
+if AUTH_BASE is None:
+    AUTH_BASE = "http://127.0.0.1:18096"
+ADMIN_USER = os.environ.get("ADMIN_USER") or "admin"
+VIEWER_USER = os.environ.get("VIEWER_USER") or "auditor"
+PASSWORD = os.environ.get("PASSWORD") or "StarMap@2026"
 
 PAGES = ["index.html", "assets.html", "events.html", "whitelist.html",
          "domains.html", "ingest.html", "settings.html", "logs.html", "about.html"]

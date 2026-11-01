@@ -31,7 +31,8 @@ help:
 	@echo "make lint      格式检查 + vet"
 	@echo "make ui        前端交互冒烟（真浏览器，需已灌数据的实例）"
 	@echo "make ci        完整流水线（lint + race + cover）"
-	@echo "make release-check  发布前闸门（ci + ui）"
+	@echo "make visual    视觉闸门（逐页实测溢出/裁切/出界，两种视口）"
+	@echo "make release-check  发布前闸门（ci + ui + visual）"
 	@echo "make e2e       端到端验收（上传 pcap 断言事件/拓扑/复核）"
 	@echo "make e2e-probe 探针验收（探针上报 vs 直接上传，事件必须对得上）"
 	@echo "make clean     清理产物"
@@ -115,9 +116,18 @@ ui:
 	@echo "目标实例: $(BASE)"
 	BASE=$(BASE) $(PYTHON) scripts/ui-smoke.py
 
-# 发布前一把过：代码层闸门 + 交互层闸门。
+# 视觉闸门：逐页实测溢出/裁切/出界/控件过小/控制台异常，并断言配置页的吸底保存可达。
+# 与 make ui 的分工：ui 管"点下去会怎样"，这个管"排版是不是对的"。
+# 肉眼看截图判断不了这两类事——缩放会把正常看成被裁，也会把被裁看成正常。
+.PHONY: visual
+visual:
+	@echo "目标实例: $(BASE)"
+	STARBASE=$(BASE) $(PYTHON) scripts/visual-audit.py
+	STARBASE=$(BASE) $(PYTHON) scripts/visual-audit.py --wide
+
+# 发布前一把过：代码层闸门 + 交互层闸门 + 视觉闸门。
 .PHONY: release-check
-release-check: ci ui
+release-check: ci ui visual
 
 .PHONY: clean
 clean:

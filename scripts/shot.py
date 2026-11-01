@@ -21,10 +21,11 @@ import sys
 from playwright.sync_api import sync_playwright
 
 BASE = os.environ.get("STARBASE", "http://127.0.0.1:18097")
-LOGIN_BASE = os.environ.get("STARLOGIN", BASE)
+LOGIN_BASE = os.environ.get("STARLOGIN") or BASE
 DISCOVER_TARGET = os.environ.get("STARDISCOVER", "")
 ONLY = {s.strip() for s in os.environ.get("SHOTONLY", "").split(",") if s.strip()}
-OUT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "screenshots"))
+OUT = (os.environ.get("SHOTOUT") or
+       os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "screenshots")))
 os.makedirs(OUT, exist_ok=True)
 
 VIEWPORT = {"width": 1440, "height": 900}
@@ -39,6 +40,9 @@ PAGES = [
     ("index.html", "topology.png", 5.0),
     ("assets.html", "assets.png", 1.6),
     ("events.html", "events.png", 1.8),
+    ("sites.html", "sites.png", 2.4),
+    ("changes.html", "changes.png", 2.6),
+    ("tasks.html", "tasks.png", 1.8),
     ("domains.html", "domains.png", 1.4),
     ("whitelist.html", "whitelist.png", 1.4),
     ("ingest.html", "ingest.png", 1.4),
@@ -67,6 +71,29 @@ def main() -> int:
                 continue
             pg.goto(f"{BASE}/{path}", wait_until="networkidle")
             shoot(pg, name, wait)
+
+        # 站点详情：1.7 的一级资产视图，抽屉里是证书情报 + 人工标注表单。
+        # 光拍列表证明不了抽屉能用——标注表单是这一页唯一的写入口。
+        if want("site-detail.png"):
+            pg.goto(f"{BASE}/sites.html", wait_until="networkidle")
+            pg.wait_for_timeout(1500)
+            pg.click('button[data-act="open"]')
+            pg.wait_for_selector("#drawer.is-open", timeout=4000)
+            shoot(pg, "site-detail.png", 1.6)
+
+        # 任务详情：1.6 的任务账，抽屉里给的是"每台主机扫出哪些端口"
+        if want("task-detail.png"):
+            pg.goto(f"{BASE}/tasks.html", wait_until="networkidle")
+            pg.wait_for_timeout(1200)
+            if pg.locator('button[data-act="open"]').count() > 0:
+                pg.click('button[data-act="open"]')
+                pg.wait_for_selector("#drawer.is-open", timeout=4000)
+                shoot(pg, "task-detail.png", 1.4)
+
+        # 报表：/api/report 是一份自包含的 HTML，浏览器直接打开就该能看能打印
+        if want("report.png"):
+            pg.goto(f"{BASE}/api/report", wait_until="networkidle")
+            shoot(pg, "report.png", 1.2)
 
         # 设置页：1.2 新增的「资产与扫描」在首屏之下，滚过去拍才看得到
         if want("settings.png"):
