@@ -298,7 +298,7 @@ func Check(w *simnet.World, nodes []Node, edges []Edge) *Report {
 		marked := 0
 		for _, k := range owners {
 			for _, n := range nodes {
-				if n.Key == k && hasLabel(n.Labels, "ip-conflict") {
+				if n.Key == k && hasLabel(n.Labels, "ip_conflict") {
 					marked++
 				}
 			}

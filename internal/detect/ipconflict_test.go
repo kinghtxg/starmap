@@ -61,7 +61,7 @@ func TestIPConflictDetected(t *testing.T) {
 		t.Fatalf("冲突 IP 上应有 2 个节点，实际 %d：%+v", len(owners), owners)
 	}
 	for _, n := range owners {
-		if !hasNodeLabel(&n, "ip-conflict") {
+		if !hasNodeLabel(&n, "ip_conflict") {
 			t.Fatalf("节点 %s 没打 ip-conflict 标记，图上不会刺眼", n.NodeKey)
 		}
 	}

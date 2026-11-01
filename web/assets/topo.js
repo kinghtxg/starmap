@@ -658,7 +658,7 @@
         var isXffClient = labels.indexOf('xff-client') >= 0;
         // 同一地址上两台设备（地址配错 / 地址被抢 / ARP 欺骗）：
         // 图上是两个 IP 一模一样的节点，不加标注的话谁都不会多看一眼。
-        var isConflict = labels.indexOf('ip-conflict') >= 0;
+        var isConflict = labels.indexOf('ip_conflict') >= 0;
         var sub;
 
         /* 折叠后的公网：一朵云，点开看 /24 */

@@ -29,6 +29,9 @@ type env struct {
 	h  http.Handler
 	st *store.Store
 	t  *testing.T
+	// det 暴露出来给需要"同步跑一轮评估"的用例：探针上报走的是异步 kick，
+	// 等它自己跑要 5 秒起步，测试里没必要陪跑。
+	det *detect.Detector
 }
 
 func newEnv(t *testing.T) *env {
@@ -54,7 +57,7 @@ func newEnv(t *testing.T) *env {
 		Store: st, Engine: eng, Detector: det, Reviewer: rvw, Scanner: scanner,
 		Cfg: config.NewBox(cfg), Aggregator: agg, Version: "V1.0-test",
 	})
-	return &env{h: h, st: st, t: t}
+	return &env{h: h, st: st, t: t, det: det}
 }
 
 func (e *env) do(method, path string, body any) (int, map[string]any) {

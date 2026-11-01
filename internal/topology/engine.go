@@ -39,11 +39,16 @@ const (
 
 	// LabelIPConflict 同一 IP 上出现两个不同 MAC 的节点。
 	//
+	// 取值与 model.EventTypeIPConflict 一致（snake_case）而不是跟 subnet-agg 那种
+	// 连字符风格：检测器对每条新事件会自动把"事件类型"当作节点标签打上去
+	// （detector.go 的 NodeEffect.Label = ev.Type），两边不一致就会出现
+	// ip-conflict 和 ip_conflict 两个同义标签，前端多出一个看不懂的 tag。
+	//
 	// 现场对应三种情形，都值得看：静态地址配错（两台机器抢一个地址，表现为
 	// 服务时通时不通）、DHCP 地址池重叠、ARP 欺骗（攻击者把自己 MAC 绑到
 	// 网关 IP 上，这是内网横向最常见的第一步）。
 	// 冲突双方的节点都打这个标，图上才刺眼；不标的话就是两行一模一样的 IP。
-	LabelIPConflict = "ip-conflict"
+	LabelIPConflict = "ip_conflict"
 )
 
 // ---------- 稳定节点身份 NodeKey（P0-2） ----------
