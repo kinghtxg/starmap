@@ -147,8 +147,22 @@ FROM ports p ... GROUP BY p.ip, p.port
 |---|---|---|
 | 10 万行端口 / 5 万站点 · 首页 | 410ms | **228ms** |
 | 10 万行端口 / 5 万站点 · 统计 | 1.45s | **618ms** |
-| 2 万行端口 / 1 万站点 · 首页 | 58ms | **29ms** |
+| 2 万行端口 / 1 万站点 · 首页 | 58ms | **29~69ms** |
 | 2 万行端口 / 1 万站点 · 统计 | 137ms | 137ms |
+
+绝对值随机器波动（同一台机器多次复测能从 29ms 到 69ms），**要看的是倍数不是绝对值**。
+
+顺带把连接层的 PRAGMA 调对了。这几项默认值对"5 万行端口"这种库等于没配：
+
+| PRAGMA | 默认 | 现在 | 理由 |
+|---|---|---|---|
+| `cache_size` | 2MB | 8MB | 默认页缓存对全表聚合等于没有 |
+| `mmap_size` | 0 | 256MB | mmap 是**进程级共享**的，不像 cache_size 按连接计 |
+| `temp_store` | 文件 | MEMORY | 站点视图的 GROUP BY / ORDER BY 临时 B 树别落盘 |
+
+**这几项不会因为写错而报错**——SQLite 对不认识的 pragma 静默忽略，症状只是"页面莫名其妙地慢"。
+所以补了 `TestPragmasEffective` 逐项读回实际生效值；`mmap_size` 硬比对 256MB，
+因为它退回 0 时读放大问题会悄悄回来。
 
 > 中途踩了一个：**CTE + 聚合会丢类型亲和性**，`Scan(&time.Time)` 报
 > `unsupported Scan, storing driver.Value type string into type *time.Time`。
@@ -412,7 +426,7 @@ go test ./... -count=1
 go test ./... -count=1 -coverprofile=coverage.out && go tool cover -func=coverage.out | tail -1
 
 # 站点容量（2 万行端口 / 1 万站点，含首页、计数、统计三段耗时）
-go test ./internal/store -run 'TestSitesCapacity' -count=1 -v
+go test ./internal/store -run 'TestListSitesScales' -count=1 -v
 
 # 变更视图执行计划守卫
 go test ./internal/store -run 'TestPortChanges' -count=1 -v

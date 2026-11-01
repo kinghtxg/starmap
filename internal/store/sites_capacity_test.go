@@ -10,11 +10,19 @@ import (
 
 // TestListSitesScales 站点列表的容量守卫。
 //
-// 站点是 ports 上的派生视图（窗口函数，每个 ip:port 取最新一行），
+// 站点是 ports 上的派生视图（每个 ip:port 取最新一行），
 // 所以它的成本跟**端口表规模**线性相关，而不是跟站点数。一次 /16 全端口扫描
-// 能产出几十万行端口，这时候列表页每翻一页都重新算一遍窗口函数是撑不住的——
+// 能产出几十万行端口，这时候列表页每翻一页都重新算一遍是撑不住的——
 // 这条用例把"多大规模、多少耗时"钉住，避免以后有人加个 JOIN 就悄悄劣化十倍。
+//
+// 为什么必须跳过 -race：CI 的 Test job 跑的是 `go test -race ./...`，
+// 而 pure-Go 版 SQLite 在竞态检测下慢得离谱——实测同一份数据、
+// 同一台 macos runner：裸跑 30ms，-race 下 1.39s（46 倍）。
+// 少这一道守卫的后果是**唯一跑它的地方必炸**，而本地永远看不到。
 func TestListSitesScales(t *testing.T) {
+	if raceEnabled {
+		t.Skip("-race 下 pure-Go SQLite 慢一个数量级，这里的耗时数字测的是检测器不是代码")
+	}
 	if testing.Short() {
 		t.Skip("容量用例在 -short 档跳过：CI runner 的磁盘/CPU 与开发机不是一个量级，测出来的是机器不是代码")
 	}

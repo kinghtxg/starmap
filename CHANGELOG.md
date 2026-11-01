@@ -90,6 +90,11 @@ Web 站点、哪个证书下周到期、哪个系统到现在没人认领」。
 产生最大值的那一行。实测 10 万行端口（5 万站点）：窗口函数首页 410ms / 统计 1.45s
 → 聚合首页 228ms / 统计 618ms；2 万行时 58ms → 29ms。
 
+配套把连接层 PRAGMA 调对：`cache_size` 2MB → 8MB、`mmap_size` 0 → 256MB
+（mmap 是进程级共享，不像 cache_size 按连接计）、`temp_store` → MEMORY。
+**这几项写错不会报错**，SQLite 对不认识的 pragma 静默忽略，症状只是"页面莫名变慢"。
+补 `TestPragmasEffective` 逐项读回实际值，`mmap_size` 硬比对（退回 0 时读放大会回来）。
+
 > 中途还踩了一个：**CTE + 聚合会丢类型亲和性**，`Scan(&time.Time)` 报
 > `unsupported Scan, storing driver.Value type string into type *time.Time`。
 > 时间列只能按字符串读再自己解析。

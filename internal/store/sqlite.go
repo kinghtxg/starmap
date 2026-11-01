@@ -278,8 +278,23 @@ func openDSN(path string) string {
 		"_pragma=busy_timeout(10000)" +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
+		// 页缓存。SQLite 默认 2MB（-2000），对"5 万行端口 + 8 万行资产"这种库
+		// 等于没有缓存：站点视图要扫全表聚合，每次访问都在读盘。
+		// 8MB × 32 连接 = 256MB 上限（按需分配，不是一开始就占满）。
+		"&_pragma=cache_size(-8192)" +
+		// 内存映射。mmap 是**进程级共享**的，不像 cache_size 那样按连接计，
+		// 所以它是在不线性吃内存的前提下把"页在不在内存"这件事做好的主要手段。
+		"&_pragma=mmap_size(" + mmapSize + ")" +
+		// 排序与临时索引放内存：站点视图的 GROUP BY / ORDER BY 全靠它。
+		"&_pragma=temp_store(MEMORY)" +
 		"&_txlock=immediate"
 }
+
+// mmapSize 内存映射上限（字节）。256MB 是虚拟地址空间，物理页按访问量增长。
+//
+// 不设更大：政务内网的服务器经常只有 4~8GB 内存，留出余量给检测引擎与
+// 会话表（那部分才是真正会吃掉几百 MB 的地方）。
+const mmapSize = "268435456"
 
 // Open 打开（不存在则创建）SQLite 数据库并建表。
 func Open(path string) (*Store, error) {
