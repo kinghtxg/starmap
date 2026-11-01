@@ -7,7 +7,9 @@ release/
 *.exe~
 
 coverage.out
-coverage-all.out
+# 覆盖率产物常有变体（coverage-1.7.out / coverage-sub.out …），
+# 逐个列进白名单的代价是"下一个变体一定会被误提交"
+coverage*.out
 coverage.html
 dist/
 smoketest.db*

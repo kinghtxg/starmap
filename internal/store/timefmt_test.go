@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,10 +27,11 @@ import (
 //
 // 由此得出两条仍然成立、且必须继续遵守的规则：
 //   - 按天分组一律 substr(col,1,10)，不要用 date()；
-//   - 时间范围过滤依赖"字符串序 ≈ 时间序"，而这**只在不同来源的时间落到同一
-//     时区表示下才严格成立**。库里的确有 +0000 UTC 与 +0800 CST 两种形态并存
-//     （见 TestTimeRangeCompareIsOffsetSensitive），所以窗口边界会偏一个时区
-//     偏移——这是已知短板，不是这里要保证的东西。
+//   - 时间范围过滤依赖"字符串序 == 时间序"，而这只在**所有时间落到同一时区表示**
+//     时才严格成立。
+//
+// 1.7.0 起第二条件由写入口保证：`dbx` 会把所有 time.Time 参数转成 UTC 再下发，
+// 于是库里统一是 `... +0000 UTC`（见 timeutc.go 与 TestTimeRangeCompareIsOffsetInsensitive）。
 func TestTimeStorageFormat(t *testing.T) {
 	st, err := Open(t.TempDir() + "/fmt.db")
 	if err != nil {
@@ -103,31 +105,25 @@ func TestTimeStorageFormat(t *testing.T) {
 	}
 }
 
-// TestTimeRangeCompareIsOffsetSensitive 记录一个**已知短板**，不是期望行为。
+// TestTimeRangeCompareIsOffsetInsensitive 是 1.7.0 的回归用例：
+// **同一瞬间的不同时区表示，落库后必须是同一串文本**。
 //
-// 时间列存的是各来源各自的 String() 形态：会话时间来自 JSON（+0000 UTC），
-// 维护逻辑用的是 time.Now()（+0800 CST）。字符串比较比的是"几点几分"，
-// 不是"哪个时刻"，所以两个同一瞬间、不同时区表示的行会排出错误顺序。
+// 1.6.1 这里记录的是一条已知短板（同一瞬间在 +0000 UTC 与 +0800 CST 下是两串
+// 不同文本，字符串比较比的是"几点几分"不是"哪个时刻"，窗口边界偏一个时区偏移）。
+// 1.7.0 在写入口统一转 UTC 之后，这条短板消失，用例改成断言"不再偏移"。
 //
-// 影响面是**窗口边界偏一个时区偏移**（UTC+8 就是 8 小时），方向是"窗口变宽"：
-// 变更页可能把 8 小时前才更新过的端口算成"已消失"，stale 标记也可能提前/推迟。
-// 不会写坏数据，也不会漏行，但边界不精确。
-//
-// 这条用例把当前行为固定下来，好处是：等哪天做了"统一 UTC 定长格式 + 迁移"，
-// 它会失败，提醒作者把这条短板从文档里删掉——而不是让短板悄悄留在文档里过时。
-func TestTimeRangeCompareIsOffsetSensitive(t *testing.T) {
-	if time.Local == time.UTC {
-		t.Skip("本地时区就是 UTC，构造不出偏移，跳过")
-	}
+// 为什么要留着：这是唯一一条能同时验证「写入口归一化」和「历史查询不用改」的用例。
+// 只断言"写进去是 UTC"是不够的——真正要保证的是**比较结果正确**。
+func TestTimeRangeCompareIsOffsetInsensitive(t *testing.T) {
 	st, err := Open(t.TempDir() + "/mix.db")
 	if err != nil {
 		t.Fatalf("打开库失败: %v", err)
 	}
 	defer st.Close()
 
-	// 同一瞬间的两种表示：UTC 与本地。
+	// 同一瞬间的两种表示：UTC 与本地（在 UTC 机器上就是同一个值，仍然成立）。
 	instant := time.Date(2026, 5, 6, 7, 8, 9, 0, time.UTC)
-	for i, tm := range []time.Time{instant, instant.In(time.Local)} {
+	for i, tm := range []time.Time{instant, instant.In(time.Local), instant.In(time.FixedZone("CST", 8*3600))} {
 		if err := st.UpsertPort(&model.PortRecord{
 			NodeKey: "ip:10.1.0." + string(rune('1'+i)),
 			IP:      "10.1.0." + string(rune('1'+i)),
@@ -138,23 +134,176 @@ func TestTimeRangeCompareIsOffsetSensitive(t *testing.T) {
 		}
 	}
 
-	// 两种表示在库里是两串不同的文本（这是短板的**来源**，本身不需要修：
-	// 存什么形态由驱动决定，我们只保证 substr 分组不受影响）。
+	// 三种表示在库里必须是同一串文本。不是的话，下面的范围比较一定会错。
 	var distinct int
-	if err := st.db.QueryRow(`SELECT COUNT(DISTINCT first_seen) FROM ports`).Scan(&distinct); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(DISTINCT CAST(first_seen AS TEXT)) FROM ports`).Scan(&distinct); err != nil {
 		t.Fatalf("查询失败: %v", err)
 	}
-	if distinct != 2 {
-		t.Logf("两种时区表示落库后相同（distinct=%d），说明驱动已统一归一化，本短板可能已消失", distinct)
+	if distinct != 1 {
+		var sample string
+		_ = st.db.QueryRow(`SELECT CAST(first_seen AS TEXT) FROM ports LIMIT 1`).Scan(&sample)
+		t.Fatalf("同一瞬间落库成了 %d 种文本形态（样本 %q），写入口的 UTC 归一化失效，"+
+			"变更页/趋势/保留期清理的窗口边界会一起偏一个时区偏移", distinct, sample)
 	}
 
-	// 用"该瞬间之后 1 秒"做下界，两行都应该落在窗口外。
+	// 下界取该瞬间之后 1 秒：三行都该在窗口外。
+	// 偏移存在时，带 +0800 的那几行会以 "15:08:09" 排在 "07:08:10" 之后被误命中。
 	var leaked int
 	if err := st.db.QueryRow(
 		`SELECT COUNT(*) FROM ports WHERE first_seen >= ?`, instant.Add(time.Second)).Scan(&leaked); err != nil {
 		t.Fatalf("范围比较失败: %v", err)
 	}
 	if leaked != 0 {
-		t.Logf("注意：下界之后仍有 %d 行被判为命中——时区偏移导致的窗口变宽仍然存在", leaked)
+		t.Fatalf("下界之后仍有 %d 行被判为命中——时区偏移导致的窗口变宽又回来了", leaked)
+	}
+
+	// 反方向也要验：上界取该瞬间减 1 秒，三行都该在窗口内。
+	var hit int
+	if err := st.db.QueryRow(
+		`SELECT COUNT(*) FROM ports WHERE first_seen < ?`, instant.Add(time.Second)).Scan(&hit); err != nil {
+		t.Fatalf("范围比较失败: %v", err)
+	}
+	if hit != 3 {
+		t.Fatalf("窗口内应命中 3 行，实际 %d 行", hit)
+	}
+}
+
+// TestNormalizeTimeColumnsMigratesLegacy 验证存量迁移：老库里带本地偏移的时间文本
+// 会被改写成 UTC，且**改完之后比较结果仍然指向同一时刻**。
+//
+// 这条不能省：真实环境中升级上来的库（几十万行 ports/sessions）全是 +0800 CST，
+// 只修写入方等于只修一半——新旧两批数据混在一张表里，窗口照样错。
+func TestNormalizeTimeColumnsMigratesLegacy(t *testing.T) {
+	path := t.TempDir() + "/legacy.db"
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开库失败: %v", err)
+	}
+
+	// 绕开 dbx 直接写"老格式"（+0800 CST），模拟 1.6.x 留下的数据。
+	legacy := time.Date(2026, 5, 6, 7, 8, 9, 0, time.FixedZone("CST", 8*3600))
+	legacyText := legacy.String() // "2026-05-06 07:08:09 +0800 CST"
+	instantText := legacy.UTC().String()
+	if legacyText == instantText {
+		t.Fatal("构造失败：两种表示相同，用例失去意义")
+	}
+	if _, err := st.db.DB.Exec(`INSERT INTO ports(node_key, ip, port, proto, state, first_seen, last_seen)
+	                            VALUES('ip:10.9.9.9','10.9.9.9',80,'tcp','open',?,?)`,
+		legacyText, legacyText); err != nil {
+		t.Fatalf("写入老格式失败: %v", err)
+	}
+	// 清掉标记，让迁移再跑一次（Open 时已经跑过一轮，那时表还是空的）。
+	if _, err := st.db.DB.Exec(`DELETE FROM meta WHERE key = ?`, timeUTCMarker); err != nil {
+		t.Fatalf("清标记失败: %v", err)
+	}
+
+	n, err := normalizeTimeColumns(st.db.DB)
+	if err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("应有至少 1 行被转换，实际 %d", n)
+	}
+
+	var raw string
+	if err := st.db.QueryRow(`SELECT CAST(first_seen AS TEXT) FROM ports WHERE ip='10.9.9.9'`).Scan(&raw); err != nil {
+		t.Fatalf("读回失败: %v", err)
+	}
+	if got, ok := parseStoredTime(raw); !ok || !got.Equal(legacy) {
+		t.Fatalf("迁移后时刻变了：原文 %q → %q（期望仍是 %s）", legacyText, raw, legacy.UTC())
+	}
+	// 迁移的核心目的：能用 UTC 参数正确比较。
+	var hit int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM ports WHERE ip='10.9.9.9' AND first_seen = ?`,
+		legacy.UTC()).Scan(&hit); err != nil {
+		t.Fatalf("比较失败: %v", err)
+	}
+	if hit != 1 {
+		t.Fatalf("迁移后用 UTC 参数应该能命中，实际 %d 行", hit)
+	}
+
+	// 幂等：再跑一次不该再改任何行。
+	if n2, err := normalizeTimeColumns(st.db.DB); err != nil || n2 != 0 {
+		t.Fatalf("第二次迁移应无改动，实际 n=%d err=%v", n2, err)
+	}
+	_ = st.Close()
+}
+
+// TestAllWritePathsStoreUTC 覆盖**所有**写库路径的时间归一化。
+//
+// 这条用例的由来：1.7.0 的单条用例全绿之后，真机跑起来发现站点列表的时间是
+// "Z"（UTC），变更视图里却是 "+08:00"——因为批量写入走的是
+// tx.Prepare + stmt.Exec，绕过了 dbx.Exec 的参数处理。
+// 只测一条路径等于没测：写入路径有五种（单条、批量、预编译、事务、资产同步），
+// 少覆盖一种，那种就会在真实环境里悄悄写成另一种时区。
+func TestAllWritePathsStoreUTC(t *testing.T) {
+	st, err := Open(t.TempDir() + "/paths.db")
+	if err != nil {
+		t.Fatalf("打开库失败: %v", err)
+	}
+	defer st.Close()
+
+	// 强制用带偏移的时区构造时间：在 UTC 机器上 +08:00 仍然是不同的表示。
+	cst := time.FixedZone("CST", 8*3600)
+	ts := time.Date(2026, 6, 7, 9, 10, 11, 0, cst)
+	if ts.Format("Z07:00") == "+00:00" {
+		t.Fatal("构造失败：时间没有偏移，用例失去意义")
+	}
+
+	// 1) 单条写入
+	if err := st.UpsertPort(&model.PortRecord{
+		NodeKey: "ip:10.7.0.1", IP: "10.7.0.1", Port: 80, Proto: "tcp",
+		State: "open", FirstSeen: ts, LastSeen: ts,
+	}); err != nil {
+		t.Fatalf("单条写端口失败: %v", err)
+	}
+	// 2) 批量写入（tx.Prepare + stmt.Exec）
+	if err := st.UpsertPorts([]model.PortRecord{{
+		NodeKey: "ip:10.7.0.2", IP: "10.7.0.2", Port: 81, Proto: "tcp",
+		State: "open", FirstSeen: ts, LastSeen: ts,
+	}}); err != nil {
+		t.Fatalf("批量写端口失败: %v", err)
+	}
+	// 3) 会话批量（另一条 Prepare 路径）
+	if err := st.SaveSessions([]model.Session{{
+		FiveTuple: model.FiveTuple{SrcIP: "10.7.0.3", DstIP: "10.7.0.4", SrcPort: 1234, DstPort: 80, Proto: "tcp"},
+		FirstSeen: ts, LastSeen: ts,
+	}}); err != nil {
+		t.Fatalf("写会话失败: %v", err)
+	}
+
+	check := func(table, col, where string) {
+		t.Helper()
+		var raw string
+		q := "SELECT CAST(" + col + " AS TEXT) FROM " + table
+		if where != "" {
+			q += " WHERE " + where
+		}
+		q += " LIMIT 1"
+		if err := st.db.QueryRow(q).Scan(&raw); err != nil {
+			t.Fatalf("读 %s.%s 失败: %v", table, col, err)
+		}
+		got, ok := parseStoredTime(raw)
+		if !ok {
+			t.Fatalf("%s.%s 存了无法解析的时间: %q", table, col, raw)
+		}
+		if !got.Equal(ts) {
+			t.Fatalf("%s.%s 时刻变了：%q → %s（期望 %s）", table, col, raw, got.UTC(), ts.UTC())
+		}
+		if !strings.HasSuffix(raw, "+0000 UTC") {
+			t.Fatalf("%s.%s 没有归一化成 UTC: %q（预编译/批量路径可能绕过了参数处理）", table, col, raw)
+		}
+	}
+	check("ports", "first_seen", "port=80") // 单条
+	check("ports", "first_seen", "port=81") // 批量
+	check("sessions", "first_seen", "")     // 会话批量
+
+	// 三条路径写进去的**同一瞬间**必须是同一串文本，否则窗口比较又会错。
+	var distinct int
+	if err := st.db.QueryRow(`SELECT COUNT(DISTINCT CAST(first_seen AS TEXT)) FROM ports`).Scan(&distinct); err != nil {
+		t.Fatal(err)
+	}
+	if distinct != 1 {
+		t.Fatalf("单条与批量写入的时间文本不一致（%d 种），窗口边界会偏一个时区偏移", distinct)
 	}
 }

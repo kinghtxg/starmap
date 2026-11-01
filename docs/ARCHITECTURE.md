@@ -3,8 +3,8 @@
 > 面向两类读者：**要接手二开的工程师**（想知道某功能落在哪个文件、为什么这么写），
 > **要做安全评估的人**（想知道信任边界在哪、哪些地方刻意不做）。
 >
-> 版本：1.5.1 · 更新于 2026-10-29
-> 配套文档：[部署运维手册](OPERATIONS.md) · [情报对接指南](INTEL.md) · [安全模型](SECURITY.md) · [发布说明](RELEASE-1.2.md)
+> 版本：1.7.0 · 更新于 2026-11-01
+> 配套文档：[部署运维手册](OPERATIONS.md) · [情报对接指南](INTEL.md) · [安全模型](SECURITY.md) · [1.7 发布说明](RELEASE-1.7.md)
 
 ---
 
@@ -55,6 +55,8 @@
 
 单二进制，无外部依赖（SQLite 用 pure-Go 驱动，前端 `embed.FS` 内嵌）。
 
+![架构图](architecture.svg)
+
 ```
 ┌──────────────────────────── StarMap 单进程 ────────────────────────────┐
 │                                                                        │
@@ -71,11 +73,16 @@
 │                                   review（复核）+ audit（审计留痕）     │
 │                                                                        │
 │  probe.Scanner ──► 主动发现（1.2）──► ports / assets 表                 │
+│                        │                                               │
+│                        └─► sites（1.7 派生视图，不落表）+ site_meta     │
 │                                                                        │
-│  store（SQLite · modernc 纯 Go · WAL · 单连接）                        │
+│  store（SQLite · modernc 纯 Go · WAL · 单连接 · 时间统一 UTC）          │
 │  web/（embed.FS 内嵌，零构建零 CDN）                                    │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+四路接入共用同一条聚合管线是刻意的：**PCAP 回放、实时抓包、远端探针、主动扫描产出的
+会话必须同构**，否则「导入一份历史 PCAP 复现现场」这件事就做不到。
 
 ### 2.1 一次数据流转的完整路径
 
@@ -647,6 +654,41 @@ ticker 在低频时纯空转，高频并发下还要额外加锁；`next` 方案
 两条路并存而不是替换：nmap 的 `-sV` 版本识别更强，能装就继续用；
 装不上不应该等于"没有主动发现能力"。
 
+### 6.6 站点视图：为什么是派生视图而不是表（1.7）
+
+**代码**：`internal/store/sites.go` · `internal/api/sites.go` · `web/sites.html`
+
+前面所有表都是「某 IP 某端口」的端点视角。运维真正要的数字是「网里有多少个 Web 站点、
+哪个证书下周到期、哪个系统没人认领」——这是**同一份事实的另一种切法**。
+
+站点由 `ports` 聚合而来（`GROUP BY ip, port`），**不建表**。理由与 1.6.0
+「任务账只记账不复制扫描结果」同一条：存两份就要处理"重扫之后谁覆盖谁"，
+而这种不一致从来不会自己消失，最终表现是「列表里有点开 404」这种孤儿记录。
+
+唯一会写的是**人工标注**，落独立的 `site_meta`（`site_key` UNIQUE）：
+归属单位 / 系统名 / 标签 / 备注。它必须与观测数据分开——观测是机器的事实，
+标注是人的判断，重扫不该把人的判断冲掉。站点消失后 `PruneOrphanSiteMeta` 清孤儿。
+
+**判据是「有 HTTP 层响应」**：
+
+```sql
+AND (p.http_status > 0 OR p.title <> '' OR p.server <> '')
+```
+
+不是「有证书」。最初按证书判定，真机端到端跑出一个 `https://127.0.0.1:3389` 的假站点——
+**RDP 的 3389 会完成 TLS 握手并带回一张 `CN=机器名` 的自签证书**，按证书判定的话
+每台 Windows 都会多出一个 https 站点。单测里有对应分支。
+
+**用 `GROUP BY` + 单 `max()` 而不是 `ROW_NUMBER()`**：SQLite 保证裸列取产生最大值的
+那一行。10 万行端口（5 万站点）首页 410ms → 228ms，统计 1.45s → 618ms。
+
+**CTE + 聚合会丢类型亲和性**：`Scan(&time.Time)` 会报
+`unsupported Scan, storing driver.Value type string into type *time.Time`，
+时间列只能按字符串读、自己解析。
+
+**站点 key 形如 `https://10.0.0.5:443`**，含 `://` 与 `:`，不能放进 gin 路径段，
+详情接口走查询参数 `?key=`。
+
 ---
 
 ## 7. 存储层
@@ -669,8 +711,13 @@ ticker 在低频时纯空转，高频并发下还要额外加锁；`next` 方案
 | `ports` | `(node_key, ip, port, proto)` UNIQUE | 端口记录 + 指纹 |
 | `probes` | `probe_id` | 探针注册表 |
 | `ledger` | `ip` UNIQUE | 人工台账快照 |
+| `discover_tasks` | `id` | 主动发现任务账（1.6） |
+| `site_meta` | `site_key` UNIQUE | 站点人工标注（1.7，与派生视图配对） |
+| `meta` | `key` | 库级迁移标记（`schema.time_utc` 等） |
 
-索引：`idx_ports_key` / `idx_ports_ip` / `idx_assets_status` / `idx_events_status` / `idx_events_type`。
+索引：`idx_ports_key` / `idx_ports_ip` / `idx_ports_first_seen` / `idx_ports_last_first` /
+`idx_ports_web`（`state, proto, ip, port, last_seen`，站点视图用）/
+`idx_assets_status` / `idx_events_status` / `idx_events_type`。
 
 ### 7.2 迁移策略
 
@@ -691,7 +738,45 @@ db.Exec("PRAGMA journal_mode=WAL")
 - **WAL**：读不被写阻塞（同进程内的读也会走 WAL）。
 - 代价：**任何一次慢查询都会卡住所有请求**。这就是为什么 6.1 要节流、8.2 要限流列表长度。
 
-### 7.4 容量护栏与保留期
+### 7.4 时间列的时区口径：为什么在写入口归一化（1.7）
+
+**代码**：`internal/store/timeutc.go`
+
+`modernc.org/sqlite` 把 `time.Time` 落库成 `time.Time.String()`，**原样带着时区**：
+
+```
+"2026-11-01 13:03:52.7050173 +0800 CST m=+0.006953401"
+```
+
+而所有窗口查询都是 `WHERE last_seen >= ?` 这样的**文本比较**——比的是"几点几分"，
+不是"哪个时刻"。同一瞬间在 `+0800 CST` 与 `+0000 UTC` 下是两串不同文本，
+东八区机器上窗口边界直接偏 8 小时。
+
+修法是在**写入口**归一化，而不是逐个改 SQL：查询一百多处、写入口只有三个，
+而且改查询意味着旧库历史数据仍然不一致。
+
+`dbx` / `txx` / `stmtx` 三层薄包装（嵌入 `*sql.DB` / `*sql.Tx` / `*sql.Stmt`），
+覆盖 `Exec` / `Query` / `QueryRow` / `Begin` / `Prepare`，参数先过 `normArg`：
+
+```go
+// 刻意返回 string 而不是 time.Time，否则驱动又会调 .String() 把时区带回来
+func (u utcValue) Value() (driver.Value, error) { return u.t.UTC().String(), nil }
+```
+
+**`Prepare` 那一层必须覆盖**：预编译语句的 `Exec(args ...any)` 不带 query 参数，
+绕过 `dbx.Exec` 就会让批量写入退回本地时区。回归用例 `TestAllWritePathsStoreUTC`
+覆盖单条 / 批量端口 / 批量会话三条路径——它的由来正是「单条用例全绿、
+真机跑起来发现站点列表是 `Z`、变更视图却是 `+08:00`」。
+
+存量迁移：13 张表 22 个列，**rowid 游标**分批 5000 推进，`meta` 表打
+`schema.time_utc` 标记只跑一次。两个坑：分批不能"每批重查一遍过滤条件"
+（解析不了的值永远满足 `NOT LIKE '%+0000 UTC'`，原地打转成死循环）；
+幂等判断必须区分 `ErrNoRows` 与真错误（混判会让第一次调用静默 `return 0`）。
+
+取证注意：`Scan(&string)` 看到的是**读回时**驱动的 RFC3339 归一化，
+不是库里的真实字节。要看真实形态必须 `hex()` 或 `CAST(col AS TEXT)`。
+
+### 7.5 容量护栏与保留期
 
 | 护栏 | 位置 | 默认 |
 |---|---|---|

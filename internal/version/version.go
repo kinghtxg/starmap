@@ -13,7 +13,7 @@ import "fmt"
 // 构建时通过 -ldflags 覆盖；不改代码也能出带版本号的二进制。
 var (
 	// Version 语义化版本号（MAJOR.MINOR.PATCH）。
-	Version = "1.6.1"
+	Version = "1.7.0"
 	// Commit 构建所对应的 git 提交短哈希。
 	Commit = "dev"
 	// BuildTime 构建时间（RFC3339），留空表示未注入。

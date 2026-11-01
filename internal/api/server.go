@@ -241,6 +241,16 @@ func newRouterWithServer(d Deps) (*gin.Engine, *Server) {
 		ro.GET("/tasks", s.listTasks)
 		ro.GET("/tasks/:id", s.getTask)
 		ro.GET("/changes", s.listChanges)
+		// 站点资产（V1.7）：灯塔那类产品的资产主视图。
+		// 站点由 ports 派生，这里只读；唯一会写的是人工标注 /sites/meta。
+		ro.GET("/sites", s.listSites)
+		ro.GET("/sites/stats", s.siteStats)
+		ro.GET("/sites/tags", s.listSiteTags)
+		ro.GET("/sites/detail", s.siteDetail)
+		ro.GET("/sites/changes", s.siteChanges)
+		rw.GET("/export/sites.csv", s.exportGuard(), s.exportSites)
+		// 单文件 HTML 报表（V1.7）：可直接 Ctrl+P 存 PDF，零外链
+		rw.GET("/report", s.exportGuard(), s.report)
 		// 资产台账导出（V1.6）。CSV 下载在浏览器里是 GET，
 		// 但导出的是"全网资产地图"，不该给只读巡检账号——放到 rw 组。
 		rw.GET("/export/assets.csv", s.exportGuard(), s.exportAssets)
@@ -274,6 +284,8 @@ func newRouterWithServer(d Deps) (*gin.Engine, *Server) {
 		rw.POST("/ports/scan", s.scanPorts)
 		rw.POST("/discover/run", s.discoverRun)
 		rw.POST("/tasks/:id/cancel", s.cancelTask)
+		rw.POST("/sites/meta", s.upsertSiteMeta)
+		rw.DELETE("/sites/meta", s.deleteSiteMeta)
 		rw.POST("/ledger/import", s.ledgerImport)
 		// 威胁情报查询：语义上是"读"，但会把公网地址发给第三方服务并消耗配额，
 		// 所以不放给 viewer（巡检/审计账号没有对外披露的授权）。

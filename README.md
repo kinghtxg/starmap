@@ -6,12 +6,12 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.6.1**（[1.6.1 发布说明](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.7.0**（[1.7.0 发布说明](docs/RELEASE-1.7.md) · [1.6.1](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20staticcheck%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-78.1%25-yellowgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-76.6%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
@@ -136,6 +136,26 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
   扫到一台返回 `=cmd|'/c calc'!A0` 的设备，一打开表格就执行），带 UTF-8 BOM
   （否则中文 Excel 按 GBK 解码整列乱码），流式分页写、单次上限 20 万行。
 
+### 站点资产与报表（1.7.0）
+
+前面几块的表都是「**端点**」视角（某 IP 某端口）。可运维的人真正要的数字是「**业务系统**」视角：
+网里有多少个 Web 站点、哪个证书下周到期、哪个站点到现在没人认领。这一块对齐灯塔（ARL）的资产主视图。
+
+- **站点 = 派生视图，不建表**：从 `ports` 上按 `(ip, port)` 聚合出站点，`https`/`http` 由是否有证书情报判定。
+  不建独立表是刻意的——站点与端口是同一份事实的两种切法，存两份就要处理「重扫之后谁覆盖谁」。
+- **判据是「有 HTTP 层响应」，不是「有证书」**：`http_status > 0 OR title <> '' OR server <> ''`。
+  按证书判定会让每台 Windows 多出一个假站点——实测 RDP 3389 也会完成 TLS 握手并带回一张 `CN=机器名` 的自签证书。
+  这条是真机跑出来的，单测里留了「只有证书 → 不是站点」的分支。
+- **证书情报**：CN / SAN / 签发者 / 到期日 / 剩余天数 / 是否自签。风险标签 `cert_expired` / `cert_expiring` / `self_signed` / `untitled` / `plaintext`。
+  **有没有证书情报一律看 `cert_expiry` 是否为空**，不看「剩余天数 `-1`」——后者同时是「昨天到期」的合法答案，
+  拿它当哨兵会把刚过期的证书整个漏掉。判断顺序必须是：先排除无情报，再判 `< 0` 为已过期、`<= 30` 为即将到期。
+- **人工标注独立落 `site_meta`**：归属单位 / 系统名 / 标签 / 备注，重扫不覆盖人的判断（与「任务账只记账不复制扫描结果」同一理由）。
+  站点消失后孤儿标注会被清理。
+- **站点变更视图**：窗口内新增站点与失活站点——比端口变更更贴近值班语言。
+- **单文件 HTML 报表**：`/api/report` 一次输出「证书风险 / 未标注站点 / 窗口内变更」三节，零外链，
+  浏览器直接 Ctrl+P 存 PDF。用 `html/template` 渲染：报表会被下载、转发、用浏览器打开，
+  受众往往不是管理员，XSS 面比后台页面更大。清单各限 50 条——一份 2000 行的报表等于没有。
+
 ### 风险特征打标（仅标签）
 
 | 规则 | 特征 | 等级 |
@@ -176,21 +196,26 @@ StarMap 星图是一个部署在**内网**的资产测绘系统。它通过三�
 
 ## 架构
 
+![StarMap 架构图](docs/architecture.svg)
+
 ```
-                ┌────────────────────── StarMap（单二进制）──────────────────────┐
- PCAP 文件 ──►  │  ingest/pcapfile ─┐                                            │
- 网卡抓包 ──►  │  ingest/capture  ─┼─► parser.Aggregator ─► topology.Engine ─┐   │
- 远端探针 ──►  │  ingest/probe    ─┘   (五元组/MAC/SNI/  (节点/边/聚合/老化)│   │
-                │                       Host/JA3/JA4)                       ▼   │
-                │                                        detect.Detector（周期评估）│
-                │                                          │ RiskEvent          │
-                │                                          ▼                    │
-                │                          review（复核）+ audit（审计）+ assets │
-                │                                          │                    │
-                │                    store（SQLite，modernc 纯 Go 驱动）        │
-                │  web/（embed.FS 内嵌）◄── api/server.go（Gin REST /api/*）     │
-                └────────────────────────────────────────────────────────────────┘
+ 数据接入                 聚合与计算                     数据面                  对外
+ ─────────               ──────────                    ──────                ────
+ PCAP 导入 ─┐                                    ┌─ 主机资产（归档/台账对照）
+ 网卡抓包 ─┼─► parser.Aggregator ─┬─► topology ──┼─ 端口指纹（产品/证书/banner）
+ 探针上报 ─┤   (五元组/MAC/SNI/   │    .Engine   ├─ 站点视图（1.7 派生视图）
+ 主动发现 ─┘    Host/JA3/JA4/XFF) │              └─ 事件与情报（复核闭环）
+                                 └─► detect.Detector（5 条规则，只打标签）
+                                          │
+                     SQLite（modernc 纯 Go）◄─► api/server.go（Gin REST /api/*）
+                                          │
+                                  web/（embed.FS 内嵌，零构建）
 ```
+
+四路数据接入共用同一条聚合管线——这一点是刻意的：**PCAP 回放、实时抓包、远端探针、
+主动扫描产出的会话必须同构**，否则「导入一份历史 PCAP 复现现场」这件事就做不到。
+站点视图是从 `ports` 上派生的只读视图（不落表），人工标注单独落 `site_meta`，
+重扫不会覆盖人的判断。
 
 技术栈：**Go 1.26.10+ · Gin · gopacket · modernc.org/sqlite（免 CGO）· 原生 HTML/CSS/JS（零构建、零 CDN）**。
 
@@ -304,6 +329,12 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 | GET | `/tasks` `/tasks/{id}` | 发现任务账（历史任务，重启不丢） |
 | POST | `/tasks/{id}/cancel` | 停止运行中的发现任务（真打断） |
 | GET | `/changes?days=7` | 变更视图：窗口内新增 / 不再活动的端口 |
+| GET | `/sites` `/sites/stats` `/sites/tags` | 站点资产列表 · 统计 · 全部标签（1.7） |
+| GET | `/sites/detail?key=https://ip:443` | 站点详情 + 同主机端口（key 含 `://`，走查询参数） |
+| GET | `/sites/changes?days=7` | 站点变更：窗口内新增 / 失活站点 |
+| POST/DELETE | `/sites/meta` | 站点人工标注（归属单位 / 系统名 / 标签 / 备注） |
+| GET | `/export/sites.csv` | 站点 CSV 导出（同防注入 / BOM 口径） |
+| GET | `/report` | 单文件 HTML 报表（证书风险 / 未标注站点 / 窗口内变更，可 Ctrl+P 存 PDF） |
 | GET | `/trend?days=7` | 趋势：最近 N 天新增资产 / 端口 / 事件 |
 | GET | `/export/{assets,ports,events,tasks}.csv` | CSV 导出（防公式注入、带 BOM） |
 | GET | `/events` | 事件列表（状态/类型筛选） |
@@ -369,6 +400,7 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/RELEASE-1.7.md](docs/RELEASE-1.7.md) — **1.7.0 发布说明**（时间列 UTC 归一化 / 站点资产 / HTML 报表 / 灯塔能力对标）
 - [docs/RELEASE-1.6.1.md](docs/RELEASE-1.6.1.md) — **1.6.1 发布说明**（误报风暴 / 写锁争用 / 落盘两档 / 流量回退）
 - [docs/RELEASE-1.6.md](docs/RELEASE-1.6.md) — **1.6.0 发布说明**（任务账 / 变更视图 / 导出 / 容量治理）
 - [docs/INTEL.md](docs/INTEL.md) — **威胁情报对接指南**（1.5.0）：推送样例、字段别名表、覆盖/乱序语义、回源契约

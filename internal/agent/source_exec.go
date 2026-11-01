@@ -50,6 +50,15 @@ func (l *limitedBuffer) String() string {
 	return string(b)
 }
 
+// execOpenTimeout 是"启动命令后多久还没看到 pcap 头就判定失败"的预算。
+//
+// tcpdump/dumpcap 都是启动即写全局头（文件头 + 首个报文），
+// 15s 还没数据基本可以断定命令本身有问题，早点失败比挂着强。
+//
+// 提成常量是为了让测试能引用它：fail-fast 用例的阈值必须是"显著小于这个超时"，
+// 否则断言就退化成"没有等满超时"，抓不住退化。
+const execOpenTimeout = 15 * time.Second
+
 // OpenExec 把外部命令写到 stdout 的 pcap 流当作采集源。
 //
 // 这条路径存在的意义：有些机器上装不了编译器，但可能已经有 tcpdump / dumpcap / tshark。
@@ -71,9 +80,8 @@ func OpenExec(command string) (Source, error) {
 	// 必须有人 Wait：否则子进程退出后留下僵尸，长时间跑会攒出一堆。
 	go func() { _ = cmd.Wait() }()
 
-	// 15s 内必须看到 pcap 头。tcpdump/dumpcap 都是启动即写全局头，
-	// 超过这个时间还没数据，基本可以断定命令本身有问题，早点失败比挂着强。
-	src, err := openStream("exec:"+command, stdout, func() error { kill(); return nil }, 15*time.Second)
+	// 超时预算见 execOpenTimeout 的注释。
+	src, err := openStream("exec:"+command, stdout, func() error { kill(); return nil }, execOpenTimeout)
 	if err != nil {
 		kill()
 		if s := stderr.String(); s != "" {

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>站点资产 · StarMap 星图</title>
+<link rel="stylesheet" href="assets/theme.css">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+</head>
+<body>
+<div class="sm-app">
+  <header class="sm-topbar" id="smTopbar"></header>
+
+  <div class="sm-body">
+    <aside class="sm-sider" id="smSider"></aside>
+
+    <main class="sm-main">
+      <div class="sm-pagehd">
+        <div class="sm-pagehd-main">
+          <span class="sm-pill">测绘</span>
+          <h1 class="sm-h1">站点资产</h1>
+          <p class="sm-sub">网里跑着哪些业务系统 · 证书到期与自签情况 · 与主机台账一样可标注、可导出</p>
+        </div>
+        <div class="sm-toolbar">
+          <button class="sm-btn" data-role="operator" data-act="export" data-ico="download">导出 CSV</button>
+          <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
+        </div>
+      </div>
+
+      <div class="sm-content">
+        <div class="sm-grid sm-grid-4 sm-anim" id="statsBar"></div>
+
+        <section class="sm-card sm-anim" style="margin-top:14px;flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+          <div class="sm-card-hd">
+            <div class="sm-row is-center" style="gap:10px">
+              <h2>站点列表</h2>
+              <span class="sm-badge" id="cntBadge">0 个</span>
+            </div>
+            <div class="sm-toolbar">
+              <input class="sm-input is-sm" id="fQ" type="search" placeholder="搜索 IP / 标题 / 产品 / 证书 / 名称"
+                     style="width:250px" aria-label="搜索站点">
+              <select class="sm-select is-sm sm-w-auto" id="fScheme" aria-label="协议筛选">
+                <option value="">全部协议</option>
+                <option value="https">仅 HTTPS</option>
+                <option value="http">仅 HTTP</option>
+              </select>
+              <select class="sm-select is-sm sm-w-auto" id="fTag" aria-label="标签筛选">
+                <option value="">全部标签</option>
+              </select>
+              <select class="sm-select is-sm sm-w-auto" id="fFlag" aria-label="特征筛选">
+                <option value="">全部</option>
+                <option value="self_signed">自签证书</option>
+                <option value="expiring">30 天内到期</option>
+                <option value="expired">证书已过期</option>
+                <option value="untagged">未标注</option>
+              </select>
+            </div>
+          </div>
+          <div class="sm-card-bd is-flush" style="flex:1;overflow:auto">
+            <div class="sm-table-wrap">
+              <table class="sm-table" id="siteTable"></table>
+            </div>
+          </div>
+          <div class="sm-card-ft" id="pager"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 详情抽屉：操作按钮统一置于底部 -->
+<div class="sm-drawer-mask" id="drawer-mask" data-act="close-drawer"></div>
+<aside class="sm-drawer" id="drawer">
+  <div class="sm-drawer-hd">
+    <h3 id="drawerTitle">站点详情</h3>
+    <button class="sm-btn is-text is-icon is-sm" data-act="close-drawer" data-ico="close" title="关闭"></button>
+  </div>
+  <div class="sm-drawer-bd" id="drawerBody"></div>
+  <div class="sm-drawer-ft" id="drawerFt"></div>
+</aside>
+
+<script src="assets/api.js"></script>
+<script src="assets/app.js"></script>
+<script>
+'use strict';
+
+// 风险标签的中文与配色。刻意不用"高危/中危"：
+// 自签证书在政务内网是常态而不是缺陷，标成告警会立刻被所有人忽略。
+var RISK_LABEL = {
+  cert_expired: '证书已过期',
+  cert_expiring: '证书将到期',
+  self_signed: '自签证书',
+  untitled: '无标题',
+  plaintext: '明文 http'
+};
+var RISK_CLS = {
+  cert_expired: 'is-danger',
+  cert_expiring: 'is-warning',
+  self_signed: 'is-info',
+  untitled: 'is-off',
+  plaintext: 'is-off'
+};
+
+var view = [];
+var total = 0;
+var page = 1;
+var SIZE = 20;
+var seq = 0;
+
+function chip(text, cls) {
+  return '<span class="sm-chip ' + (cls || '') + '">' + UI.esc(text) + '</span>';
+}
+
+// 证书显示：剩余天数是内网最实用的一条——"某套业务还有 3 天打不开"。
+function certCell(s) {
+  if (!s.tls_cn && !s.cert_expiry) return '<span class="sm-t-3">—</span>';
+  var parts = [];
+  if (s.tls_cn) parts.push('<div class="sm-ellipsis" title="' + UI.escAttr(s.tls_cn) + '" style="font-size:12px">' + UI.esc(s.tls_cn) + '</div>');
+  if (s.cert_expiry) {
+    var cls = 'sm-t-3', txt = s.cert_expiry;
+    if (s.cert_days_left >= 0 && s.cert_days_left <= 30) cls = 'is-warning';
+    if (s.cert_days_left < 0) cls = 'is-danger';
+    if (s.cert_days_left >= 0) txt += '（剩 ' + s.cert_days_left + ' 天）';
+    else txt += '（已过期）';
+    parts.push('<div class="sm-badge ' + cls + '" style="font-size:11px">' + UI.esc(txt) + '</div>');
+  }
+  return parts.join('');
+}
+
+function titleCell(s) {
+  var name = s.name || s.title || '（无标题）';
+  var sub = s.key;
+  return '<div class="sm-ellipsis" title="' + UI.escAttr(name) + '">' + UI.esc(name) + '</div>' +
+    '<div class="sm-t-3 sm-mono sm-ellipsis" style="font-size:11px" title="' + UI.escAttr(sub) + '">' +
+    UI.esc(sub) + '</div>';
+}
+
+function riskCell(s) {
+  if (!s.risk || !s.risk.length) return '<span class="sm-t-3">—</span>';
+  return '<div class="sm-chips">' + s.risk.map(function (r) {
+    return chip(RISK_LABEL[r] || r, RISK_CLS[r] || '');
+  }).join('') + '</div>';
+}
+
+function tagCell(s) {
+  if (!s.tags || !s.tags.length) return '<span class="sm-t-3">—</span>';
+  return '<div class="sm-chips">' + s.tags.map(function (t) { return chip(t, 'is-brand'); }).join('') + '</div>';
+}
+
+/* ---------- 加载 ---------- */
+function currentFilter() {
+  var flag = document.getElementById('fFlag').value;
+  var f = {
+    q: document.getElementById('fQ').value.trim(),
+    scheme: document.getElementById('fScheme').value,
+    tag: document.getElementById('fTag').value
+  };
+  if (flag) f[flag] = 1;
+  return f;
+}
+
+function load() {
+  var tbl = document.getElementById('siteTable');
+  tbl.innerHTML = UI.skeletonRows(6);
+  var my = ++seq;
+  var f = currentFilter();
+  f.limit = SIZE;
+  f.offset = (page - 1) * SIZE;
+  return API.sites(f)
+    .then(function (data) {
+      if (my !== seq) return;
+      view = (data && data.sites) || [];
+      total = API.meta('/api/sites').total;
+      if (total < view.length) total = view.length;
+      if (!view.length && page > 1) { page--; return load(); }
+      render();
+    })
+    .catch(function (e) {
+      if (my !== seq) return;
+      view = []; total = 0;
+      tbl.innerHTML = UI.errorHTML(e);
+      document.getElementById('pager').innerHTML = '';
+      document.getElementById('cntBadge').textContent = '0 个';
+      renderStats(null);
+    });
+}
+
+function loadStats() {
+  return API.siteStats(currentFilter()).then(renderStats).catch(function () { renderStats(null); });
+}
+
+function loadTags() {
+  return API.siteTags().then(function (data) {
+    var tags = (data && data.tags) || {};
+    var sel = document.getElementById('fTag');
+    var cur = sel.value;
+    var opts = ['<option value="">全部标签</option>'];
+    Object.keys(tags).sort().forEach(function (t) {
+      opts.push('<option value="' + UI.escAttr(t) + '">' + UI.esc(t) + '（' + tags[t] + '）</option>');
+    });
+    sel.innerHTML = opts.join('');
+    // 当前标签如果已经被清掉（站点下线），下拉里就没有它了——此时不能悄悄改筛选条件，
+    // 否则用户看到的列表和下拉显示的对不上。
+    if (cur) sel.value = cur;
+  }).catch(function () { /* 标签加载失败不影响主列表 */ });
+}
+
+function render() {
+  document.getElementById('cntBadge').textContent = total + ' 个';
+  var tbl = document.getElementById('siteTable');
+  if (!view.length) {
+    tbl.innerHTML = UI.emptyHTML('还没有站点',
+      '站点由主动发现（端口扫描 + 服务指纹）产出：在「主机资产 → 端口记录」里发起一次深度发现，' +
+      '识别出 HTTP 响应的端口会自动出现在这里');
+    document.getElementById('pager').innerHTML = '';
+    return;
+  }
+
+  tbl.innerHTML =
+    '<table class="sm-table is-dense"><thead><tr>' +
+    '<th style="min-width:230px">站点</th>' +
+    '<th style="min-width:150px">识别</th>' +
+    '<th style="min-width:150px">证书</th>' +
+    '<th style="min-width:170px">特征</th>' +
+    '<th style="min-width:120px">标签</th>' +
+    '<th style="min-width:104px">最后发现</th>' +
+    '<th style="min-width:78px" class="sm-td-ops">操作</th>' +
+    '</tr></thead><tbody>' +
+    view.map(function (s) {
+      var ident = [];
+      if (s.product) ident.push('<div class="sm-ellipsis" style="font-size:12px" title="' + UI.escAttr(s.product + ' ' + (s.version || '')) + '">' +
+        UI.esc(s.product) + (s.version ? ' <span class="sm-t-3">' + UI.esc(s.version) + '</span>' : '') + '</div>');
+      if (s.server) ident.push('<div class="sm-t-3" style="font-size:11px">' + UI.esc(s.server) + '</div>');
+      if (s.http_status) ident.push('<div class="sm-t-3" style="font-size:11px">HTTP ' + s.http_status + '</div>');
+      return '<tr>' +
+        '<td>' + titleCell(s) + '</td>' +
+        '<td>' + (ident.join('') || '<span class="sm-t-3">—</span>') + '</td>' +
+        '<td>' + certCell(s) + '</td>' +
+        '<td>' + riskCell(s) + '</td>' +
+        '<td>' + tagCell(s) + '</td>' +
+        '<td class="sm-t-3" style="font-size:12px">' + UI.esc(UI.fmtAgo(s.last_seen)) + '</td>' +
+        '<td class="sm-td-ops"><button class="sm-btn is-text is-sm" data-act="open" data-key="' +
+          UI.escAttr(s.key) + '">详情</button></td>' +
+        '</tr>';
+    }).join('') +
+    '</tbody></table>';
+
+  document.getElementById('pager').innerHTML = UI.pagerHTML(total, page, SIZE, 'page');
+}
+
+function renderStats(st) {
+  var items = [
+    { k: '站点总数', v: st ? st.total : 0, i: 'globe', cls: '', ex: st ? ('端口 ' + Object.keys(st.by_port || {}).length + ' 种') : '—' },
+    { k: '近 30 天在线', v: st ? st.online : 0, i: 'node', cls: 'is-ok', ex: '按最后发现时间' },
+    { k: '自签证书', v: st ? st.self_signed : 0, i: 'shield', cls: (st && st.self_signed) ? 'is-warn' : 'is-off', ex: '内网常见，只作提示' },
+    { k: '证书 30 天内到期', v: st ? st.expiring : 0, i: 'clock', cls: (st && st.expiring) ? 'is-high' : 'is-off', ex: st && st.expired ? ('已过期 ' + st.expired) : '含已过期' }
+  ];
+  var host = document.getElementById('statsBar');
+  host.innerHTML = items.map(function (it) {
+    return '<div class="sm-stat ' + it.cls + '">' +
+      '<div class="sm-stat-ico">' + UI.ico(it.i) + '</div>' +
+      '<div style="min-width:0">' +
+      '<div class="sm-stat-val" data-v="' + it.v + '">0</div>' +
+      '<div class="sm-stat-key">' + UI.esc(it.k) + '</div>' +
+      '<div class="sm-stat-extra">' + UI.esc(it.ex) + '</div>' +
+      '</div></div>';
+  }).join('');
+  host.querySelectorAll('.sm-stat-val').forEach(function (el) {
+    UI.countTo(el, Number(el.getAttribute('data-v')) || 0);
+  });
+}
+
+/* ---------- 详情 ---------- */
+function kv(k, v) {
+  return '<div class="sm-kv"><div class="sm-kv-k">' + UI.esc(k) + '</div><div class="sm-kv-v">' + v + '</div></div>';
+}
+
+function openSite(key) {
+  document.getElementById('drawerTitle').textContent = '站点详情';
+  document.getElementById('drawerBody').innerHTML = UI.loadingHTML('加载站点详情');
+  UI.openDrawer('drawer');
+
+  API.siteDetail(key).then(function (data) {
+    var s = data.site;
+    var html =
+      '<div class="sm-row is-center" style="gap:8px;margin-bottom:10px">' +
+      '<span class="sm-badge is-brand">' + UI.esc(s.scheme.toUpperCase()) + '</span>' +
+      '<span class="sm-mono" style="font-size:13px">' + UI.esc(s.ip + ':' + s.port) + '</span>' +
+      (s.online ? '<span class="sm-badge is-success is-dot">在线</span>' : '<span class="sm-badge is-off is-dot">已静默</span>') +
+      '</div>' +
+      (s.risk && s.risk.length
+        ? '<div class="sm-chips" style="margin-bottom:10px">' + s.risk.map(function (r) {
+            return chip(RISK_LABEL[r] || r, RISK_CLS[r] || '');
+          }).join('') + '</div>'
+        : '') +
+      '<div class="sm-grid sm-grid-2">' +
+      kv('页面标题', UI.esc(s.title || '—')) +
+      kv('产品 / 版本', UI.esc((s.product || '—') + (s.version ? ' ' + s.version : ''))) +
+      kv('Server', UI.esc(s.server || '—')) +
+      kv('HTTP 状态', s.http_status ? String(s.http_status) : '—') +
+      kv('主机名', UI.esc(s.hostname || '—')) +
+      kv('首次发现', UI.esc(UI.fmtTime(s.first_seen))) +
+      kv('最后发现', UI.esc(UI.fmtTime(s.last_seen))) +
+      '</div>';
+
+    if (s.tls_cn || s.cert_expiry) {
+      html += '<div class="sm-divider"></div><div class="sm-label" style="margin-bottom:6px">证书</div>' +
+        '<div class="sm-grid sm-grid-2">' +
+        kv('CN', UI.esc(s.tls_cn || '—')) +
+        kv('签发者', UI.esc(s.cert_issuer || '—')) +
+        kv('到期日', UI.esc(s.cert_expiry || '—') +
+          (s.cert_days_left >= 0 ? '（剩 ' + s.cert_days_left + ' 天）' : (s.cert_expiry ? '（已过期）' : ''))) +
+        kv('自签', s.self_signed ? '<span class="sm-badge is-warning">是</span>' : '否') +
+        '</div>' +
+        (s.tls_names && s.tls_names.length
+          ? '<div class="sm-label" style="margin:8px 0 6px">证书 SAN（同一张证书上的域名）</div>' +
+            '<div class="sm-chips">' + s.tls_names.map(function (n) { return chip(n, 'is-info'); }).join('') + '</div>'
+          : '');
+    }
+
+    if (s.http_location) {
+      html += '<div class="sm-divider"></div>' +
+        '<div class="sm-label" style="margin-bottom:6px">跳转到</div>' +
+        '<div class="sm-mono" style="font-size:12px;word-break:break-all">' + UI.esc(s.http_location) + '</div>';
+    }
+
+    html += '<div class="sm-divider"></div><div class="sm-label" style="margin-bottom:6px">同一主机上的其它端口</div>';
+    var hp = data.host_ports || [];
+    if (!hp.length) {
+      html += '<div class="sm-t-3" style="font-size:12px">无记录</div>';
+    } else {
+      html += '<div class="sm-table-wrap"><table class="sm-table is-dense"><thead><tr>' +
+        '<th>端口</th><th>服务</th><th>识别</th><th>状态</th></tr></thead><tbody>' +
+        hp.map(function (p) {
+          return '<tr><td class="sm-mono" style="font-size:12px">' + p.port + '/' + UI.esc(p.proto) + '</td>' +
+            '<td style="font-size:12px">' + UI.esc(p.service || '—') + '</td>' +
+            '<td class="sm-ellipsis" style="font-size:12px">' + UI.esc(p.product || p.title || p.tls_cn || '—') + '</td>' +
+            '<td style="font-size:12px">' + UI.esc(p.state) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    // 人工标注：这是站点页唯一会写库的部分。
+    // 用 name/department/tags/note 而不是把标注塞进 ports——重扫不能覆盖人的判断。
+    html += '<div class="sm-divider"></div><div class="sm-label" style="margin-bottom:6px">人工标注</div>' +
+      '<div style="display:flex;flex-direction:column;gap:8px">' +
+      '<input class="sm-input" id="mName" placeholder="业务名称（如：物资管理系统）" value="' + UI.escAttr(s.name || '') + '">' +
+      '<input class="sm-input" id="mDept" placeholder="归属单位（如：信息中心）" value="' + UI.escAttr(s.department || '') + '">' +
+      '<input class="sm-input" id="mTags" placeholder="标签，用逗号分隔（如：业务系统,重点）" value="' +
+        UI.escAttr((s.tags || []).join(',')) + '">' +
+      '<textarea class="sm-textarea" id="mNote" rows="2" placeholder="备注（负责人 / 变更记录）">' +
+        UI.esc(s.note || '') + '</textarea>' +
+      '</div>';
+
+    document.getElementById('drawerBody').innerHTML = html;
+    document.getElementById('drawerFt').innerHTML =
+      '<button class="sm-btn is-primary" data-role="operator" data-act="save-meta">保存标注</button>' +
+      (s.name || s.department || (s.tags || []).length || s.note
+        ? '<button class="sm-btn is-text is-danger" data-role="operator" data-act="clear-meta" data-key="' +
+          UI.escAttr(s.key) + '">清除标注</button>'
+        : '') +
+      '<button class="sm-btn" data-act="close-drawer" style="margin-left:auto">关闭</button>';
+    document.getElementById('drawer').setAttribute('data-site-key', s.key);
+  }).catch(function (e) {
+    document.getElementById('drawerBody').innerHTML = UI.errorHTML(e);
+    document.getElementById('drawerFt').innerHTML =
+      '<button class="sm-btn" data-act="close-drawer" style="margin-left:auto">关闭</button>';
+  });
+}
+
+function saveMeta() {
+  var key = document.getElementById('drawer').getAttribute('data-site-key');
+  if (!key) return;
+  var tags = (document.getElementById('mTags').value || '')
+    .split(',').map(function (t) { return t.trim(); }).filter(Boolean);
+  API.saveSiteMeta({
+    key: key,
+    name: document.getElementById('mName').value.trim(),
+    department: document.getElementById('mDept').value.trim(),
+    tags: tags,
+    note: document.getElementById('mNote').value.trim()
+  }).then(function () {
+    UI.toast('已保存', 'ok');
+    UI.closeDrawer('drawer');
+    loadTags();
+    load();
+  }).catch(function (e) { UI.toast(e.message || '保存失败', 'err'); });
+}
+
+function clearMeta(key) {
+  UI.confirm({ title: '清除标注', content: '清除后名称、归属单位、标签、备注都会删除，站点本身不受影响。', okText: '清除' })
+    .then(function (ok) { return ok ? API.deleteSiteMeta(key) : null; })
+    .then(function (r) {
+      if (!r) return;
+      UI.toast('已清除标注', 'ok');
+      UI.closeDrawer('drawer');
+      loadTags();
+      load();
+    })
+    .catch(function (e) { UI.toast(e.message || '清除失败', 'err'); });
+}
+
+/* ---------- 事件绑定 ---------- */
+UI.on('refresh', function () { loadTags(); loadStats(); load(); });
+UI.on('open', function (el) { openSite(el.getAttribute('data-key')); });
+UI.on('close-drawer', function () { UI.closeDrawer('drawer'); });
+UI.on('save-meta', saveMeta);
+UI.on('clear-meta', function (el) { clearMeta(el.getAttribute('data-key')); });
+UI.on('export', function () {
+  // 导出跟着当前筛选走：筛了"自签"，导出的也必须只有自签站点
+  API.download('sites', currentFilter()).then(function (r) {
+    UI.toast('已导出 ' + r.name, 'ok');
+  }).catch(function (e) { UI.toast(e.message, 'err'); });
+});
+UI.on('page', function (el) {
+  var p = Number(el.getAttribute('data-page')) || 1;
+  if (p === page) return;
+  page = p;
+  load();
+});
+
+['fScheme', 'fTag', 'fFlag'].forEach(function (id) {
+  document.getElementById(id).addEventListener('change', function () { page = 1; load(); loadStats(); });
+});
+var searchTimer = null;
+document.getElementById('fQ').addEventListener('input', function () {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(function () { page = 1; load(); loadStats(); }, 250);
+});
+document.getElementById('drawer-mask').addEventListener('click', function () { UI.closeDrawer('drawer'); });
+
+document.addEventListener('DOMContentLoaded', function () {
+  loadTags();
+  loadStats();
+  load();
+});
+</script>
+</body>
+</html>

@@ -494,6 +494,100 @@ type PortRecord struct {
 	TLSCN    string   `json:"tls_cn,omitempty"`       // TLS 证书 CN
 	TLSNames []string `json:"tls_names,omitempty"`    // TLS 证书 SAN（域名 / IP）
 	Favicon  string   `json:"favicon_hash,omitempty"` // favicon mmh3（跨 IP 关联同一套系统的硬指纹）
+
+	// 站点判据与证书情报（1.7）：站点（Site）由端口派生，判据需要"有没有 HTTP 响应"，
+	// 而不是"有没有产品名"——一堆自研系统认不出产品，但状态码 200 摆在那里。
+	// 证书签发者/到期日/是否自签则是内网最实用的两条风险信号：
+	// 自签说明是内部系统或临时搭的，快到期说明某套业务马上要"打不开"。
+	Server       string `json:"server,omitempty"`        // Server 响应头
+	HTTPStatus   int    `json:"http_status,omitempty"`   // HTTP 状态码
+	HTTPLocation string `json:"http_location,omitempty"` // 跳转地址（内网常借此暴露真实域名）
+	CertIssuer   string `json:"cert_issuer,omitempty"`   // 证书签发者
+	CertExpiry   string `json:"cert_expiry,omitempty"`   // 证书到期日 YYYY-MM-DD
+	SelfSigned   bool   `json:"self_signed,omitempty"`   // 自签证书
+}
+
+// ---------- 站点资产（V1.7） ----------
+
+// Site 站点：一个"有 HTTP/S 应用层响应"的 ip:port。
+//
+// 为什么要有这一层，而不是继续只在端口列表里看：端口回答"这台机器开了什么"，
+// 站点回答"网里跑着哪些业务系统"。灯塔（ARL）那一类产品的资产主视图就是站点，
+// 因为运维和资产管理员要找的从来不是"某台机器 8080 开着"，而是
+// "那套 OA 装在哪台机器上、是谁的、证书什么时候到期"。
+//
+// 刻意**不建 sites 表**：站点全部由 ports 派生（判据见 store.ListSites），
+// 只把人工标注（名称/标签/备注）落在 site_meta 表里。两处都存一份站点数据，
+// 迟早要在"扫描结果变了但站点表没更新"上打架——1.6.0 的任务账已经吃过一次这个教训。
+type Site struct {
+	Key      string `json:"key"` // scheme://ip:port，站点的稳定标识
+	Scheme   string `json:"scheme"`
+	IP       string `json:"ip"`
+	Port     int    `json:"port"`
+	Proto    string `json:"proto"`
+	NodeKey  string `json:"node_key"`
+	Hostname string `json:"hostname,omitempty"` // 来自资产库（DHCP 主机名 / 台账）
+
+	Title   string `json:"title,omitempty"`
+	Server  string `json:"server,omitempty"`
+	Status  int    `json:"http_status,omitempty"`
+	Product string `json:"product,omitempty"`
+	Version string `json:"version,omitempty"`
+	// Location 是 3xx 的跳转目标。内网最常见的是"http 跳 https"，
+	// 但偶尔能看到跳到真实域名或公网地址——那是拿 HTTP 反查业务归属的线索。
+	Location string `json:"http_location,omitempty"`
+
+	TLSCN      string   `json:"tls_cn,omitempty"`
+	TLSNames   []string `json:"tls_names,omitempty"`
+	CertIssuer string   `json:"cert_issuer,omitempty"`
+	CertExpiry string   `json:"cert_expiry,omitempty"` // YYYY-MM-DD
+	SelfSigned bool     `json:"self_signed,omitempty"`
+	// CertDaysLeft 证书剩余天数：0 = 今天到期，-1 = 昨天到期，-N = 过期 N 天。
+	//
+	// 注意 -1 同时也是"没有证书情报"的返回值（历史约定，前端已在用）。
+	// 两个含义撞在同一个数上，所以**判断有没有情报一律看 CertExpiry == ""**，
+	// 不要再拿 CertDaysLeft 当哨兵——那样会把"刚过期一天"漏掉。
+	CertDaysLeft int    `json:"cert_days_left,omitempty"`
+	Favicon      string `json:"favicon_hash,omitempty"`
+
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Online    bool      `json:"online"`
+
+	// 人工标注（site_meta）。全空表示还没人管过——账外站点往往就是这个状态。
+	Name       string   `json:"name,omitempty"`
+	Department string   `json:"department,omitempty"` // 归属单位
+	Tags       []string `json:"tags,omitempty"`
+	Note       string   `json:"note,omitempty"`
+
+	// Risk 由证书/标题缺失等信号推导，只做提示不做定性（与全站"只打标签"一致）。
+	Risk []string `json:"risk,omitempty"`
+}
+
+// SiteStats 站点概览。
+type SiteStats struct {
+	Total      int            `json:"total"`
+	Online     int            `json:"online"`
+	Untitled   int            `json:"untitled"`    // 没有页面标题（可能是非 Web 服务 / 需登录 / 反代没配）
+	SelfSigned int            `json:"self_signed"` // 自签证书
+	Expiring   int            `json:"expiring"`    // 30 天内到期
+	Expired    int            `json:"expired"`     // 已过期
+	Tagged     int            `json:"tagged"`      // 已人工标注
+	ByPort     map[string]int `json:"by_port"`     // 端口分布 top N
+	ByProduct  map[string]int `json:"by_product"`  // 产品分布 top N
+	ByScheme   map[string]int `json:"by_scheme"`
+}
+
+// SiteMeta 人工标注。与扫描结果分开存，扫描重跑不会覆盖人的判断。
+type SiteMeta struct {
+	SiteKey string `json:"site_key"`
+	Name    string `json:"name"`
+	// Department 是**归属单位**，与台账 CSV 的 department 同义。
+	// 站点标注的核心用途就是"这个系统归谁管"——账外资产要处置，得先知道找谁。
+	Department string    `json:"department"`
+	Tags       []string  `json:"tags"`
+	Note       string    `json:"note"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // Probe 远端探针注册（V1.3：按探针位置自动归纳拓扑）。

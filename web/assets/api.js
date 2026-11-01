@@ -176,6 +176,31 @@
     },
     task: (id) => req('GET', '/api/tasks/' + encodeURIComponent(id)),
     cancelTask: (id) => req('POST', '/api/tasks/' + encodeURIComponent(id) + '/cancel'),
+    // 站点资产（V1.7）
+    //
+    // 站点是 ports 的派生视图：一个"有 HTTP/S 响应"的 ip:port。
+    // 筛选一律交给服务端，理由同 events：本地筛选配服务端分页，用户看到的
+    // "筛选结果"只覆盖当前页，会得出"没有匹配项"的错误结论。
+    sites: (params = {}) => {
+      const qs = new URLSearchParams();
+      ['q', 'scheme', 'tag', 'port', 'self_signed', 'expiring', 'expired', 'untagged', 'online', 'limit', 'offset']
+        .forEach((k) => { if (params[k]) qs.set(k, params[k]); });
+      const s = qs.toString();
+      return req('GET', '/api/sites' + (s ? '?' + s : ''));
+    },
+    siteStats: (params = {}) => {
+      const qs = new URLSearchParams();
+      ['q', 'scheme', 'tag', 'port', 'self_signed', 'expiring', 'expired', 'untagged', 'online']
+        .forEach((k) => { if (params[k]) qs.set(k, params[k]); });
+      const s = qs.toString();
+      return req('GET', '/api/sites/stats' + (s ? '?' + s : ''));
+    },
+    // key 形如 http://10.0.0.1:80，必须整体转义后放进查询参数
+    siteDetail: (key) => req('GET', '/api/sites/detail?key=' + encodeURIComponent(key)),
+    siteTags: () => req('GET', '/api/sites/tags'),
+    siteChanges: (days) => req('GET', '/api/sites/changes' + (days ? '?days=' + Number(days) : '')),
+    saveSiteMeta: (payload) => req('POST', '/api/sites/meta', payload),
+    deleteSiteMeta: (key) => req('DELETE', '/api/sites/meta?key=' + encodeURIComponent(key)),
     // 变更视图（V1.6）：窗口内新增 / 不再活动的端口
     changes: (days) => req('GET', '/api/changes' + (days ? '?days=' + Number(days) : '')),
     // 趋势（V1.6）：最近 N 天新增资产/端口/事件

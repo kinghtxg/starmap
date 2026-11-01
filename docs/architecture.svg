@@ -1,0 +1,82 @@
+<svg viewBox="0 0 680 500" width="1360" height="1000" role="img" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif">
+<title>StarMap 星图 1.7.0 架构图</title>
+<desc>四路数据接入经会话聚合进入拓扑引擎与检测器，落到主机资产、端口指纹、站点视图与情报复核，持久化在 SQLite，经 Gin REST 提供接口，前端由 embed.FS 内嵌。</desc>
+<!-- 样式全部内联：GitHub 的图片代理、各类 Markdown 预览器、以及导出成 PDF 的链路
+     都会不同程度剥掉 <style>，一旦被剥掉方块会退回纯黑填充。内联属性是唯一稳的写法。 -->
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="#5f5e5a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- 第 1 层：数据接入 -->
+<text x="40" y="16" font-size="12" fill="#5f5e5a">数据接入</text>
+<rect x="40" y="24" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="109" y="44" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">PCAP 导入</text>
+<text x="109" y="62" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">离线还原</text>
+<rect x="190" y="24" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="259" y="44" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">网卡抓包</text>
+<text x="259" y="62" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">AF_PACKET · wpcap</text>
+<rect x="340" y="24" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="409" y="44" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">探针上报</text>
+<text x="409" y="62" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">元数据 · 无载荷</text>
+<rect x="490" y="24" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="559" y="44" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">主动发现</text>
+<text x="559" y="62" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">内置扫描 · 指纹</text>
+
+<path d="M109 80 L109 92 L340 92" fill="none" stroke="#888780" stroke-width="0.5"/>
+<path d="M259 80 L259 92" fill="none" stroke="#888780" stroke-width="0.5"/>
+<path d="M409 80 L409 92" fill="none" stroke="#888780" stroke-width="0.5"/>
+<path d="M559 80 L559 92 L340 92" fill="none" stroke="#888780" stroke-width="0.5"/>
+<path d="M340 92 L340 98" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- 第 2 层：会话聚合 -->
+<rect x="40" y="100" width="600" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="340" y="120" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">parser.Aggregator　会话聚合</text>
+<text x="340" y="138" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">五元组 · MAC · SNI · HTTP Host · JA3/JA4 · XFF 七层还原 · 增量下发</text>
+
+<path d="M185 156 L185 174" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M495 156 L495 174" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- 第 3 层：引擎与检测 -->
+<rect x="40" y="176" width="290" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="185" y="196" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">topology.Engine</text>
+<text x="185" y="214" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">自生长拓扑 · 聚合 · 老化 · 风险锚点</text>
+<rect x="350" y="176" width="290" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+<text x="495" y="196" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">detect.Detector</text>
+<text x="495" y="214" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">5 条特征规则 · 只打标签不定性</text>
+
+<path d="M185 232 L185 250" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+<path d="M495 232 L495 250" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- 第 4 层：数据面 -->
+<rect x="40" y="252" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="109" y="272" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">主机资产</text>
+<text x="109" y="290" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">归档 · 台账对照</text>
+<rect x="190" y="252" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="259" y="272" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">端口指纹</text>
+<text x="259" y="290" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">产品 · 证书 · banner</text>
+<rect x="340" y="252" width="138" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="409" y="272" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">站点视图</text>
+<text x="409" y="290" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">1.7 派生 · 可标注</text>
+<rect x="490" y="252" width="138" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="559" y="272" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">事件与情报</text>
+<text x="559" y="290" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">复核闭环 · TI 库</text>
+
+<path d="M340 308 L340 326" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- 第 5 层：持久化与接口 -->
+<rect x="40" y="328" width="290" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="185" y="348" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">SQLite · modernc 纯 Go</text>
+<text x="185" y="366" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">WAL · 时间统一 UTC · 分块提交</text>
+<rect x="350" y="328" width="290" height="56" rx="8" fill="#f7f8fa" stroke="#b4b2a9" stroke-width="0.5"/>
+<text x="495" y="348" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">Gin REST · RBAC 三级</text>
+<text x="495" y="366" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">CSV 导出 · HTML 报表 · /metrics</text>
+
+<path d="M340 384 L340 402" fill="none" stroke="#5f5e5a" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+<!-- 第 6 层：前端 -->
+<rect x="40" y="404" width="600" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="340" y="424" font-size="14" font-weight="500" fill="#1f2329" text-anchor="middle" dominant-baseline="central">embed.FS 原生前端（零构建 · 零 CDN）</text>
+<text x="340" y="442" font-size="12" fill="#5f5e5a" text-anchor="middle" dominant-baseline="central">拓扑总览 · 主机资产 · 站点资产 1.7 · 变更 · 发现任务 · 事件 · 白名单 · 网络域</text>
+</svg>

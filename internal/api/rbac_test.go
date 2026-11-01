@@ -69,6 +69,13 @@ func TestRouteRBACMatrix(t *testing.T) {
 		{http.MethodPost, "/api/events/1/review", auth.RoleOperator},
 		{http.MethodPost, "/api/whitelist", auth.RoleOperator},
 		{http.MethodPost, "/api/capture/stop", auth.RoleOperator},
+		// 站点（V1.7）：列表/统计只读开放，标注属于写操作
+		{http.MethodGet, "/api/sites", auth.RoleViewer},
+		{http.MethodGet, "/api/sites/stats", auth.RoleViewer},
+		{http.MethodGet, "/api/sites/detail?key=http://10.0.0.1:80", auth.RoleViewer},
+		{http.MethodPost, "/api/sites/meta", auth.RoleOperator},
+		{http.MethodDelete, "/api/sites/meta?key=http://10.0.0.1:80", auth.RoleOperator},
+		{http.MethodGet, "/api/export/sites.csv", auth.RoleOperator},
 		{http.MethodPut, "/api/config", auth.RoleAdmin},
 		{http.MethodDelete, "/api/whitelist/1", auth.RoleAdmin},
 		{http.MethodDelete, "/api/assets/k", auth.RoleAdmin},

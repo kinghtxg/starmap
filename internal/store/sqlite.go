@@ -16,11 +16,19 @@ import (
 
 // Store 数据库访问对象
 type Store struct {
-	db *sql.DB
+	// db 是包装过的连接：Exec/Query/QueryRow/Begin 会把参数里的时间统一转成 UTC
+	// （见 timeutc.go）。其余方法（Ping / Conn / SetMaxOpenConns …）由嵌入透传。
+	db *dbx
 }
 
 // schema 建表语句
 const schema = `
+-- 迁移标记与轻量元信息（V1.7）。只放"一次性做过没有"这类事实，
+-- 不放业务状态——业务状态进各自的表。
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS nodes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   node_key TEXT NOT NULL DEFAULT '',
@@ -163,6 +171,20 @@ CREATE INDEX IF NOT EXISTS idx_ports_last_first ON ports(last_seen, first_seen);
 -- 端口状态刷新（MarkStalePorts：state='open' AND last_seen < ?）同样要覆盖索引，
 -- 否则每轮维护都要回表扫一遍全表。
 CREATE INDEX IF NOT EXISTS idx_ports_state_seen ON ports(state, last_seen);
+-- 站点视图（V1.7）按 state/proto 过滤后要按 (ip,port) 分组取最新，
+-- 这条复合索引让过滤 + 分组都能走索引顺序，不用先全表扫再排序。
+CREATE INDEX IF NOT EXISTS idx_ports_web ON ports(state, proto, ip, port, last_seen);
+-- 站点人工标注（V1.7）。站点本身是 ports 的派生视图，不存副本；
+-- 这里只存"人写的东西"：名称、标签、备注。扫描重跑不会覆盖它。
+CREATE TABLE IF NOT EXISTS site_meta (
+  site_key   TEXT PRIMARY KEY,
+  name       TEXT NOT NULL DEFAULT '',
+  department TEXT NOT NULL DEFAULT '',
+  tags       TEXT NOT NULL DEFAULT '[]',
+  note       TEXT NOT NULL DEFAULT '',
+  updated_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_site_meta_updated ON site_meta(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assets_status ON assets(status);
 -- 趋势图按天统计新增资产，同样需要时间索引。
 CREATE INDEX IF NOT EXISTS idx_assets_created ON assets(created_at);
@@ -296,6 +318,11 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("端口指纹迁移失败: %w", err)
 	}
+	// 1.7：站点标注补归属单位列（写过开发版库的人不会被 CREATE IF NOT EXISTS 卡住）
+	if err := migrateSiteMeta(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("站点标注迁移失败: %w", err)
+	}
 	// 1.5.2：会话历史表补唯一键（先清理历史重复行，再建索引）
 	if err := migrateSessionUnique(db); err != nil {
 		db.Close()
@@ -317,7 +344,12 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("事件 node_key 回填失败: %w", err)
 	}
-	return &Store{db: db}, nil
+	// 1.7：时间列统一到 UTC。必须在已有数据上跑一次，否则新旧两种时区表示
+	// 混在一张表里，字符串比较照样会错（详见 timeutc.go 开头）。
+	// 失败不阻断启动：这是"让历史数据更准"的优化，不该让服务起不来。
+	// 转换行数记在 meta 表里（key = schema.time_utc），排障时可直接查。
+	_, _ = normalizeTimeColumns(db)
+	return &Store{db: &dbx{db}}, nil
 }
 
 // migrateSessionUnique 给 sessions 表补五元组唯一键（V1.5.2）。
@@ -371,6 +403,13 @@ func migratePortFingerprint(db *sql.DB) error {
 		{"tls_cn", "TEXT NOT NULL DEFAULT ''"},
 		{"tls_names", "TEXT NOT NULL DEFAULT '[]'"},
 		{"favicon", "TEXT NOT NULL DEFAULT ''"},
+		// 1.7：站点派生与证书情报
+		{"server", "TEXT NOT NULL DEFAULT ''"},
+		{"http_status", "INTEGER NOT NULL DEFAULT 0"},
+		{"http_location", "TEXT NOT NULL DEFAULT ''"},
+		{"cert_issuer", "TEXT NOT NULL DEFAULT ''"},
+		{"cert_expiry", "TEXT NOT NULL DEFAULT ''"},
+		{"self_signed", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		if err := ensureColumn(db, "ports", c.name, c.decl); err != nil {
@@ -378,6 +417,15 @@ func migratePortFingerprint(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// migrateSiteMeta 给 site_meta 补列。
+//
+// site_meta 是 1.7 新建的表，按理不需要在线加列；留这个函数是因为**表结构写过一次
+// 就会被本地开发库记住**：先跑过一个没有 department 的开发版，再更新代码，
+// `CREATE TABLE IF NOT EXISTS` 不会补列，于是标注保存会静默丢掉归属单位。
+func migrateSiteMeta(db *sql.DB) error {
+	return ensureColumn(db, "site_meta", "department", "TEXT NOT NULL DEFAULT ''")
 }
 
 // ---------- 拓扑持久化迁移（P0-2） ----------
@@ -1752,16 +1800,20 @@ func (s *Store) DeleteAssetsByKeys(keys []string) (int64, error) {
 // ---------- 端口记录（V1.2） ----------
 
 const portColumns = `SELECT id,node_key,ip,port,proto,service,state,source,first_seen,last_seen,
-	product,version,title,banner,tls_cn,tls_names,favicon FROM ports`
+	product,version,title,banner,tls_cn,tls_names,favicon,
+	server,http_status,http_location,cert_issuer,cert_expiry,self_signed FROM ports`
 
 func scanPort(row rowScanner) (*model.PortRecord, error) {
 	var p model.PortRecord
 	var tlsNames string
+	var selfSigned int
 	err := row.Scan(&p.ID, &p.NodeKey, &p.IP, &p.Port, &p.Proto, &p.Service, &p.State, &p.Source,
-		&p.FirstSeen, &p.LastSeen, &p.Product, &p.Version, &p.Title, &p.Banner, &p.TLSCN, &tlsNames, &p.Favicon)
+		&p.FirstSeen, &p.LastSeen, &p.Product, &p.Version, &p.Title, &p.Banner, &p.TLSCN, &tlsNames, &p.Favicon,
+		&p.Server, &p.HTTPStatus, &p.HTTPLocation, &p.CertIssuer, &p.CertExpiry, &selfSigned)
 	if err != nil {
 		return nil, err
 	}
+	p.SelfSigned = selfSigned != 0
 	if tlsNames != "" && tlsNames != "[]" {
 		fromJSON(tlsNames, &p.TLSNames)
 	}
@@ -1780,11 +1832,34 @@ const portUpsertConflict = `ON CONFLICT(node_key,ip,port,proto) DO UPDATE SET
 	banner=CASE WHEN excluded.banner<>'' THEN excluded.banner ELSE ports.banner END,
 	tls_cn=CASE WHEN excluded.tls_cn<>'' THEN excluded.tls_cn ELSE ports.tls_cn END,
 	tls_names=CASE WHEN excluded.tls_names NOT IN ('','[]') THEN excluded.tls_names ELSE ports.tls_names END,
-	favicon=CASE WHEN excluded.favicon<>'' THEN excluded.favicon ELSE ports.favicon END`
+	favicon=CASE WHEN excluded.favicon<>'' THEN excluded.favicon ELSE ports.favicon END,
+	server=CASE WHEN excluded.server<>'' THEN excluded.server ELSE ports.server END,
+	http_status=CASE WHEN excluded.http_status>0 THEN excluded.http_status ELSE ports.http_status END,
+	http_location=CASE WHEN excluded.http_location<>'' THEN excluded.http_location ELSE ports.http_location END,
+	cert_issuer=CASE WHEN excluded.cert_issuer<>'' THEN excluded.cert_issuer ELSE ports.cert_issuer END,
+	cert_expiry=CASE WHEN excluded.cert_expiry<>'' THEN excluded.cert_expiry ELSE ports.cert_expiry END,
+	self_signed=CASE WHEN excluded.self_signed<>0 THEN excluded.self_signed ELSE ports.self_signed END`
 
 const portUpsertSQL = `INSERT INTO ports(node_key,ip,port,proto,service,state,source,first_seen,last_seen,
-	product,version,title,banner,tls_cn,tls_names,favicon)
-	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ` + portUpsertConflict
+	product,version,title,banner,tls_cn,tls_names,favicon,
+	server,http_status,http_location,cert_issuer,cert_expiry,self_signed)
+	VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ` + portUpsertConflict
+
+// portUpsertArgs 把模型摊成与 portUpsertSQL 顺序一致的参数。
+//
+// 抽出来的原因：UpsertPort 与 UpsertPorts 原来是两段手抄的参数列表，
+// 加一列就要同步改两处，而漏改的表现是**运行期**参数个数不匹配（不是编译错误）。
+func portUpsertArgs(p *model.PortRecord) []any {
+	selfSigned := 0
+	if p.SelfSigned {
+		selfSigned = 1
+	}
+	return []any{
+		p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen,
+		p.Product, p.Version, p.Title, p.Banner, p.TLSCN, toJSON(tlsNamesOrEmpty(p.TLSNames)), p.Favicon,
+		p.Server, p.HTTPStatus, p.HTTPLocation, p.CertIssuer, p.CertExpiry, selfSigned,
+	}
+}
 
 // PortStaleAfter 端口多久没再被观测到就标记为 stale（V1.5.2）。
 //
@@ -1824,25 +1899,41 @@ func (s *Store) MarkStalePorts(before time.Time) (int64, error) {
 	                 WHERE id IN (SELECT id FROM ports
 	                              WHERE state='open' AND last_seen < ? LIMIT ?)`
 	var total int64
+	batch := 0
 	for {
+		start := time.Now()
 		res, err := s.db.Exec(sqlStmt, before, stalePortChunk)
+		cost := time.Since(start)
 		if err != nil {
 			return total, err
 		}
 		n, _ := res.RowsAffected()
 		total += n
+		batch++
+		if stalePortStats != nil {
+			stalePortStats(batch, n, cost)
+		}
 		if n == 0 {
 			return total, nil
 		}
 	}
 }
 
+// stalePortStats 每完成一批回调一次，**仅供测试**观测"单批持锁时长"。
+//
+// 为什么需要这个钩子：分块写入的总耗时 = 批数 × (更新成本 + 一次提交落盘)，
+// 落盘成本是磁盘的、不是代码的——同一份代码在空闲机上 0.3s、在磁盘被抢的
+// runner 上 3s。用总耗时做断言，测的是磁盘心情；而这条路径真正要守的指标是
+// **单批持锁时长**（维护循环跑一轮时，探针上报最多被挡多久）。
+// 有了这个回调，用例可以逐个批次判，顺带钉住"批数确实按 5000 分"这件事。
+//
+// 生产路径为 nil，只多一次 nil 判断。
+var stalePortStats func(batch int, rows int64, cost time.Duration)
+
 // UpsertPort 写入/更新单条端口记录。
 // UpsertPort 幂等写入端口记录（node_key+ip+port+proto 唯一）。
 func (s *Store) UpsertPort(p *model.PortRecord) error {
-	_, err := s.db.Exec(portUpsertSQL,
-		p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen,
-		p.Product, p.Version, p.Title, p.Banner, p.TLSCN, toJSON(tlsNamesOrEmpty(p.TLSNames)), p.Favicon)
+	_, err := s.db.Exec(portUpsertSQL, portUpsertArgs(p)...)
 	return err
 }
 
@@ -1870,8 +1961,7 @@ func (s *Store) UpsertPorts(ps []model.PortRecord) error {
 	defer stmt.Close()
 	for i := range ps {
 		p := &ps[i]
-		if _, err := stmt.Exec(p.NodeKey, p.IP, p.Port, p.Proto, p.Service, p.State, p.Source, p.FirstSeen, p.LastSeen,
-			p.Product, p.Version, p.Title, p.Banner, p.TLSCN, toJSON(tlsNamesOrEmpty(p.TLSNames)), p.Favicon); err != nil {
+		if _, err := stmt.Exec(portUpsertArgs(p)...); err != nil {
 			return err
 		}
 	}

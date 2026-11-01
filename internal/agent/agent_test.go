@@ -243,7 +243,15 @@ func TestOpenExecReplay(t *testing.T) {
 }
 
 // TestOpenExecFailsFast 命令立刻失败（工具没装/参数错）时要快速报错，
-// 而不是卡在那里等 15s 超时。
+// 而不是卡在那里等超时。
+//
+// 阈值取 execOpenTimeout 的一半，而不是写死一个绝对秒数：
+//   - 写死 5s 会在 `go test ./...` 的并行负载下误报——22 个包同时开跑时
+//     shell 启动 + 进程调度能把这条推到 5.3s（实测），而代码本身没退化；
+//   - 直接写 15s 又退化成"没有等满超时"，什么也守不住。
+//
+// 取一半（7.5s）的意思是"必须明显早于超时发生"，仍能抓住"fail-fast 失效、
+// 退化成等超时"这一类回归。
 func TestOpenExecFailsFast(t *testing.T) {
 	cmd := "false"
 	if runtime.GOOS == "windows" {
@@ -253,8 +261,9 @@ func TestOpenExecFailsFast(t *testing.T) {
 	if _, err := OpenExec(cmd); err == nil {
 		t.Fatal("命令不输出 pcap 应报错")
 	}
-	if d := time.Since(start); d > 5*time.Second {
-		t.Fatalf("失败用了 %s，太慢", d)
+	if d := time.Since(start); d > execOpenTimeout/2 {
+		t.Fatalf("失败用了 %s，超过超时预算的一半（%s）——fail-fast 没生效，退化成等超时了",
+			d, execOpenTimeout/2)
 	}
 }
 

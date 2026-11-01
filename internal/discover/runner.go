@@ -133,6 +133,15 @@ func (r *Runner) portRecords(res *probe.DiscoverResult, now time.Time) []model.P
 				rec.TLSCN = fp.TLSCN
 				rec.TLSNames = fp.TLSNames
 				rec.Favicon = fp.Favicon
+				// 1.7：站点派生与证书情报。这几列不写进 ports 的话，
+				// 站点页只能显示"某 IP 某端口有标题"，看不出它是 http 还是 https、
+				// 证书什么时候到期、是不是自签——那三条恰恰是内网最实用的判断依据。
+				rec.Server = fp.Server
+				rec.HTTPStatus = fp.Status
+				rec.HTTPLocation = fp.Location
+				rec.CertIssuer = fp.CertIssuer
+				rec.CertExpiry = fp.CertExpiry
+				rec.SelfSigned = fp.SelfSigned
 			}
 			records = append(records, rec)
 		}

@@ -114,7 +114,7 @@ func TestReadNotBlockedByWriter(t *testing.T) {
 		worst := worstReadDuringWrite(t, st)
 		// 阈值取 100ms：连接池正常时实测 1ms，而单连接池时读要等整个写事务
 		// （3000 行批量写入约 350ms）——两者差两个数量级，门禁足够分辨。
-		if worst > 100*time.Millisecond {
+		if worst > perfBudget(100*time.Millisecond) {
 			t.Fatalf("读被写堵住了：最差 %v（连接池被限制成单条时会重现这个现象）", worst)
 		}
 	})
