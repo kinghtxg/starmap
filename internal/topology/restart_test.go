@@ -75,6 +75,70 @@ func TestRestartDoesNotDoubleCountBytes(t *testing.T) {
 	}
 }
 
+// TestCrashBridgeSkipsHistoryOnRestart 崩溃重启后，在途会话的首份快照不能再计一遍。
+//
+// 场景：上一个进程已经落过盘（库里留有基准），某条会话在它被强杀时还没轮到落基准，
+// 重启后探针照旧上报这条会话的累计值。累计值里那一段历史**已经被上一个进程计入过边**，
+// 再整笔加一次就是"重启一次流量翻一倍"——界面上只是数字变大，没有任何地方报错。
+//
+// 判据的前置条件是"库里恢复出了基准"，不是"库里有数据"：一条基准都没有的全新库上，
+// 那些字节从来没被任何人计入过，按遗留丢掉首份快照就是纯丢数据
+// （TestRestartDoesNotDoubleCountBytes 的第一段断言守的正是这条反例）。
+func TestCrashBridgeSkipsHistoryOnRestart(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	cfg := testCfg()
+	now := time.Now().UTC()
+
+	// 上一个进程：另一条会话落过基准，这就是"库里有过历史"的证据
+	prev := sessionTo("10.3.3.10", "10.3.3.20", 41001, 445, "tcp", base)
+	prev.FirstSeen, prev.LastSeen = now.Add(-2*time.Minute), now
+	prev.BytesUp, prev.BytesDown, prev.Packets = 5000, 5000, 50
+	e0 := New(cfg)
+	if err := e0.AttachStore(st); err != nil {
+		t.Fatal(err)
+	}
+	e0.Ingest(prev)
+	if err := e0.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// ---- 重启：新引擎接回上一个进程的边与基准 ----
+	e1 := New(cfg)
+	if err := e1.AttachStore(st); err != nil {
+		t.Fatal(err)
+	}
+	baseline := totalEdgeBytes(t, e1)
+	if baseline == 0 {
+		t.Fatal("重启后应恢复出上一个进程的边（本用例的前提），实际 0")
+	}
+	if e1.restoredOffsets == 0 {
+		t.Fatal("应恢复出至少一条增量基准（crashBridge 的前置条件），实际 0")
+	}
+
+	// 在途会话：启动前就在传，强杀时基准没来得及落盘
+	s := sessionTo("10.3.3.30", "10.3.3.40", 41002, 445, "tcp", base)
+	s.FirstSeen, s.LastSeen = now.Add(-5*time.Minute), time.Now()
+	s.BytesUp, s.BytesDown, s.Packets = 3000000, 4000000, 4000
+	e1.Ingest(s)
+	if got := totalEdgeBytes(t, e1); got != baseline {
+		t.Fatalf("重启后首份快照不应计入：重启前 %d，摄入后 %d（应仍为 %d）", baseline, got, baseline)
+	}
+
+	// 之后继续增长 1000 字节：只加这 1000（说明它已经以当前快照为底数了）
+	grown := *s
+	grown.BytesUp += 1000
+	grown.LastSeen = time.Now()
+	e1.Ingest(&grown)
+	if got := totalEdgeBytes(t, e1); got != baseline+1000 {
+		t.Fatalf("后续增量应为 1000：期望 %d，实际 %d", baseline+1000, got)
+	}
+}
+
 // 没有会话表数据的库（老库/首次启动）不能因为恢复失败而拒绝启动。
 func TestRestoreWithoutSessionRowsStillStarts(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "empty.db"))

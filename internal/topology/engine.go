@@ -93,6 +93,15 @@ type sessState struct {
 	firstSeen time.Time // 会话最初被看到的时间，用于识别"五元组被复用"
 	lastSeen  time.Time
 	dirty     bool // 自上次落盘以来有变化（增量基准按需覆盖写）
+	// persisted 这条基准是否已经落过库。
+	//
+	// 它把"落盘"分成两档（1.7.0）：
+	//   - 从没落过库的会话 → 每一拍都写（快档）。这一档必须快，因为它不是"计数"，
+	//     是下一次算增量时要减掉的**底数**：底数没写进去，进程一旦被强杀（掉电、
+	//     OOM、kill -9），重启后这条还在持续的会话就会把前面几个 G 整笔再算一遍。
+	//   - 已经落过库、只是数值变大 → 60 秒一档（慢档）。这一档丢了只影响
+	//     "上次落盘以来的增量"，量是有界的。
+	persisted bool
 	// seenAt 本进程最近一次收到这条会话的**墙钟**时间，只用于内存回收。
 	// 不能用 lastSeen 代替：导入历史 PCAP 时 lastSeen 可能是几个月前，
 	// 按它回收会把刚灌进来、后面还要继续上报的基准全部提前删掉。
@@ -113,6 +122,14 @@ type Engine struct {
 	sessionMaxAge int64
 	// sessionDirty 标记"有会话增量基准待落盘"，避免每 2s 全表扫一遍 e.sessions。
 	sessionDirty bool
+	// freshOffsets 还没落过库的基准条数（快档要写的量）。
+	//
+	// 单独计数而不是复用 sessionDirty：flush 的早退判据是"没有任何结构变更就跳过"，
+	// 而稳态下新会话多半落在**已有的边**上——没有新节点也没有新边。只靠
+	// dirtyNodes/dirtyEdges 判断，快档就永远轮不到执行，新会话的底数会一直等到
+	// 60 秒那一档（实测：连灌 2500 条会话，第一拍落 2000 条，此后一拍一条也写不进去）。
+	// 这个计数就是给早退判据补的那一条"还有底数没落地"。
+	freshOffsets int
 	// lastPrune 上次清理过期基准的时间（10 分钟一次足够）。
 	lastPrune time.Time
 
@@ -166,6 +183,29 @@ type Engine struct {
 	// 没有任何人会看出来；上报被拖到 3 秒，运维当场就看得见。
 	touchNodes map[int64]bool
 	touchEdges map[edgeKey]bool
+
+	// startedAt 本进程启动的墙钟时间。
+	//
+	// 只用于一件事：判断一条"第一次见到"的会话是不是**跨进程启动的在途会话**。
+	// 如果是，说明它上一段流量是被上一个进程统计的，而这一轮的底数又没能恢复
+	// （强杀 / 掉电时必然发生），此时按"以当前快照为底数、不计历史"处理，
+	// 避免把整笔流量重复计入（详见 Ingest 里的 crashBridge 判断）。
+	startedAt time.Time
+	// restoredOffsets 启动时从 session_offsets 恢复回来的基准条数。
+	//
+	// 它和 restoredEdgeBytes 一起构成 crashBridge 的**前置条件**，不是统计数字：
+	// 上一段流量到底有没有被计入，唯一可查的证据就是"库里有没有那个进程留下的东西"。
+	// 两样都没有（全新库、首次部署、单元测试里的空库）说明之前根本没有进程在统计，
+	// 这时再按"遗留"把首份快照丢掉，丢的是真数据——空库上摄入的第一条会话
+	// 边字节会恒为 0，而界面上只是"这台机器没流量"。
+	restoredOffsets int
+	// restoredEdgeBytes 启动时从库里恢复出来的边字节总和。
+	//
+	// 为什么光看基准条数不够：强杀（掉电 / OOM / kill -9）时边和基准不是原子写的，
+	// 完全可能"边落盘了、基准没轮到"——实测就是这个组合。此时基准条数是 0，
+	// 但流量**确实已经被上一个进程计入过边**，重启后再整笔加一次就是翻倍。
+	// 边上的字节是"上一段流量被统计过"的直接证据，比基准条数可靠。
+	restoredEdgeBytes int64
 }
 
 // New 创建拓扑引擎。
@@ -201,6 +241,7 @@ func New(cfg model.SystemConfig) *Engine {
 		dirtyEdges:       map[edgeKey]bool{},
 		touchNodes:       map[int64]bool{},
 		touchEdges:       map[edgeKey]bool{},
+		startedAt:        time.Now(),
 	}
 	if e.agingSeconds <= 0 {
 		e.agingSeconds = 86400
@@ -328,6 +369,7 @@ func (e *Engine) restoreLocked() error {
 		if ed.ID > maxEdgeID {
 			maxEdgeID = ed.ID
 		}
+		e.restoredEdgeBytes += ed.Bytes
 	}
 	if maxEdgeID >= e.nextEdgeID {
 		e.nextEdgeID = maxEdgeID + 1
@@ -349,8 +391,12 @@ func (e *Engine) restoreLocked() error {
 				firstSeen: o.FirstSeen,
 				lastSeen:  o.LastSeen,
 				seenAt:    now, // 刚从库里恢复，等同"刚刚见过"，不要立刻被内存修剪掉
+				persisted: true,
 			}
 		}
+		// 恢复失败时保持 0：宁可少判一次 crashBridge（个别会话多算一次），
+		// 也不能把"没恢复成功"当成"上个进程没落过盘"直接丢掉首份快照。
+		e.restoredOffsets = len(offs)
 	}
 
 	// 库内数据即最新快照，恢复本身不产生写回
@@ -364,6 +410,21 @@ func (e *Engine) restoreLocked() error {
 // Flush 强制落盘全部变化（含计数刷新），用于退出前与需要强一致的场合。
 func (e *Engine) Flush() error { return e.flush(true) }
 
+// crashBridgeSkew 判定"会话现在还活着"时容忍的时钟偏差。
+//
+// 探针的 LastSeen 来自它自己的时钟，与服务器差几秒是常态（NTP 未同步的内网更多）。
+// 不给容差的话，探针慢一秒，crashBridge 就永远不成立，等于没做这层兜底。
+// 两分钟既覆盖了常见的时钟漂移，又远小于"导入历史 pcap"的时间跨度。
+const crashBridgeSkew = 2 * time.Minute
+
+// offsetFlushBatch 快档单拍最多写多少条会话基准。
+//
+// 2000 条 / 2 秒 ≈ 1000 行/秒的持续写入，对 SQLite 是很轻的负载；
+// 而稳态下"新会话"的速率远低于这个数（真实网络每秒几十到几百条），
+// 所以正常情况下新会话的底数在两秒内一定已经落库。
+// 爆发式灌库时超出的部分排到下一拍，不阻塞上报。
+const offsetFlushBatch = 2000
+
 // flush 落盘。
 //
 // includeCounters=false 时只写结构变更（新节点/新边/属性变化），
@@ -376,7 +437,7 @@ func (e *Engine) flush(includeCounters bool) error {
 		e.mu.Unlock()
 		return nil
 	}
-	if len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0 &&
+	if len(e.dirtyNodes) == 0 && len(e.dirtyEdges) == 0 && e.freshOffsets == 0 &&
 		(!includeCounters || (len(e.touchNodes) == 0 && len(e.touchEdges) == 0 && !e.sessionDirty)) {
 		e.mu.Unlock()
 		return nil
@@ -425,27 +486,66 @@ func (e *Engine) flush(includeCounters bool) error {
 		edgeKeys = append(edgeKeys, k)
 		edges = append(edges, store.EdgeUpsert{Edge: *ed, SrcKey: nodeKeyFor(src), DstKey: nodeKeyFor(dst)})
 	}
-	// 会话增量基准：只在变化时覆盖写（V1.5.1）。
-	// 这是"重启不翻倍"唯一依赖的运行态数据：丢了它就等于把仍在持续的会话
-	// 整笔再算一次，而界面上只会看到一个更大的数字。
+	// 会话增量基准：分两档落盘（1.7.0）。
+	//
+	// 慢档（includeCounters，60 秒一次）：把所有变脏的基准刷新一遍。
+	// 快档（每一拍，2 秒一次）：只写"从没落过库"的那些，且按 batch 上限截断。
+	//
+	// 为什么快档必须存在：基准不是"计数"，是下次算增量时要减掉的底数。
+	// 慢档丢一拍只是数字晚一点；快档丢一次就是**整笔重复计入**——探针每 5 秒
+	// 重发一次累计值，重启后底数没了，第一份快照就把这条会话从头到现在的全部
+	// 字节再加一遍。现场表现是"重启一次，总流量翻一倍"，而界面上只是个更大的数字。
+	// 60 秒一档意味着最多有 60 秒的新会话完全没有底数，强杀/掉电正好落在这个窗口里
+	// （实测：上报 1,000,000 字节 → taskkill → 重启 → 同一份快照再报一次，
+	// TotalBytes 又涨 1,000,000）。
+	//
+	// 为什么快档要限流：一次爆发式灌入（例如导入 pcap）可能瞬间造出十万条会话，
+	// 全量写会把这一拍拖成秒级，反而拖垮上报。所以按 offsetFlushBatch 截断，
+	// 剩下的留到下一拍继续写——代价只是"最后写进去的那批晚几秒"。
 	//
 	// 注意 dirty 必须**在锁内**清除，不能在写库之后回到 e.sessions 里改：
 	// 释锁之后另一个 goroutine 正在往这张 map 里插新五元组，读它就是
 	// concurrent map read and map write —— Go 运行时直接 fatal，recover 拦不住，
 	// 整个进程当场退出（V1.5.1 就是这么崩的）。写库失败时用 remarkOffsetsDirty 放回去。
-	offs := make(map[string]store.SessionOffset, len(e.sessions))
-	if e.sessionDirty && includeCounters {
+	offs := make(map[string]store.SessionOffset, 256)
+	fresh := make(map[string]store.SessionOffset, 256)
+	waiting := 0 // 本轮因限流没写出去的新基准
+	if e.sessionDirty || e.freshOffsets > 0 {
 		for k, ss := range e.sessions {
 			if ss == nil || !ss.dirty {
 				continue
 			}
-			offs[k] = store.SessionOffset{
+			o := store.SessionOffset{
 				Bytes: ss.bytes, Packets: ss.packets,
 				FirstSeen: ss.firstSeen, LastSeen: ss.lastSeen,
 			}
-			ss.dirty = false
+			switch {
+			case includeCounters:
+				offs[k] = o
+				ss.dirty = false
+			case !ss.persisted:
+				// 还没落过库：快档只清 persisted，dirty 留到慢档一并刷值，
+				// 这样这一拍写失败也不会让"值更新"永久丢失。
+				if len(fresh) < offsetFlushBatch {
+					fresh[k] = o
+				} else {
+					waiting++
+				}
+			}
 		}
-		e.sessionDirty = false
+		if includeCounters {
+			e.sessionDirty = false
+		}
+		e.freshOffsets = waiting
+	}
+	// 快档与慢档合批：同一个 key 只在其中一边出现。
+	for k, o := range fresh {
+		offs[k] = o
+	}
+	// 写出去的那些 key 都算"已有底数"——慢档是全量刷新，里面也包含新会话。
+	writtenKeys := make([]string, 0, len(offs))
+	for k := range offs {
+		writtenKeys = append(writtenKeys, k)
 	}
 	// 结构变更无论哪一档都要清；计数刷新只在真的写出去之后才清。
 	e.dirtyNodes = map[int64]bool{}
@@ -480,9 +580,11 @@ func (e *Engine) flush(includeCounters bool) error {
 		// 去 e.sessions 里找指针（那正是崩溃的来源）。
 		if err := st.SaveSessionOffsets(offs); err != nil {
 			e.remarkOffsetsDirty(offs)
+			e.remarkFresh(waiting + len(fresh))
 			e.remarkTouch(prevTouchNodes, prevTouchEdges)
 			return err
 		}
+		e.markOffsetsPersisted(writtenKeys)
 		e.pruneOffsets(st)
 	}
 	return nil
@@ -516,6 +618,38 @@ func (e *Engine) remarkOffsetsDirty(offs map[string]store.SessionOffset) {
 		}
 	}
 	e.sessionDirty = true
+}
+
+// markOffsetsPersisted 把刚写进库的基准标记为"已有底数"（调用方不持锁）。
+//
+// 只动 persisted 这个布尔量，不清 dirty：快档写出去的只是"底数存在"这件事，
+// 会话的累计值还在继续长，值刷新留给 60 秒那一档。
+func (e *Engine) markOffsetsPersisted(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, k := range keys {
+		if ss := e.sessions[k]; ss != nil {
+			ss.persisted = true
+		}
+	}
+}
+
+// 计数器 freshOffsets 只在两处维护：flush 扫描时按"这一拍没写出去的新基准数"
+// 直接覆盖（每次扫描都会重算，天然自愈），以及写库失败时加回去。
+// 不在这里逐条递减：同一个数字两处维护，早晚会对不上，而对不上的表现是
+// "每拍都全表扫一遍"或者"新基准永远不落盘"，两种都很难查。
+
+// remarkFresh 落盘失败时把"还有多少条底数没落地"加回去（调用方不持锁）。
+func (e *Engine) remarkFresh(n int) {
+	if n <= 0 {
+		return
+	}
+	e.mu.Lock()
+	e.freshOffsets += n
+	e.mu.Unlock()
 }
 
 // pruneOffsets 定期清掉早已结束的会话基准（表不能跟着会话数无限长）。
@@ -691,9 +825,50 @@ func (e *Engine) Ingest(s *model.Session) {
 
 	key := s.FiveTuple.Key()
 	st, ok := e.sessions[key]
+
+	// 先把端点节点与边键算出来：crashBridge 需要知道"这条会话的边是不是已经在库里"。
+	// nodeForLocked 只读写节点相关结构，不碰 e.sessions，提前调用不影响任何语义。
+	now := s.LastSeen
+	if now.IsZero() {
+		now = time.Now()
+	}
+	srcID := e.nodeForLocked(s.FiveTuple.SrcIP, s.MAC, now)
+	dstID := e.nodeForLocked(s.FiveTuple.DstIP, "", now)
+	ek := edgeKeyOf(&model.Edge{SrcID: srcID, DstID: dstID, Protocol: s.FiveTuple.Proto})
+
+	// crashBridge：跨进程启动的在途会话，但底数没能恢复。
+	//
+	// 什么时候会发生：进程被强杀（掉电、OOM、kill -9、Windows 任务管理器结束进程）
+	// 时来不及落盘，最近 offsetFlushBatch 窗口内新出现的会话在库里根本没有底数。
+	// 重启之后探针照旧上报，服务端把这份累计快照当成"从 0 长到这里"，于是整笔
+	// 流量被再加一遍——实测 1,000,000 字节的会话，强杀重启后再报一次，
+	// 总流量又涨 1,000,000。反复崩几次就是"总流量翻好几倍"，而界面上只是数字变大。
+	//
+	// 判据刻意收得很窄，三个条件缺一不可：
+	//   库里确实有上一个进程的痕迹（基准条数或边字节非 0）
+	//   且 FirstSeen 早于本次启动（历史流量属于上一个进程，已经计入边了）
+	//   且 LastSeen 不早于本次启动（这条会话现在还在跑，不是导入的历史 pcap）
+	//
+	// 第二条是关键：导入历史 PCAP 时会话两端的 FirstSeen/LastSeen 都在过去，
+	// 时间戳来自报文本身而不是墙钟。若只判 FirstSeen，导入 pcap 的全部流量都会被
+	// 当成"上个进程的遗产"而一笔不记——那是比重复计入严重得多的错（数据消失 vs 数字偏大）。
+	//
+	// 第一条同样关键，它防的是同一类错的反面：全新库（首次部署、单元测试）里
+	// 没有任何痕迹，说明之前根本没有进程统计过这些字节，此时按"遗留"丢掉首份快照
+	// 就是**纯丢数据**。少了它，空库上摄入的第一条会话边字节恒为 0。
+	crashBridge := false
 	if !ok {
 		st = &sessState{}
 		e.sessions[key] = st
+		// 新会话立刻进入"底数待落盘"状态：flush 每一拍都会把它写下去（快档）。
+		e.freshOffsets++
+		// 探针的时钟通常与服务器有秒级偏差，LastSeen 常常略早于服务端启动时间。
+		// 判"这条会话现在还活着"必须留出这个容差，否则偏差一秒就退回重复计入。
+		if !e.startedAt.IsZero() && (e.restoredOffsets > 0 || e.restoredEdgeBytes > 0) &&
+			s.FirstSeen.Before(e.startedAt) &&
+			!s.LastSeen.Before(e.startedAt.Add(-crashBridgeSkew)) {
+			crashBridge = true
+		}
 	}
 	totalBytes := s.BytesUp + s.BytesDown
 	// 五元组复用（V1.5.1）：同一个客户端端口重新发起连接时，聚合器那边是一条新会话，
@@ -716,6 +891,11 @@ func (e *Engine) Ingest(s *model.Session) {
 	}
 	deltaBytes := totalBytes - st.bytes
 	deltaPackets := s.Packets - st.packets
+	if crashBridge {
+		// 这条会话的历史字节属于上一个进程，不再计入本次增量；只把它当成底数。
+		// 之后每来一份快照都按正常增量走，不会再有偏差。
+		deltaBytes, deltaPackets = 0, 0
+	}
 	if deltaBytes < 0 {
 		deltaBytes = 0
 	}
@@ -733,14 +913,8 @@ func (e *Engine) Ingest(s *model.Session) {
 		st.firstSeen = s.FirstSeen
 	}
 
-	now := s.LastSeen
-	if now.IsZero() {
-		now = time.Now()
-	}
-
-	// ---- 节点生长（含 NAT 修复） ----
-	srcID := e.nodeForLocked(s.FiveTuple.SrcIP, s.MAC, now)
-	dstID := e.nodeForLocked(s.FiveTuple.DstIP, "", now)
+	// 端点节点与边键在进入会话记账之前就已经算好（crashBridge 要用），这里不再重复。
+	// 顺序调整不影响语义：nodeForLocked 只读写节点结构，与 e.sessions 无关。
 
 	// 探针位置归纳（V1.3）：会话带来源探针位置 → 内网节点归属该位置。
 	// 只标注内网节点，公网聚合节点（ext:）不归属探针位置。
@@ -795,7 +969,6 @@ func (e *Engine) Ingest(s *model.Session) {
 	}
 
 	// ---- 边生长 ----
-	ek := edgeKeyOf(&model.Edge{SrcID: srcID, DstID: dstID, Protocol: s.FiveTuple.Proto})
 	edge, ok := e.edges[ek]
 	if !ok {
 		edge = &model.Edge{
