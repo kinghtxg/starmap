@@ -6,12 +6,12 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.7.0**（[1.7.0 发布说明](docs/RELEASE-1.7.md) · [1.6.1](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.7.1**（[1.7.1 发布说明](docs/RELEASE-1.7.1.md) · [1.7.0](docs/RELEASE-1.7.md) · [1.6.1](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-gofmt%20%7C%20vet%20%7C%20staticcheck%20%7C%20race%20%7C%20fuzz%20%7C%20vuln-2ea44f)]()
-[![Coverage](https://img.shields.io/badge/coverage-76.6%25-yellowgreen)]()
+[![Coverage](https://img.shields.io/badge/coverage-76.5%25-yellowgreen)]()
 [![Vulns](https://img.shields.io/badge/govulncheck-0%20reachable-brightgreen)]()
 [![Offline](https://img.shields.io/badge/deploy-offline%20ready-2ea44f)]()
 [![Single Binary](https://img.shields.io/badge/dist-single%20binary-7c3aed)]()
@@ -400,6 +400,7 @@ UI 设计基准与「刻本」同一套令牌。
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/RELEASE-1.7.1.md](docs/RELEASE-1.7.1.md) — **1.7.1 发布说明**（重启翻倍 / WAL 只涨不缩 / 站点总数两遍聚合 / 判据怎么写）
 - [docs/RELEASE-1.7.md](docs/RELEASE-1.7.md) — **1.7.0 发布说明**（时间列 UTC 归一化 / 站点资产 / HTML 报表 / 灯塔能力对标）
 - [docs/RELEASE-1.6.1.md](docs/RELEASE-1.6.1.md) — **1.6.1 发布说明**（误报风暴 / 写锁争用 / 落盘两档 / 流量回退）
 - [docs/RELEASE-1.6.md](docs/RELEASE-1.6.md) — **1.6.0 发布说明**（任务账 / 变更视图 / 导出 / 容量治理）
