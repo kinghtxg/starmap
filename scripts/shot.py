@@ -39,7 +39,6 @@ def want(name):
 PAGES = [
     ("index.html", "topology.png", 5.0),
     ("assets.html", "assets.png", 1.6),
-    ("events.html", "events.png", 1.8),
     ("sites.html", "sites.png", 2.4),
     ("changes.html", "changes.png", 2.6),
     ("tasks.html", "tasks.png", 1.8),
@@ -72,6 +71,15 @@ def main() -> int:
             pg.goto(f"{BASE}/{path}", wait_until="networkidle")
             shoot(pg, name, wait)
 
+        # 风险事件：列表默认只筛"待处置"，那正是给处置用的默认值。
+        # 但截图要证明"复核能让状态变化"，所以切到「全部状态」再拍——
+        # 否则图里永远是清一色"待处置"，看不出处置这条链路走过没有。
+        if want("events.png"):
+            pg.goto(f"{BASE}/events.html", wait_until="networkidle")
+            pg.wait_for_timeout(900)
+            pg.select_option("#fStatus", "")
+            shoot(pg, "events.png", 1.8)
+
         # 站点详情：1.7 的一级资产视图，抽屉里是证书情报 + 人工标注表单。
         # 光拍列表证明不了抽屉能用——标注表单是这一页唯一的写入口。
         if want("site-detail.png"):
@@ -79,7 +87,14 @@ def main() -> int:
             pg.wait_for_timeout(1500)
             pg.click('button[data-act="open"]')
             pg.wait_for_selector("#drawer.is-open", timeout=4000)
-            shoot(pg, "site-detail.png", 1.6)
+            pg.wait_for_timeout(600)
+            # 抽屉正文可滚动，默认停在顶部时标注表单会被页脚切掉半行（标签框只露一条边）。
+            # 滚到标签输入框：既保住上面的证书情报，又能把"标签 + 备注 + 保存标注"整块拍全。
+            pg.evaluate("""() => {
+                var n = document.getElementById('mTags');
+                if (n) { n.scrollIntoView({block: 'center'}); }
+            }""")
+            shoot(pg, "site-detail.png", 1.2)
 
         # 任务详情：1.6 的任务账，抽屉里给的是"每台主机扫出哪些端口"
         if want("task-detail.png"):
@@ -107,10 +122,16 @@ def main() -> int:
             }""")
             shoot(pg, "settings.png", 0.8)
 
-        # 台账对照：资产页的第三个标签
+        # 台账对照：资产页的第三个标签。
+        # 默认停在「全部」时，表格按 账外→在册→IP不符→僵尸 排，首屏全是"台账外"，
+        # 看起来像"网里全是影子设备"；而这些行的归属/位置必然为空（台账里没有），
+        # 恰恰拍不出"导入台账后把归属单位、负责人、物理位置补上了"这件事。
+        # 所以切到「在册在网」再拍：四类计数仍在上面的卡片与筛选标签里。
         if want("ledger.png"):
             pg.goto(f"{BASE}/assets.html", wait_until="networkidle")
             pg.click('button[data-tab="ledger"]')
+            pg.wait_for_timeout(800)
+            pg.click('#ledgerFilters .sm-tab:has-text("在册在网")')
             shoot(pg, "ledger.png", 2.0)
 
         # 端口记录：1.2 起有「指纹」列（产品 / 版本 / 证书 / favicon）
