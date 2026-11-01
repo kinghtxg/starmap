@@ -671,6 +671,8 @@ code, pre, .sm-mono { font-family: var(--sm-mono); font-size: var(--sm-font-xs);
   color: var(--sm-text-2); font-family: var(--sm-mono);
 }
 .sm-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 行内标注用的小号 chip（表格单元格里的"台账"这类来源标记） */
+.sm-chip.is-xs { height: 17px; padding: 0 5px; font-size: 10px; font-family: var(--sm-sans); vertical-align: 1px; }
 
 /* 风险等级 */
 .sm-risk { display: inline-flex; align-items: center; gap: 6px; font-size: var(--sm-font-xs); white-space: nowrap; }

@@ -167,3 +167,90 @@ func TestLedgerImportRejectsBadCSV(t *testing.T) {
 		t.Fatalf("缺少 IP 列应返回 400，实际=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// 资产页的归属列必须能从台账回填。
+//
+// 为什么这是个真问题：台账是客户手里唯一的"这台是谁的"依据，导入台账就是为了
+// 让资产页能看出归属。但资产本身要"归档登记"过才有归属人——于是刚接进来的
+// 网络上，归属单位/归属人整列全是「-」，用户第一反应是"导了台账没用"。
+//
+// 但回填不能反客为主：系统内已归档登记的归属是人工核实过的，比台账权威，
+// 台账只补空缺。另外要能标出来源，否则等于把台账信息冒充成"已核实"。
+func TestAssetListFillsOrgFromLedger(t *testing.T) {
+	h, st := newTestRouter(t, testCfg())
+	now := time.Now()
+
+	// 三台已发现主机：A 台账有（IP 命中）；B 台账有但当时 IP 写错了（只能靠 MAC 命中）；
+	// C 台账里根本没有
+	seedAsset(t, st, "node:a", "10.0.0.11", "aa:bb:cc:00:00:11", now)
+	seedAsset(t, st, "node:b", "10.0.0.12", "aa:bb:cc:00:00:12", now)
+	seedAsset(t, st, "node:c", "10.0.0.13", "aa:bb:cc:00:00:13", now)
+	// D 系统内已归档登记，台账里写的是另一个单位——必须保留系统登记的值
+	seedAsset(t, st, "node:d", "10.0.0.14", "aa:bb:cc:00:00:14", now)
+	if err := st.ArchiveAsset("node:d", "张三", "系统登记单位", "3F", "", "", "", "tester"); err != nil {
+		t.Fatalf("归档失败: %v", err)
+	}
+
+	csv := "IP地址,MAC地址,归属单位,归属人,物理位置\n" +
+		"10.0.0.11,AA-BB-CC-00-00-11,财务部,李四,2F\n" +
+		"10.0.0.99,AA-BB-CC-00-00-12,运维部,王五,5F\n" + // IP 是错的（账实不符），MAC 才是对的
+		"10.0.0.14,AA-BB-CC-00-00-14,台账单位,赵六,1F\n"
+	w := doReq(t, h, http.MethodPost, "/api/ledger/import", map[string]any{"csv": csv}, nil)
+	var imp struct{ Imported int }
+	mustJSON(t, w, &imp)
+	if imp.Imported != 3 {
+		t.Fatalf("台账导入 %d 条，期望 3（body=%s）", imp.Imported, w.Body.String())
+	}
+
+	lw := doReq(t, h, http.MethodGet, "/api/assets?page_size=100", nil, nil)
+	var rows []struct {
+		NodeKey    string `json:"node_key"`
+		Department string `json:"department"`
+		Owner      string `json:"owner"`
+		Location   string `json:"location"`
+		OrgSource  string `json:"org_source"`
+	}
+	mustJSON(t, lw, &rows)
+	byKey := map[string]int{}
+	for i, r := range rows {
+		byKey[r.NodeKey] = i
+	}
+
+	pick := func(k string) struct {
+		NodeKey    string `json:"node_key"`
+		Department string `json:"department"`
+		Owner      string `json:"owner"`
+		Location   string `json:"location"`
+		OrgSource  string `json:"org_source"`
+	} {
+		i, ok := byKey[k]
+		if !ok {
+			t.Fatalf("资产列表里没有 %s（返回 %d 行）", k, len(rows))
+		}
+		return rows[i]
+	}
+
+	// A：IP 命中，三项都回填并标注来源
+	if a := pick("node:a"); a.Department != "财务部" || a.Owner != "李四" || a.Location != "2F" {
+		t.Errorf("node:a 归属未从台账回填：单位=%q 人=%q 位置=%q", a.Department, a.Owner, a.Location)
+	} else if a.OrgSource != "ledger" {
+		t.Errorf("node:a 的 org_source=%q，期望 ledger（要能区分台账补的和人工登记的）", a.OrgSource)
+	}
+
+	// B：IP 对不上、只有 MAC 对得上——这是"账实不符"，但归属人仍然找得到
+	if b := pick("node:b"); b.Department != "运维部" || b.Owner != "王五" {
+		t.Errorf("node:b 只靠 MAC 也应命中台账：单位=%q 人=%q", b.Department, b.Owner)
+	}
+
+	// C：台账里没有，就得空着——不能张冠李戴
+	if c := pick("node:c"); c.Department != "" || c.Owner != "" || c.OrgSource != "" {
+		t.Errorf("node:c 台账里没有，不该有归属：单位=%q 人=%q 来源=%q", c.Department, c.Owner, c.OrgSource)
+	}
+
+	// D：系统已登记的归属优先，台账不能覆盖
+	if d := pick("node:d"); d.Department != "系统登记单位" || d.Owner != "张三" {
+		t.Errorf("node:d 的系统登记被台账覆盖了：单位=%q 人=%q", d.Department, d.Owner)
+	} else if d.OrgSource != "" {
+		t.Errorf("node:d 的归属来自系统登记，org_source 应为空，实际 %q", d.OrgSource)
+	}
+}

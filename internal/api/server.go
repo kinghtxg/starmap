@@ -2298,7 +2298,11 @@ func (s *Server) syncAssets() {
 }
 
 // assetJSON 资产列表 DTO（含在线状态）。
-func (s *Server) assetJSON(a model.Asset) gin.H {
+// lx 是台账归属索引：未归档的资产本身没有归属人（那是人工登记才有的），
+// 但客户手里往往早就有台账——导入台账的目的本来就是"知道这台是谁的"。
+// 所以这里按"系统登记优先、台账兜底"回填，并用 org_source 标明来源，
+// 免得把台账信息冒充成"系统已核实"。
+func (s *Server) assetJSON(a model.Asset, lx *ledger.OrgIndex) gin.H {
 	online := false
 	offlineSec := s.cfg().ArchiveOfflineSeconds
 	if offlineSec <= 0 {
@@ -2306,6 +2310,23 @@ func (s *Server) assetJSON(a model.Asset) gin.H {
 	}
 	if time.Since(a.LastSeen) < time.Duration(offlineSec)*time.Second {
 		online = true
+	}
+	department, owner, location, orgSrc := a.Department, a.Owner, a.Location, ""
+	if department == "" || owner == "" || location == "" {
+		if e := lx.Lookup(a.IPs, a.MAC); e != nil {
+			if department == "" {
+				department = e.Department
+			}
+			if owner == "" {
+				owner = e.Owner
+			}
+			if location == "" {
+				location = e.Location
+			}
+			if department != "" || owner != "" {
+				orgSrc = "ledger"
+			}
+		}
 	}
 	return gin.H{
 		"id":          a.ID,
@@ -2315,9 +2336,10 @@ func (s *Server) assetJSON(a model.Asset) gin.H {
 		"hostname":    a.Hostname,
 		"os":          a.OS,
 		"status":      a.Status,
-		"owner":       a.Owner,
-		"department":  a.Department,
-		"location":    a.Location,
+		"owner":       owner,
+		"department":  department,
+		"location":    location,
+		"org_source":  orgSrc,
 		"description": a.Description,
 		"first_seen":  a.FirstSeen.UTC().Format(time.RFC3339),
 		"last_seen":   a.LastSeen.UTC().Format(time.RFC3339),
@@ -2520,8 +2542,13 @@ func (s *Server) listAssets(c *gin.Context) {
 		setListMeta(c, total, limit)
 	}
 	out := make([]gin.H, 0, len(assets))
+	// 台账索引整页建一次，不要放进循环里（每台资产查一遍全表）
+	var lx *ledger.OrgIndex
+	if entries, lerr := s.d.Store.ListLedger(); lerr == nil {
+		lx = ledger.NewOrgIndex(entries)
+	}
 	for _, a := range assets {
-		out = append(out, s.assetJSON(a))
+		out = append(out, s.assetJSON(a, lx))
 	}
 	c.JSON(http.StatusOK, out)
 }

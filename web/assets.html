@@ -236,7 +236,7 @@ function renderAssets() {
       '<td>' + ips + '</td>' +
       '<td><span class="sm-mono" style="font-size:12px">' + UI.esc(a.mac || '-') + '</span></td>' +
       '<td>' + hn + os + '</td>' +
-      '<td>' + UI.esc(a.department || '-') + '</td>' +
+      '<td>' + deptCell(a) + '</td>' +
       '<td>' + UI.esc(a.owner || '-') + '</td>' +
       '<td>' + statusBadge(a) + '</td>' +
       '<td>' + onlineDot(a.online) + '</td>' +
@@ -247,6 +247,17 @@ function renderAssets() {
   box.innerHTML = html;
   document.getElementById('assetPager').innerHTML = UI.pagerHTML(
     assetTotal, assetPage, ASSET_PAGE_SIZE, 'asset-page', '');
+}
+
+// 归属单位单元格：台账回填的加个「台账」小标。
+// 系统没登记、靠台账补的，和"人工在系统里核实过"是两回事，
+// 界面上不区分，值班的人就会把台账当成已核实的归属。
+function deptCell(a) {
+  var d = UI.esc(a.department || '-');
+  if (a.org_source === 'ledger') {
+    return d + ' <span class="sm-chip is-xs" title="归属信息来自导入的资产台账，不是系统内人工登记">台账</span>';
+  }
+  return d;
 }
 
 /* ---------- 归档 / 编辑弹窗 ---------- */

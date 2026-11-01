@@ -262,6 +262,58 @@ func compareMAC(ledgerMAC, observedMAC string) macVerdict {
 	return macConflict
 }
 
+// OrgIndex 台账归属索引：给"资产列表"这类只需要知道"这台是谁的"、
+// 但没跑完整对照的地方用（资产页的归属单位 / 归属人列）。
+//
+// 为什么放在这里而不是在 api 里再写一遍：命中顺序必须是"先 IP、后 MAC"，
+// 和 Diff 完全一致。两处各写一遍，迟早会分叉成"对照页说某台是账外、
+// 资产页却显示了台账里的归属人"——这种自相矛盾比字段空着更伤人。
+type OrgIndex struct {
+	byIP  map[string]*model.LedgerEntry
+	byMAC map[string]*model.LedgerEntry
+}
+
+// NewOrgIndex 建索引。entries 为空时返回 nil，调用方按"没有台账"处理即可。
+func NewOrgIndex(entries []model.LedgerEntry) *OrgIndex {
+	if len(entries) == 0 {
+		return nil
+	}
+	x := &OrgIndex{
+		byIP:  make(map[string]*model.LedgerEntry, len(entries)),
+		byMAC: make(map[string]*model.LedgerEntry, len(entries)),
+	}
+	for i := range entries {
+		e := &entries[i]
+		if e.IP != "" {
+			x.byIP[e.IP] = e
+		}
+		if m := normalizeMAC(e.MAC); m != "" {
+			if _, dup := x.byMAC[m]; !dup { // 同 MAC 多条台账取第一条，与 Diff 一致
+				x.byMAC[m] = e
+			}
+		}
+	}
+	return x
+}
+
+// Lookup 按"先 IP、后 MAC"找台账条目，未命中返回 nil。
+func (x *OrgIndex) Lookup(ips []string, mac string) *model.LedgerEntry {
+	if x == nil {
+		return nil
+	}
+	for _, ip := range ips {
+		if e, ok := x.byIP[ip]; ok {
+			return e
+		}
+	}
+	if m := normalizeMAC(mac); m != "" {
+		if e, ok := x.byMAC[m]; ok {
+			return e
+		}
+	}
+	return nil
+}
+
 // Diff 对照台账与观测主机，产出四类差异。
 func Diff(entries []model.LedgerEntry, hosts []Host) Result {
 	res := Result{
