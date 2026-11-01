@@ -37,6 +37,8 @@
             <option value="reverse_proxy">反向代理</option>
             <option value="unknown_egress">未知出口</option>
             <option value="multi_net">多网域融合</option>
+            <option value="ip_conflict">IP 冲突</option>
+            <option value="xff_spoof">XFF 伪造</option>
           </select>
           <button class="sm-btn is-primary" data-act="query" data-ico="search">查询</button>
           <button class="sm-btn" data-act="refresh" data-ico="refresh">刷新</button>
@@ -78,7 +80,9 @@
 <script>
 'use strict';
 
-var TYPE_LABEL = { frp: 'FRP 隧道', clash: 'Clash/V2Ray', reverse_proxy: '反向代理', unknown_egress: '未知出口', multi_net: '多网域融合' };
+// ip_conflict / xff_spoof 之前漏登记：接口能查出来，界面上却显示成裸的英文类型名，
+// 值班的人看到 "ip_conflict" 不会立刻明白"同一个地址上有两台机器在抢"。
+var TYPE_LABEL = { frp: 'FRP 隧道', clash: 'Clash/V2Ray', reverse_proxy: '反向代理', unknown_egress: '未知出口', multi_net: '多网域融合', ip_conflict: 'IP 冲突', xff_spoof: 'XFF 伪造' };
 var STATUS_LABEL = { pending: '待处置', confirmed: '已确认', false_positive: '误报', deferred: '已暂缓' };
 var STATUS_CLS = { pending: 'is-warning', confirmed: 'is-danger', false_positive: 'is-success', deferred: '' };
 

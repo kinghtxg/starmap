@@ -24,6 +24,9 @@ const (
 	EventTypeUnknownEgress = "unknown_egress"
 	EventTypeMultiNet      = "multi_net"
 	EventTypeXFFSpoof      = "xff_spoof"
+	// EventTypeIPConflict 同一 IP 上出现多个 MAC：地址配错 / DHCP 池重叠 / ARP 欺骗。
+	// 三者流量表现相同，只打标签不定性（见 detect/ipconflict.go）。
+	EventTypeIPConflict = "ip_conflict"
 )
 
 // 风险事件状态

@@ -656,6 +656,9 @@
         var labels = n.Labels || [];
         var isProxy = labels.indexOf('xff-proxy') >= 0;
         var isXffClient = labels.indexOf('xff-client') >= 0;
+        // 同一地址上两台设备（地址配错 / 地址被抢 / ARP 欺骗）：
+        // 图上是两个 IP 一模一样的节点，不加标注的话谁都不会多看一眼。
+        var isConflict = labels.indexOf('ip-conflict') >= 0;
         var sub;
 
         /* 折叠后的公网：一朵云，点开看 /24 */
@@ -690,6 +693,7 @@
         } else {
           var tags = [];
           if (anchor) tags.push('异常');
+          if (isConflict) tags.push('IP 冲突');
           if (isXffClient) tags.push('经代理');
           // 转发设备直接以「代理转发」定型，不再叠一个"七层转发"标签自我重复
           var base = isProxy ? '代理转发' : (t.role ? roleLabel(t.role) : TYPE_LABEL[t.type]);

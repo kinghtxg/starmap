@@ -36,6 +36,14 @@ const (
 	LabelXFFClient = "xff-client"
 	// ProtoXFF 指向"经该代理转发"的关系边（无字节数，仅表达归属/路径）。
 	ProtoXFF = "xff"
+
+	// LabelIPConflict 同一 IP 上出现两个不同 MAC 的节点。
+	//
+	// 现场对应三种情形，都值得看：静态地址配错（两台机器抢一个地址，表现为
+	// 服务时通时不通）、DHCP 地址池重叠、ARP 欺骗（攻击者把自己 MAC 绑到
+	// 网关 IP 上，这是内网横向最常见的第一步）。
+	// 冲突双方的节点都打这个标，图上才刺眼；不标的话就是两行一模一样的 IP。
+	LabelIPConflict = "ip-conflict"
 )
 
 // ---------- 稳定节点身份 NodeKey（P0-2） ----------
@@ -1081,6 +1089,8 @@ func (e *Engine) applyForwardedLocked(proxyID int64, clientIP string, now time.T
 //   - 新 IP 为内网 → 合并进该节点（同 MAC 多 IP）
 //   - 新 IP 为公网 → 判定为 NAT 后地址，仍归属该节点（链路指向真实源）
 func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
+	// conflictWith 非 0 表示这个 IP 上出现了第二个 MAC（IP 冲突/ARP 欺骗形态）。
+	conflictWith := int64(0)
 	// 同 MAC 合并 / NAT 修复
 	if mac != "" {
 		if id, ok := e.macNode[mac]; ok {
@@ -1101,22 +1111,39 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 		}
 	}
 	if id, ok := e.ipNode[ip]; ok {
-		if n := e.nodes[id]; n != nil && now.After(n.LastSeen) {
-			n.LastSeen = now
-			e.touchNodes[id] = true
-		}
-		if mac != "" {
-			e.macNode[mac] = id
-			if e.nodes[id].MAC == "" {
-				e.nodes[id].MAC = mac
+		n := e.nodes[id]
+		// IP 冲突：这个地址上已经有一台 MAC 明确的设备，又来了一台 MAC 不同的设备。
+		//
+		// 以前这里是静默合并：新 MAC 被挂到老节点上（macNode[mac]=id），老 MAC 保留，
+		// 于是两台机器的流量、端口、告警揉成一台，图上看起来毫无异常。这是最坏的
+		// 处理方式——政府网里静态地址配错、地址被抢、ARP 欺骗，全都表现为
+		// "同一 IP 上换了 MAC"，而它恰恰是图上最该刺眼的东西。
+		//
+		// 现在的做法：已知 MAC 时以 MAC 为身份，新设备另起节点。但**不**抢 ipNode
+		// 的归属（见下面 bindIPIndex）——同一个 IP 只能有一个"无 MAC 观测"的默认
+		// 落点，否则跨三层（拿不到 MAC）的会话会在两台机器之间来回漂移。
+		//
+		// 还是同一台设备的情形不会走到这里：先无 MAC 后有 MAC，n.MAC 为空，直接绑上。
+		if mac != "" && n.MAC != "" && n.MAC != mac {
+			conflictWith = id
+		} else {
+			if now.After(n.LastSeen) {
+				n.LastSeen = now
+				e.touchNodes[id] = true
 			}
-			// NodeKey 一经确定不再改写（避免库里出现同一节点的两行身份）
-			if e.nodes[id].NodeKey == "" {
-				e.nodes[id].NodeKey = NodeKeyOf(mac, primaryIP(e.nodes[id]))
+			if mac != "" {
+				e.macNode[mac] = id
+				if e.nodes[id].MAC == "" {
+					e.nodes[id].MAC = mac
+				}
+				// NodeKey 一经确定不再改写（避免库里出现同一节点的两行身份）
+				if e.nodes[id].NodeKey == "" {
+					e.nodes[id].NodeKey = NodeKeyOf(mac, primaryIP(e.nodes[id]))
+				}
+				e.dirtyNodes[id] = true
 			}
-			e.dirtyNodes[id] = true
+			return id
 		}
-		return id
 	}
 
 	if !IsPrivate(ip) {
@@ -1168,7 +1195,18 @@ func (e *Engine) nodeForLocked(ip, mac string, now time.Time) int64 {
 	e.nextNodeID++
 	e.nodes[n.ID] = n
 	e.nodeKey[n.NodeKey] = n.ID
-	e.ipNode[ip] = n.ID
+	if conflictWith == 0 {
+		e.ipNode[ip] = n.ID // 冲突时保留原归属，见 nodeForLocked 里的说明
+	} else {
+		// 冲突双方都打标记：图上一眼能看出"这个地址上有两台机器"。
+		n.Labels = append(n.Labels, LabelIPConflict)
+		if old := e.nodes[conflictWith]; old != nil && !contains(old.Labels, LabelIPConflict) {
+			old.Labels = append(old.Labels, LabelIPConflict)
+			old.RiskLevel = model.RiskMid
+			e.dirtyNodes[conflictWith] = true
+		}
+		n.RiskLevel = model.RiskMid
+	}
 	if mac != "" {
 		e.macNode[mac] = n.ID
 	}

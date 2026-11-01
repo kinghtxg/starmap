@@ -18,6 +18,10 @@ import (
 // DedupWindow 事件去重窗口（SPEC §10.5）
 const DedupWindow = 24 * time.Hour
 
+// ruleCount 规则条数。定义成常量并让 rules 数组、计时数组都用它，
+// 加规则时忘记改计时数组会直接编译失败（而不是日志里少一列、对不上号）。
+const ruleCount = 7
+
 // Detector 检测调度器：周期性扫描会话 + 拓扑，产出风险事件。
 type Detector struct {
 	Store  *store.Store
@@ -149,8 +153,8 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 	// 每段都单独记时，只在整轮偏慢时输出，正常轮次零开销。
 	var seg struct {
 		copy, index, rules, wl, dedup, loop, write time.Duration
-		ruleCost                                   [6]time.Duration
-		ruleHits                                   [6]int
+		ruleCost                                   [ruleCount]time.Duration
+		ruleHits                                   [ruleCount]int
 	}
 	mark := func() time.Time { return time.Now() }
 
@@ -165,8 +169,9 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 	t2 := mark()
 
 	var candidates []model.RiskEvent
-	rules := [6]func(*ruleContext) []model.RiskEvent{
+	rules := [ruleCount]func(*ruleContext) []model.RiskEvent{
 		evalFRP, evalClash, evalReverseProxy, evalUnknownEgress, evalMultiNet, evalXFFSpoof,
+		evalIPConflict,
 	}
 	for i, fn := range rules {
 		start := mark()
@@ -200,15 +205,15 @@ func (d *Detector) Evaluate() ([]*model.RiskEvent, error) {
 		if el := time.Since(started); el > time.Second {
 			ms := func(d time.Duration) int64 { return d.Milliseconds() }
 			log.Printf("[detect] 单轮评估偏慢：%v（会话 %d、节点 %d、候选 %d、新建 %d、证据更新 %d）"+
-				" 分段：copy=%dms index=%dms rules=%dms[frp=%d clash=%d rev=%d egress=%d multinet=%d xff=%d] "+
-				"规则产出：frp=%d clash=%d rev=%d egress=%d multinet=%d xff=%d "+
+				" 分段：copy=%dms index=%dms rules=%dms[frp=%d clash=%d rev=%d egress=%d multinet=%d xff=%d conflict=%d] "+
+				"规则产出：frp=%d clash=%d rev=%d egress=%d multinet=%d xff=%d conflict=%d "+
 				"wl=%dms dedup=%dms loop=%dms write=%dms",
 				el.Round(time.Millisecond), len(sessions), len(rc.nodes), len(candidates), len(created), len(pendingUpdates),
 				ms(seg.copy), ms(seg.index), ms(seg.rules),
 				ms(seg.ruleCost[0]), ms(seg.ruleCost[1]), ms(seg.ruleCost[2]),
-				ms(seg.ruleCost[3]), ms(seg.ruleCost[4]), ms(seg.ruleCost[5]),
+				ms(seg.ruleCost[3]), ms(seg.ruleCost[4]), ms(seg.ruleCost[5]), ms(seg.ruleCost[6]),
 				seg.ruleHits[0], seg.ruleHits[1], seg.ruleHits[2],
-				seg.ruleHits[3], seg.ruleHits[4], seg.ruleHits[5],
+				seg.ruleHits[3], seg.ruleHits[4], seg.ruleHits[5], seg.ruleHits[6],
 				ms(seg.wl), ms(seg.dedup), ms(seg.loop), ms(seg.write))
 		}
 	}()
