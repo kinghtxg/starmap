@@ -290,6 +290,7 @@ func main() {
 				}
 				return len(as)
 			},
+			DBWALBytes: st.WALBytes,
 		})
 		slog.Info("指标导出已启用", "path", "/metrics",
 			"auth", map[bool]string{true: "X-Metrics-Token", false: "admin 会话"}[cfg.MetricsToken != ""])
@@ -394,6 +395,10 @@ func main() {
 	if err := engine.Flush(); err != nil {
 		slog.Error("退出前拓扑落盘失败", logging.Err(err))
 	}
+	// 退出前把 WAL 截断：这是唯一"没有读者挡着"的时刻。
+	// 不做的话，下次启动仍要 replay 整个 WAL（实测 193MB 的库要多花两秒），
+	// 而这两秒里所有接口都是不可用的（拓扑还在恢复）。
+	checkpointWAL(st, true)
 	slog.Info("已退出", "flushed_sessions", n)
 }
 
@@ -730,12 +735,63 @@ func maintenanceLoop(ctx context.Context, st *store.Store, box *config.Box) {
 	run()
 	t := time.NewTicker(maintenanceInterval)
 	defer t.Stop()
+	// WAL 维护单独一条更快的节奏（5 分钟）。
+	//
+	// 为什么不并进 maintenanceInterval：那条是 6 小时，而 checkpoint 的意义
+	// 恰恰是"别等到几百 MB 才想起来"。PASSIVE checkpoint 在没有待刷页时是
+	// 一次空跑（读几个计数器就返回），5 分钟一次的开销可以忽略。
+	wal := time.NewTicker(walCheckpointInterval)
+	defer wal.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			run()
+		case <-wal.C:
+			checkpointWAL(st, false)
 		}
+	}
+}
+
+// walCheckpointInterval WAL 被动 checkpoint 的执行间隔。
+const walCheckpointInterval = 5 * time.Minute
+
+// walWarnBytes WAL 体积告警阈值。
+//
+// 256MB 的来历：稳态下 WAL 应该只有几 MB（journal_size_limit 设了 64MB）。
+// 持续超过 256MB 只有三种可能——checkpoint 被长读事务挡住、磁盘快满、
+// 或者写入速率远超磁盘能力。这三种都不是"再等等就好了"，必须让运维看见。
+const walWarnBytes = 256 << 20
+
+// checkpointWAL 做一次 WAL checkpoint，并在体积异常时告警。
+//
+// 失败只记日志：这件事失败不会让数据错，只是文件不缩、重启变慢，
+// 不值得让任何调用方因此中断（最坏情况是它每天失败几次，日志里看得到）。
+func checkpointWAL(st *store.Store, truncate bool) {
+	if st == nil {
+		return
+	}
+	busy, logFrames, done, err := st.CheckpointWAL(truncate)
+	if err != nil {
+		slog.Warn("WAL checkpoint 失败", logging.Err(err))
+		return
+	}
+	size := st.WALBytes()
+	if busy != 0 {
+		// 有读事务持着旧快照：PASSIVE 会提前返回，不算错误，但要留痕。
+		// 这条日志反复出现就说明"长查询挡住了落盘"，该去查是谁在扫全表。
+		slog.Warn("WAL checkpoint 被读事务阻塞，本轮只推进了一部分",
+			"log_frames", logFrames, "checkpointed", done, "wal_bytes", size)
+		return
+	}
+	if size > walWarnBytes {
+		slog.Warn("WAL 文件偏大，磁盘占用与重启恢复时间都会受影响",
+			"wal_bytes", size, "threshold", walWarnBytes,
+			"hint", "确认没有超长读事务；必要时手工执行 PRAGMA wal_checkpoint(TRUNCATE)")
+		return
+	}
+	if truncate {
+		slog.Info("WAL 已截断", "log_frames", logFrames, "checkpointed", done, "wal_bytes", size)
 	}
 }

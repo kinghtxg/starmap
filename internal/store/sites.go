@@ -204,11 +204,48 @@ func scanSite(row rowScanner) (*model.Site, error) {
 }
 
 // CountSites 站点总数（与 ListSites 同一套筛选）。
+//
+// 无筛选条件时结果会短时缓存（见 siteCountCache）。带筛选条件时不缓存：
+// 条件组合太多，命中率低而失效逻辑复杂，收益抵不上出错的机会。
 func (s *Store) CountSites(f SiteFilter) (int, error) {
 	where, args := siteWhere(f)
+	if where != "" {
+		var n int
+		err := s.db.QueryRow(siteBase+`SELECT COUNT(*)`+siteFrom+where, args...).Scan(&n)
+		return n, err
+	}
+
+	s.siteCount.mu.Lock()
+	if s.siteCount.valid && time.Since(s.siteCount.at) < siteCountTTL {
+		n := s.siteCount.n
+		s.siteCount.mu.Unlock()
+		return n, nil
+	}
+	s.siteCount.mu.Unlock()
+
 	var n int
-	err := s.db.QueryRow(siteBase+`SELECT COUNT(*)`+siteFrom+where, args...).Scan(&n)
-	return n, err
+	if err := s.db.QueryRow(siteBase + `SELECT COUNT(*)` + siteFrom).Scan(&n); err != nil {
+		return 0, err
+	}
+
+	s.siteCount.mu.Lock()
+	s.siteCount.at, s.siteCount.n, s.siteCount.valid = time.Now(), n, true
+	s.siteCount.mu.Unlock()
+	return n, nil
+}
+
+// invalidateSiteCount 让站点总数缓存立刻失效。
+//
+// 挂在**每一条会改 ports 的写路径**上（单条/批量 upsert、标记 stale、按 node_key 删除），
+// 而不是只靠 TTL：靠 TTL 的话，扫描器刚写入 200 个新站点、用户刷新页面
+// 仍会看到旧总数，然后去查"为什么站点没增加"——这种不一致比慢难解释得多。
+//
+// 漏挂一处的症状很隐蔽：只有那条写路径会看到过期总数。所以每次给 ports
+// 加写入口时都要回来加一行，TestSiteCountCacheInvalidatesOnWrite 会盯着。
+func (s *Store) invalidateSiteCount() {
+	s.siteCount.mu.Lock()
+	s.siteCount.valid = false
+	s.siteCount.mu.Unlock()
 }
 
 // scanTime 解析从库里读出的时间文本（聚合列拿到的是原始 TEXT）。

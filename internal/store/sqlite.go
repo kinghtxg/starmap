@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go SQLite 驱动
@@ -19,7 +21,32 @@ type Store struct {
 	// db 是包装过的连接：Exec/Query/QueryRow/Begin 会把参数里的时间统一转成 UTC
 	// （见 timeutc.go）。其余方法（Ping / Conn / SetMaxOpenConns …）由嵌入透传。
 	db *dbx
+	// path 库文件路径，用于统计 WAL 体积（见 WALBytes）。内存库为空。
+	path string
+	// siteCount 站点总数的短时缓存，见 CountSites 的注释。
+	siteCount siteCountCache
 }
+
+// siteCountCache 站点总数的短时缓存（V1.7.1）。
+//
+// 为什么需要它：站点是 ports 的派生视图，列表页要拿总数做分页，于是
+// **一次列表请求会跑两遍全表聚合**（ListSites 一遍、CountSites 一遍），
+// 每遍都是 CTE + GROUP BY + 两个 LEFT JOIN。实测 5 万行端口 / 2.1 万个站点时
+// 单遍约 50ms（纯 Go 驱动还要再乘一倍多），列表页光"算有多少个"就占了一半时间。
+//
+// 站点总数是"大概有多少个"的信息，晚一两秒更新用户完全无感；
+// 但**端口一有写入就必须立刻失效**，否则会出现"刚扫到新站点，总数却不动"，
+// 那种不一致比慢更难解释。所以失效点挂在写路径上，而不是只靠 TTL。
+type siteCountCache struct {
+	mu    sync.Mutex
+	at    time.Time
+	n     int
+	valid bool
+}
+
+// siteCountTTL 缓存有效期上限。写入会主动失效，这里只是兜底：
+// 万一有绕过本包的写路径（外部脚本直接改库），最多旧 TTL 秒。
+const siteCountTTL = 5 * time.Second
 
 // schema 建表语句
 const schema = `
@@ -287,6 +314,13 @@ func openDSN(path string) string {
 		"&_pragma=mmap_size(" + mmapSize + ")" +
 		// 排序与临时索引放内存：站点视图的 GROUP BY / ORDER BY 全靠它。
 		"&_pragma=temp_store(MEMORY)" +
+		// WAL 文件上限。默认不设时，checkpoint 之后 **文件不会被截断**，
+		// 而是永远保持历史高水位：一次持续灌入把 WAL 撑到 193MB，
+		// 之后哪怕库里一条新写入都没有，这 193MB 也一直占着盘。
+		// 政务内网的机器经常只有一块几十 GB 的盘，这类"看不见的常驻占用"
+		// 是后来"磁盘怎么满了"的常见来源。设成 64MB 后，checkpoint 会把
+		// 超出部分截掉，稳态占用回到 MB 级。
+		"&_pragma=journal_size_limit(67108864)" +
 		"&_txlock=immediate"
 }
 
@@ -364,7 +398,54 @@ func Open(path string) (*Store, error) {
 	// 失败不阻断启动：这是"让历史数据更准"的优化，不该让服务起不来。
 	// 转换行数记在 meta 表里（key = schema.time_utc），排障时可直接查。
 	_, _ = normalizeTimeColumns(db)
-	return &Store{db: &dbx{db}}, nil
+	return &Store{db: &dbx{db}, path: path}, nil
+}
+
+// CheckpointWAL 把 WAL 里的页刷回主库并（可选）截断文件。
+//
+// 为什么必须有人显式干这件事：WAL 模式的隐式 checkpoint 只在"提交时发现
+// WAL 超过 1000 页（约 4MB）"时触发一次 **PASSIVE** checkpoint，而 PASSIVE
+// 有两个限制——(1) 有读事务持着旧快照时它什么都不做；(2) 它从不缩小文件。
+// 本站点视图是"全表聚合"的重读，几十万行的扫描很容易与 checkpoint 撞上，
+// 于是 WAL 只能一路涨。实测 5 万端口 / 9 万会话的库，一次持续灌入后
+// WAL 停在 193MB —— 主库才 145MB，重启时要把这 193MB 全replay 一遍，
+// 而磁盘占用是主库的两倍还多。
+//
+// 参数：truncate=false → PASSIVE（不阻塞任何读写，随时可调）；
+//
+//	truncate=true  → TRUNCATE（等待读事务结束并把文件截到 0，只在退出前用）。
+//
+// 返回值是 SQLite 的三元组：busy=1 表示有读者挡着，log/checkpointed 是帧数。
+// 调用方只需关心 busy 与 err——它们是"checkpoint 没生效"的唯一线索。
+func (s *Store) CheckpointWAL(truncate bool) (busy int, logFrames, checkpointed int, err error) {
+	if s == nil || s.db == nil {
+		return 0, 0, 0, nil
+	}
+	mode := "PASSIVE"
+	if truncate {
+		mode = "TRUNCATE"
+	}
+	row := s.db.QueryRow("PRAGMA wal_checkpoint(" + mode + ")")
+	if err = row.Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return 0, 0, 0, fmt.Errorf("wal_checkpoint(%s) 失败: %w", mode, err)
+	}
+	return busy, logFrames, checkpointed, nil
+}
+
+// WALBytes 返回 WAL 文件当前体积（字节）。内存库或文件不存在返回 0。
+//
+// 单独做一个方法而不是让调用方自己拼路径：WAL 文件名是 SQLite 的约定
+// （库名 + "-wal"），写在两处就一定会有一处写错，而写错的表现是"永远 0"——
+// 一个永远为 0 的磁盘指标比没有指标更糟，它会让人以为一切正常。
+func (s *Store) WALBytes() int64 {
+	if s == nil || s.path == "" || strings.HasPrefix(s.path, "file::memory:") {
+		return 0
+	}
+	fi, err := os.Stat(s.path + "-wal")
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
 }
 
 // migrateSessionUnique 给 sessions 表补五元组唯一键（V1.5.2）。
@@ -1913,6 +1994,11 @@ func (s *Store) MarkStalePorts(before time.Time) (int64, error) {
 	const sqlStmt = `UPDATE ports SET state='stale'
 	                 WHERE id IN (SELECT id FROM ports
 	                              WHERE state='open' AND last_seen < ? LIMIT ?)`
+	// 整个函数结束时失效一次，覆盖三条出口：正常跑完、中途报错、以及一块都没改到。
+	// 为什么不用 `n == 0` 那一处：分批提交，出错时前面的批次**已经落盘了**，
+	// 若只在成功出口失效，站点总数会带着旧值再撑一个 TTL，而这恰好发生在
+	// "库刚出过错"的时候——最不该再叠加一层不一致的时候。
+	defer s.invalidateSiteCount()
 	var total int64
 	batch := 0
 	for {
@@ -1945,10 +2031,12 @@ func (s *Store) MarkStalePorts(before time.Time) (int64, error) {
 // 生产路径为 nil，只多一次 nil 判断。
 var stalePortStats func(batch int, rows int64, cost time.Duration)
 
-// UpsertPort 写入/更新单条端口记录。
 // UpsertPort 幂等写入端口记录（node_key+ip+port+proto 唯一）。
 func (s *Store) UpsertPort(p *model.PortRecord) error {
 	_, err := s.db.Exec(portUpsertSQL, portUpsertArgs(p)...)
+	if err == nil {
+		s.invalidateSiteCount()
+	}
 	return err
 }
 
@@ -1980,7 +2068,11 @@ func (s *Store) UpsertPorts(ps []model.PortRecord) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateSiteCount()
+	return nil
 }
 
 // PortFilter 端口记录的筛选条件（列表与计数同源）。
@@ -2054,7 +2146,11 @@ func (s *Store) DeletePortsByKey(nodeKey string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		s.invalidateSiteCount()
+	}
+	return n, nil
 }
 
 func mustRowsAffected(res sql.Result) int64 {

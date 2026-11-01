@@ -101,6 +101,53 @@ func TestSitesAPI(t *testing.T) {
 	}
 }
 
+// TestSitesListTotal 钉住 X-Total-Count 的三条分支。
+//
+// 为什么值得单独写：总数有两条来源——「本页没被截断，条数即总数」和
+// 「问库要 COUNT」。前者是为了省掉一次全表聚合，代价是判断条件写错就会
+// 少报总数，而这个错不会让页面报错，只会让用户翻不到最后几条。
+// 所以三个分支各给一条断言：不够一页、正好一页、带 offset。
+func TestSitesListTotal(t *testing.T) {
+	h, _, srv := newTaskRouter(t)
+	for _, ip := range []string{"10.5.0.1", "10.5.0.2", "10.5.0.3"} {
+		webPort(t, srv, ip, 80, nil)
+	}
+
+	cases := []struct {
+		name      string
+		query     string
+		wantSites int
+		wantTotal string
+	}{
+		// 未截断：不查 COUNT，直接拿本页条数
+		{"不够一页", "?limit=10", 3, "3"},
+		// 正好一页 +1：条数等于 limit，无法判断是否被截断，必须问库
+		{"正好一页", "?limit=3", 3, "3"},
+		// 被截断：本页 2 条，总数仍是 3
+		{"被截断", "?limit=2", 2, "3"},
+		// 带 offset：条数与总数已无关，必须问库
+		{"带 offset", "?limit=10&offset=1", 2, "3"},
+	}
+	for _, c := range cases {
+		w := doReq(t, h, http.MethodGet, "/api/sites"+c.query, nil, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s 状态码 %d: %s", c.name, w.Code, w.Body.String())
+		}
+		var resp struct {
+			Sites []siteJSON `json:"sites"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s 解析失败: %v", c.name, err)
+		}
+		if len(resp.Sites) != c.wantSites {
+			t.Errorf("%s 返回 %d 条，期望 %d", c.name, len(resp.Sites), c.wantSites)
+		}
+		if got := w.Header().Get("X-Total-Count"); got != c.wantTotal {
+			t.Errorf("%s X-Total-Count = %q，期望 %q", c.name, got, c.wantTotal)
+		}
+	}
+}
+
 // TestSiteDetailAndMeta 详情 + 人工标注 + 校验。
 func TestSiteDetailAndMeta(t *testing.T) {
 	h, _, srv := newTaskRouter(t)

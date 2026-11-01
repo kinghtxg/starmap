@@ -33,6 +33,13 @@ type Providers struct {
 	SessionsEvicted func() int64
 	EventsPending   func() int
 	AssetsUnmanaged func() int
+	// DBWALBytes 数据库 WAL 文件体积。
+	//
+	// 为什么要单独暴露：WAL 不会被自动缩容，一次持续灌入撑到几百 MB 之后就
+	// 一直是那个尺寸；磁盘写满时 SQLite 的表现是**写入静默失败**（上报接口
+	// 仍回 200，数据没进去），现场很难联想到"WAL 吃了盘"。有了这条曲线，
+	// 磁盘问题在变成故障之前就能看见。
+	DBWALBytes func() int64
 }
 
 // Metrics 指标集合。
@@ -128,6 +135,13 @@ func (m *Metrics) registerGaugeFuncs(reg *prometheus.Registry, p Providers) {
 	add("starmap_sessions_active", "内存会话表当前条数", p.SessionsActive)
 	add("starmap_events_pending", "待复核事件数", p.EventsPending)
 	add("starmap_assets_unmanaged", "台账外（未被在册登记）设备数", p.AssetsUnmanaged)
+
+	if p.DBWALBytes != nil {
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "starmap_db_wal_bytes",
+			Help: "SQLite WAL 文件体积（字节）。长期只涨不落说明 checkpoint 被长读事务挡住或磁盘将满",
+		}, func() float64 { return float64(p.DBWALBytes()) }))
+	}
 
 	if p.SessionsDropped != nil {
 		reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{

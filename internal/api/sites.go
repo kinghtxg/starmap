@@ -125,7 +125,18 @@ func (s *Server) listSites(c *gin.Context) {
 	for i := range sites {
 		out = append(out, toSiteJSON(&sites[i]))
 	}
-	if total, cerr := s.d.Store.CountSites(f); cerr == nil {
+	// 总数：没被截断时本页条数就是总数，不必再跑一遍全表聚合。
+	//
+	// 站点是 ports 上的派生视图，这条聚合要 CTE + GROUP BY + 两次 LEFT JOIN，
+	// 两万站点规模上单遍约 50ms，而列表查询本身已经回答了"够不够一页"
+	// （limit 是硬上限，取回的条数少于它就不可能被截断）。绝大多数的中小部署
+	// 站点数都不到 2000，走这条分支等于把一次全表聚合整个省掉。
+	// 真被截断时才问库要总数，那条路径由 CountSites 的短时缓存兜住。
+	//
+	// offset > 0 时必须问库：本页条数与总数已经无关了。
+	if offset == 0 && len(out) < limit {
+		setListMeta(c, len(out), limit)
+	} else if total, cerr := s.d.Store.CountSites(f); cerr == nil {
 		setListMeta(c, total, limit)
 	}
 	c.JSON(http.StatusOK, gin.H{"sites": out, "count": len(out)})
