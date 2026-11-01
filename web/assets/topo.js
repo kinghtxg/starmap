@@ -20,6 +20,9 @@
   var LABEL_HIDE = 240;            // 超过该节点数隐藏全部标签
   var SUBLABEL_HIDE = 110;         // 超过该节点数隐藏副标签
   var FLOW_MAX_EDGES = 420;        // 超过该边数不做流光动画
+  var BAND_HEAD = 24;              // 泳道带上沿留白（放层名）
+  var BAND_TAIL = 16;              // 泳道带下沿留白
+  var LEGEND_HIDE = 25;            // 超过该节点数默认收起图例（块头 250x340，铺满画布时就是遮住设备）
 
   /* ---------- 风险色（与 theme.css 令牌一致，导出时需内联） ---------- */
   var RISK = {
@@ -278,54 +281,187 @@
     return { nodes: kept.concat([cloud]), edges: out, folded: folded, selfBytes: selfBytes };
   }
 
-  // V1.3：按探针位置分组布局（泳道归纳）。
-  // 节点带 Location 时，同一位置一组，组内独立分层布局，组间垂直堆叠。
-  function layout(nodes, edges) {
+  // V1.3：按探针位置分组布局（泳道归纳）。节点带 Location 时同一位置一组，组内独立分层。
+  //
+  // # 为什么不是简单"一组一段、自上而下排"，也不是"按画布宽度排几列"
+  //
+  // 最初是"组间 yOff 往下摞"：一次演示 40 个节点、3 个位置，摞成 1104×1280，
+  // 而画布只有 1132×538 —— 横竖比差 2.7 倍，fit() 只能按高度缩到 36%，
+  // 图缩在中间一小块，四周全是空白。
+  //
+  // 后来改成"按画布宽度算能放几列"：能并排了，但列的宽度按"最宽的组"取整，
+  // 一遇到"某一组有一层特别宽"（A 栋 3 层 15 台同层），整幅就被那一组撑开，
+  // 其余组挤在下面，缩放仍然只有 36%~56%。而且列数是按宽度算的，
+  // 完全没考虑高度——扁画布上"并成 3 列"可能反而不如"摞 2 行"。
+  //
+  // 现在的做法：把每组当成一个矩形块，做货架式排布（相邻几组可以同处一行），
+  // 并用 fit() 的同一口径（min(宽比, 高比)）当评分函数，在若干"层内列数档位"
+  // 里挑默认缩放最大的那一版。也就是说：布局器直接优化"用户看到的字有多大"。
+  function layout(nodes, edges, box) {
+    var vp = (box && box.w > 0 && box.h > 0) ? box : { w: 1200, h: 640 };
+    // 档位是粗粒度的：太小层内折得稀碎，太大又回到"一组独占整宽"。
+    // 实测低档位会落在同一个平台（per 撞到下限 4），0.35 以下没必要再试。
+    // 节点多时只留默认档——render() 每次刷新都会调它，不能让它变成性能热点。
+    var scales = nodes.length <= 400 ? [0.35, 0.5, 0.65, 0.8, 1.0, 1.25] : [1.0];
+    var best = null;
+    for (var i = 0; i < scales.length; i++) {
+      var r = layoutGroups(nodes, edges, vp, scales[i]);
+      var e = r.ext || { x0: 0, y0: 0, x1: 1, y1: 1 };
+      // 与 fit() 同口径：能缩到多大，取决于两个方向的较小者
+      var f = Math.min(vp.w / Math.max(1, e.x1 - e.x0), vp.h / Math.max(1, e.y1 - e.y0));
+      if (!best || f > best.fit) best = { r: r, fit: f };
+    }
+    return best.r;
+  }
+
+  // 分组 + 组间货架排布。sc 是层内列数缩放系数（1 = 默认密度）。
+  function layoutGroups(nodes, edges, vp, sc) {
     var locs = [];
     nodes.forEach(function (n) { if (n.Location && locs.indexOf(n.Location) < 0) locs.push(n.Location); });
-    if (locs.length <= 1) {
-      return layoutSingle(nodes, edges);
-    }
+    // 只有一个位置（或全都没位置）：没有泳道可分，直接分层
+    if (locs.length <= 1) return rebase(layoutSingle(nodes, edges, { perScale: sc }));
 
-    var locOf = {};
-    nodes.forEach(function (n) { locOf[String(n.ID)] = n.Location || ''; });
+    var keys = locs.slice();
+    if (nodes.some(function (n) { return !n.Location; })) keys.push('');
 
-    var out = { xy: {}, band: [], layers: [], info: {}, adj: {}, deg: {}, layerCount: 0 };
-    var yOff = 0;
-
-    function place(sub, subEdges, loc) {
-      var r = layoutSingle(sub, subEdges);
-      Object.keys(r.xy).forEach(function (id) {
-        out.xy[id] = { x: r.xy[id].x, y: r.xy[id].y + yOff };
-      });
-      r.band.forEach(function (b) {
-        out.band.push({ top: b.top + yOff, bottom: b.bottom + yOff, layer: b.layer, loc: loc });
-      });
-      Object.keys(r.info).forEach(function (id) { out.info[id] = r.info[id]; });
-      Object.keys(r.adj).forEach(function (id) { out.adj[id] = r.adj[id]; });
-      Object.keys(r.deg).forEach(function (id) { out.deg[id] = r.deg[id]; });
-      yOff += (r.band.length ? r.band[r.band.length - 1].bottom : PAD) + GROUP_GAP;
-    }
-
-    locs.forEach(function (loc) {
+    var parts = keys.map(function (loc) {
       var sub = nodes.filter(function (n) { return (n.Location || '') === loc; });
+      var inSet = {};
+      sub.forEach(function (n) { inSet[String(n.ID)] = true; });
       var subEdges = edges.filter(function (e) {
-        return locOf[String(e.SrcID)] === loc && locOf[String(e.DstID)] === loc;
+        return inSet[String(e.SrcID)] && inSet[String(e.DstID)];
       });
-      place(sub, subEdges, loc);
+      var r = layoutSingle(sub, subEdges, { perScale: sc, loc: loc });
+      // 泳道矩形统一取"整组的宽"，组内各层不再各自伸到画布两端
+      //（原来单节点层也会拉成整条满宽，底部几条空带就是这么来的）。
+      r.band.forEach(function (b) { b.left = r.ext.x0; b.right = r.ext.x1; });
+      r.w = r.ext.x1 - r.ext.x0;
+      r.h = r.ext.y1 - r.ext.y0;
+      return r;
     });
 
-    // 无位置节点归「未分组」泳道（放最后）
-    var ungrouped = nodes.filter(function (n) { return !n.Location; });
-    if (ungrouped.length) {
-      place(ungrouped, edges.filter(function (e) {
-        return locOf[String(e.SrcID)] === '' && locOf[String(e.DstID)] === '';
-      }), '');
-    }
+    var pack = chooseShelves(parts, vp);
+
+    var out = { xy: {}, band: [], layers: [], info: {}, adj: {}, deg: {}, layerCount: 0 };
+    var ext = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    var yCur = 0;
+    pack.shelves.forEach(function (row) {
+      var xCur = 0, rowH = 0;
+      row.forEach(function (pi) {
+        var p = parts[pi];
+        var dx = xCur - p.ext.x0, dy = yCur - p.ext.y0;
+        Object.keys(p.xy).forEach(function (id) {
+          out.xy[id] = { x: p.xy[id].x + dx, y: p.xy[id].y + dy };
+        });
+        p.band.forEach(function (b) {
+          var nb = { top: b.top + dy, bottom: b.bottom + dy, layer: b.layer, loc: keys[pi] };
+          // 带子宽度是可选的：无脑 +dx 会让 undefined 变成 NaN，
+          // NaN 一路传进 bbox，整幅图就白了。
+          if (b.left !== undefined) { nb.left = b.left + dx; nb.right = b.right + dx; }
+          out.band.push(nb);
+        });
+        Object.keys(p.info).forEach(function (id) { out.info[id] = p.info[id]; });
+        Object.keys(p.adj).forEach(function (id) { out.adj[id] = p.adj[id]; });
+        Object.keys(p.deg).forEach(function (id) { out.deg[id] = p.deg[id]; });
+        out.layerCount = Math.max(out.layerCount, p.layerCount || 0);
+        xCur += p.w + GROUP_GAP;
+        rowH = Math.max(rowH, p.h);
+      });
+      yCur += rowH + GROUP_GAP;
+    });
+    Object.keys(out.xy).forEach(function (id) {
+      var q = out.xy[id];
+      ext.x0 = Math.min(ext.x0, q.x - NW / 2 - 26); ext.x1 = Math.max(ext.x1, q.x + NW / 2 + 26);
+      ext.y0 = Math.min(ext.y0, q.y - NH / 2 - 4); ext.y1 = Math.max(ext.y1, q.y + NH / 2 + 4);
+    });
+    if (!isFinite(ext.x0)) ext = { x0: 0, y0: 0, x1: 1, y1: 1 };
+    out.ext = ext;
     return out;
   }
 
-  function layoutSingle(nodes, edges) {
+  // 组间排布：枚举"在哪几组之间断行"，选 fit 最大的方案。
+  // 组数很少（通常 2~6），2^(G-1) 的枚举是几十次算术；组多了退回贪心，别让布局本身变慢。
+  function chooseShelves(parts, vp) {
+    var G = parts.length;
+    function evalShelves(shelves) {
+      var W = 0, H = 0;
+      shelves.forEach(function (row) {
+        var rw = 0, rh = 0;
+        row.forEach(function (i) { rw += parts[i].w; rh = Math.max(rh, parts[i].h); });
+        rw += GROUP_GAP * (row.length - 1);
+        W = Math.max(W, rw);
+        H += rh;
+      });
+      H += GROUP_GAP * (shelves.length - 1);
+      return { shelves: shelves, W: W, H: H, fit: Math.min(vp.w / Math.max(1, W), vp.h / Math.max(1, H)) };
+    }
+    if (G <= 9) {
+      var best = null;
+      for (var mask = 0; mask < (1 << (G - 1)); mask++) {
+        var shelves = [], cur = [0];
+        for (var j = 0; j < G - 1; j++) {
+          if (mask & (1 << j)) { shelves.push(cur); cur = [j + 1]; } else { cur.push(j + 1); }
+        }
+        shelves.push(cur);
+        var c = evalShelves(shelves);
+        if (!best || c.fit > best.fit) best = c;
+      }
+      return best;
+    }
+    // 组太多：按面积估个目标宽度，贪心断行
+    var area = 0;
+    parts.forEach(function (p) { area += p.w * p.h; });
+    var targetW = Math.sqrt(area * (vp.w / vp.h));
+    var shelves2 = [], cur2 = [], curW = 0;
+    parts.forEach(function (p, i) {
+      var add = cur2.length ? p.w + GROUP_GAP : p.w;
+      if (cur2.length && curW + add > targetW) { shelves2.push(cur2); cur2 = [i]; curW = p.w; return; }
+      cur2.push(i); curW += add;
+    });
+    if (cur2.length) shelves2.push(cur2);
+    return evalShelves(shelves2);
+  }
+
+  // rebase：单组时补上 PAD 边距，坐标从 0 起改成从边距起（与多组口径一致）。
+  function rebase(r) {
+    var dx = PAD - r.ext.x0, dy = PAD - r.ext.y0;
+    if (!dx && !dy) return r;
+    var xy = {};
+    Object.keys(r.xy).forEach(function (id) {
+      xy[id] = { x: r.xy[id].x + dx, y: r.xy[id].y + dy };
+    });
+    r.band.forEach(function (b) {
+      b.top += dy; b.bottom += dy;
+      if (b.left !== undefined) { b.left += dx; b.right += dx; }
+    });
+    r.xy = xy;
+    r.ext = { x0: r.ext.x0 + dx, x1: r.ext.x1 + dx, y0: r.ext.y0 + dy, y1: r.ext.y1 + dy, w: r.ext.w, h: r.ext.h };
+    return r;
+  }
+
+  // extent：一组节点的包围盒（含节点自身尺寸，不含标签）。
+  // 布局要按"实际宽高"决定怎么摆，不能凭节点数估。
+  function extent(xy) {
+    var x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    Object.keys(xy).forEach(function (id) {
+      var p = xy[id];
+      x0 = Math.min(x0, p.x - NW / 2); x1 = Math.max(x1, p.x + NW / 2);
+      y0 = Math.min(y0, p.y - NH / 2); y1 = Math.max(y1, p.y + NH / 2);
+    });
+    if (!isFinite(x0)) return { x0: 0, x1: 0, y0: 0, y1: 0, w: 0, h: 0 };
+    return { x0: x0, x1: x1, y0: y0, y1: y1, w: x1 - x0, h: y1 - y0 };
+  }
+
+  function layoutSingle(nodes, edges, opt) {
+    var o = opt || {};
+    var sc = o.perScale || 1;
+    // 层间距也受密度档位影响：泳道一多，"每条带上下留白 + 带间 48px 走线区"加起来
+    // 能吃掉几百像素，扁画布上这是最贵的一笔开销。列数收紧时同步压缩间距，
+    // 让 fit 的搜索把"多排一行"和"少留一条白"放在一起权衡。
+    var gs = clamp(0.62 + 0.42 * sc, 0.62, 1.16);
+    var gapBand = Math.round(BAND_GAP * gs);
+    var headBand = Math.round(BAND_HEAD * gs);
+    var tailBand = Math.round(BAND_TAIL * gs);
     var ids = nodes.map(function (n) { return String(n.ID); });
     var idSet = {};
     ids.forEach(function (i) { idSet[i] = true; });
@@ -416,7 +552,10 @@
     var cursor = PAD;
     layers.forEach(function (arr, li) {
       var n = arr.length;
-      var per = clamp(Math.ceil(Math.sqrt(n) * 2.2), 6, 16);
+      if (!n) return; // 空层不出带（n=0 时 rows 会算成 NaN，整幅内容跟着废掉）
+      // 列数随 perScale 缩放：同一批节点，"铺成一行"还是"折成方块"，
+      // 决定了整幅图能不能塞进扁画布。
+      var per = clamp(Math.round(clamp(Math.ceil(Math.sqrt(n) * 2.2), 6, 16) * sc), 4, 20);
       // 只溢出 1~2 个时不要折行：多出来的会独占一整行，整层高度翻倍、画布被迫缩小一半
       if (n <= per + 2) per = n;
       var rows = Math.ceil(n / per);
@@ -430,13 +569,20 @@
           };
         }
       }
-      var bottom = top + rows * ROW_INNER;
+      // 带高只按"这一层真实占了几行"算。原来固定 rows*ROW_INNER，单行层也要占满
+      // 一整个 ROW_INNER，底部那些只有一个节点的泳道看着就是一整条空带。
+      var rowsH = NH + (rows - 1) * ROW_INNER;
       // 用原始层级给泳道命名（sorted[li]），保证层名语义正确
-      band.push({ top: top - 22, bottom: bottom - 22, layer: sorted[li] });
-      cursor = bottom + BAND_GAP;
+      band.push({ top: top - headBand, bottom: top + rowsH + tailBand, layer: sorted[li] });
+      cursor = top + rowsH + headBand + tailBand + gapBand;
     });
 
-    return { xy: xy, band: band, layers: layers, info: info, adj: adj, deg: deg, layerCount: L };
+    // 带子的横向范围由调用方决定：
+    //   - 分组布局：统一的"整组宽"（layoutGroups 里赋值），组与组之间不会互相穿透；
+    //   - 单一分组：不设值，渲染层退回整幅宽，保持原来的整条泳道观感。
+    var ex = extent(xy);
+
+    return { xy: xy, band: band, layers: layers, info: info, adj: adj, deg: deg, layerCount: L, ext: ex };
   }
 
   /* ---------- 导出用内联样式（脱离 theme.css 也可独立渲染） ---------- */
@@ -517,7 +663,7 @@
     var elZoom = wrap.querySelector('[data-t="ztxt"]');
     var btnLegend = wrap.querySelector('[data-t="legend"]');
     var btnExt = wrap.querySelector('[data-t="ext"]');
-    if (btnLegend) btnLegend.classList.add('is-pressed');
+    var legendTouched = false; // 用户是否手动开合过图例
 
     var data = { Nodes: [], Edges: [] };
     var geo = null;
@@ -559,7 +705,12 @@
       cloud = (foldEnabled && !extOpen) ? foldExternal(nodes, edges) : null;
       view = cloud ? { Nodes: cloud.nodes, Edges: cloud.edges } : { Nodes: nodes, Edges: edges };
 
-      geo = layout(view.Nodes, view.Edges);
+      // 布局要按画布尺寸决定排几列泳道，所以把视口尺寸传进去。
+      // 容器还没量出尺寸时（首帧、隐藏状态）给一个常见宽屏值兜底——
+      // 用 120 的保底值会让布局判定"窄"，直接退回单列，图又变回又高又窄。
+      var vp = size();
+      if (vp.w < 320) vp = { w: 1200, h: 640 };
+      geo = layout(view.Nodes, view.Edges, vp);
       nodes.forEach(function (n) { nodeIndex[String(n.ID)] = n; });
       if (cloud) nodeIndex[CLOUD_ID] = cloud.nodes[cloud.nodes.length - 1];
 
@@ -582,11 +733,14 @@
         var name = (b.loc !== undefined)
           ? ((b.loc || '未分组') + ' · ' + layerName)
           : layerName;
-        bh += '<rect class="sm-topo-band" x="' + (minX - COL_GAP / 2) + '" y="' + b.top + '" width="' +
-          (maxX - minX + COL_GAP) + '" height="' + (b.bottom - b.top) + '" rx="6"/>' +
-          '<line class="sm-topo-band-line" x1="' + (minX - COL_GAP / 2) + '" y1="' + b.top + '" x2="' +
-          (maxX + COL_GAP / 2) + '" y2="' + b.top + '"/>' +
-          '<text class="sm-topo-band-label" x="' + (minX - COL_GAP / 2 + 8) + '" y="' + (b.top + 16) + '">' + esc(name) + '</text>';
+        // 带自己的横向范围优先；没有（老数据/单组）才退回全宽。
+        var bl = (b.left !== undefined) ? b.left : (minX - COL_GAP / 2);
+        var br = (b.right !== undefined) ? b.right : (maxX + COL_GAP / 2);
+        bh += '<rect class="sm-topo-band" x="' + bl + '" y="' + b.top + '" width="' +
+          (br - bl) + '" height="' + (b.bottom - b.top) + '" rx="6"/>' +
+          '<line class="sm-topo-band-line" x1="' + bl + '" y1="' + b.top + '" x2="' +
+          br + '" y2="' + b.top + '"/>' +
+          '<text class="sm-topo-band-label" x="' + (bl + 8) + '" y="' + (b.top + 16) + '">' + esc(name) + '</text>';
       });
       gBands.innerHTML = bh;
 
@@ -866,6 +1020,13 @@
       if (hasGw) links += '<div class="sm-lg-i"><span class="sm-lg-sw" style="background:repeating-linear-gradient(90deg,#00a870 0 3px,transparent 3px 7px);opacity:.7"></span><span>绿色点线 = 出网经该网关</span></div>';
       if (links) h += '<div class="sm-lg-t">链路</div>' + links;
       elLegend.innerHTML = h;
+      // 图内容铺满画布之后，左下角这块 250x340 的图例就是实打实盖住设备。
+      // 用户没手动切过时按密度自动决定；一旦手动点过，就完全听用户的。
+      if (!legendTouched) {
+        var hide = (view.Nodes || []).length > LEGEND_HIDE;
+        elLegend.classList.toggle('sm-hide', hide);
+        if (btnLegend) btnLegend.classList.toggle('is-pressed', !hide);
+      }
     }
 
     /* ---------- 视口变换 ---------- */
@@ -1189,6 +1350,7 @@
       else if (t === 'ext') setExternal(!extOpen);
       // 图例占地方不小，小屏/大图时挡住节点，给一个开关键
       else if (t === 'legend') {
+        legendTouched = true;
         elLegend.classList.toggle('sm-hide');
         b.classList.toggle('is-pressed', !elLegend.classList.contains('sm-hide'));
       }
@@ -1319,6 +1481,10 @@
 
   SM.Topo = {
     create: create,
+    // 纯函数版本的布局：不依赖 DOM，便于在 node 里直接断言
+    // （泳道会不会摞成一列、组与组会不会互相穿透、节点多了还排不排得下）。
+    // 复制一份 Go 版去对拍是最糟的做法——两份实现必然分叉，测试绿了线上照样错。
+    layout: layout,
     // 公网折叠的纯函数版本：不依赖 DOM，便于单独验证折叠规则
     // （哪些能折、边怎么合并、折叠后还剩什么）。
     foldExternal: foldExternal,
