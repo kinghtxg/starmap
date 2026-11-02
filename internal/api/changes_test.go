@@ -103,7 +103,11 @@ func TestChangesClampsDays(t *testing.T) {
 func TestTrendAPI(t *testing.T) {
 	h, _, srv := newTaskRouter(t)
 	now := time.Now()
-	seedPort(t, srv, "10.0.1.1", 80, now.Add(-time.Hour), now)
+	// 端口时间必须落在**今天之内**，不能写 now.Add(-time.Hour)：
+	// 那样在凌晨 0:00–1:00 跑，起始时间就落到了昨天，"今天的端口数"必然是 0，
+	// 用例会在每天凌晨必红一次，而产品逻辑完全正确。这个坑 1.8.0 出包时真踩到了
+	// （提交前跑绿，00:06 再跑就红）——判据依赖"当前时刻"时，必须让数据也跟着当前时刻走。
+	seedPort(t, srv, "10.0.1.1", 80, now, now)
 
 	w := doReq(t, h, http.MethodGet, "/api/trend?days=7", nil, nil)
 	if w.Code != http.StatusOK {
