@@ -6,7 +6,7 @@
 
 > 被动感知网内流量，自动测绘资产拓扑、登记主机资产、发现账外设备，对可疑行为**只打标签、不定性**。
 
-**当前版本 1.7.1**（[1.7.1 发布说明](docs/RELEASE-1.7.1.md) · [1.7.0](docs/RELEASE-1.7.md) · [1.6.1](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [1.3.1](docs/RELEASE-1.3.1.md) · [1.0 上线就绪度评估](docs/RELEASE-1.0.md) · [CHANGELOG](CHANGELOG.md)）
+**当前版本 1.8.0**（[1.8.0 发布说明](docs/RELEASE-1.8.md) · [1.7.2](docs/RELEASE-1.7.2.md) · [1.7.1](docs/RELEASE-1.7.1.md) · [1.7.0](docs/RELEASE-1.7.md) · [1.6.1](docs/RELEASE-1.6.1.md) · [1.6.0](docs/RELEASE-1.6.md) · [1.4.0](docs/RELEASE-1.4.md) · [CHANGELOG](CHANGELOG.md)）
 
 [![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -429,6 +429,9 @@ curl -F "file=@testdata/out/frp_tunnel.pcap" http://127.0.0.1:8080/api/ingest/pc
 - [docs/SECURITY.md](docs/SECURITY.md) — **安全模型**：威胁模型、信任边界、防护清单、部署方需承担的风险
 
 其余：
+- [docs/DEPLOY.md](docs/DEPLOY.md) — **部署手册**（1.8.0）：Windows 双击 / Linux / NAS / systemd / nginx 反代 / 探针 / 验收清单 / 按症状排障。**第一次部署看这份**
+- [docs/RELEASE-1.8.md](docs/RELEASE-1.8.md) — **1.8.0 发布说明**（网关归一 / 聚合保护 / 重启后仍在 / 七层代理角色 / 模拟器保真度）
+- [docs/RELEASE-1.7.2.md](docs/RELEASE-1.7.2.md) — **1.7.2 发布说明**（配置页保存不可达 / 任务时间 0001 年 / 视觉闸门）
 - [docs/RELEASE-1.7.1.md](docs/RELEASE-1.7.1.md) — **1.7.1 发布说明**（重启翻倍 / WAL 只涨不缩 / 站点总数两遍聚合 / 判据怎么写）
 - [docs/RELEASE-1.7.md](docs/RELEASE-1.7.md) — **1.7.0 发布说明**（时间列 UTC 归一化 / 站点资产 / HTML 报表 / 灯塔能力对标）
 - [docs/RELEASE-1.6.1.md](docs/RELEASE-1.6.1.md) — **1.6.1 发布说明**（误报风暴 / 写锁争用 / 落盘两档 / 流量回退）
