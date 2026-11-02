@@ -347,7 +347,7 @@ trusted_proxies: ["127.0.0.1/32"]
 curl -s http://127.0.0.1:8080/api/health
 
 # 2. 版本对得上
-./starmap -version          # StarMap 星图 1.8.0+2757217
+./starmap -version          # → StarMap 星图 1.8.0+<提交号>，提交号与 tag 对应
 
 # 3. 探针报上来了（需要 probe_enabled: true）
 curl -s http://127.0.0.1:8080/api/probes
