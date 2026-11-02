@@ -88,10 +88,21 @@ func TestMACOnlyVisibleSameSegment(t *testing.T) {
 	}
 }
 
-// TestNATRewritesSource NAT 场景：目的网段侧看到的源必须是出口地址，且拿不到 MAC。
+// TestNATRewritesSource NAT 场景：目的网段侧看到的源必须是出口地址，
+// 且源 MAC 必须是**做 NAT 那台设备的 MAC**。
+//
+// 这条断言以前写反了：当时认为"NAT 后源 MAC 已被替换，所以拿不到 MAC"。
+// 实际上 SNAT 只改 IP 和端口，报文是从 NAT 设备自己的出口网卡发出去的，
+// 源 MAC 当然就是它那块网卡——这是"出口地址"与"NAT 设备"能认成同一台机器
+// 的唯一凭据。把它造丢，等于让模拟器替产品省掉一条真实存在的证据，
+// 测出来的"发现不了 NAT"其实是模拟器的缺陷。
 func TestNATRewritesSource(t *testing.T) {
 	w := NAT(7, t0)
 	natOut := IPIn("10.3.2.0/24", 2)
+	natDev := w.Host("nat")
+	if natDev == nil || natDev.MAC == "" {
+		t.Fatal("NAT 场景必须有 NAT 设备，且带 MAC")
+	}
 	sawOuter, sawInner := 0, 0
 	for _, s := range w.Sessions() {
 		if s.ProbeID == "pin" {
@@ -108,8 +119,8 @@ func TestNATRewritesSource(t *testing.T) {
 		if s.FiveTuple.SrcIP != natOut {
 			t.Fatalf("机房探针看到的源应为 NAT 出口 %s，实际 %s", natOut, s.FiveTuple.SrcIP)
 		}
-		if s.MAC != "" {
-			t.Fatalf("NAT 后源 MAC 已被替换，不该有：%+v", s.FiveTuple)
+		if s.MAC != natDev.MAC {
+			t.Fatalf("NAT 后源 MAC 应是出口设备的 MAC（%s），实际 %q", natDev.MAC, s.MAC)
 		}
 	}
 	if sawInner == 0 || sawOuter == 0 {

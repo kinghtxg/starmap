@@ -23,6 +23,7 @@ import (
 //	角色    证据
 //	------  ---------------------------------------------------------------
 //	gateway 有主机把它的 MAC 当作公网出口的首跳（这是路由器的定义性行为）
+//	proxy   有请求经它转发，并把真实客户端写在 X-Forwarded-For 里
 //	dns     它作为服务端在 53 端口被访问过
 //	nas     它提供文件共享（SMB/NFS/AFP/群晖 DSM），且确实有别的机器来连
 //	db      它提供数据库端口，且有别的机器来连
@@ -38,6 +39,7 @@ import (
 // 设备角色
 const (
 	RoleGateway  = "gateway"
+	RoleProxy    = "proxy"
 	RoleNAS      = "nas"
 	RoleDNS      = "dns"
 	RoleDB       = "db"
@@ -51,6 +53,7 @@ const (
 // RoleNames 角色中文名（前端展示用，API 里另给 role）。
 var RoleNames = map[string]string{
 	RoleGateway:  "网关/路由器",
+	RoleProxy:    "七层代理/负载均衡",
 	RoleNAS:      "存储/NAS",
 	RoleDNS:      "DNS 服务器",
 	RoleDB:       "数据库",
@@ -206,6 +209,12 @@ type roleEvidence struct {
 	Peers int
 	// GatewayFor 有多少台主机把它的 MAC 当作公网出口首跳。
 	GatewayFor int
+	// Forwarded 观测到它替别的客户端转发过请求（请求里带 X-Forwarded-For）。
+	//
+	// 这是"七层代理"的定义性行为：被代理的请求在服务端侧只留下代理的地址，
+	// 真实客户端只存在于请求头里。以前只在节点上打了个 xff-proxy 标签，
+	// 角色仍是空（界面显示"未识别"）——一台全网流量的必经点，反而没有任何身份。
+	Forwarded bool
 	// SeenSrc 本次进程内观测到它主动发过流量（判定"终端"的正面证据）。
 	SeenSrc bool
 	// Inbound 曾观测到有人连过它。与 Peers 的区别是它包含**跨重启恢复**的证据：
@@ -236,6 +245,9 @@ func inferRoles(ev roleEvidence) []string {
 
 	if ev.GatewayFor > 0 {
 		add(RoleGateway)
+	}
+	if ev.Forwarded {
+		add(RoleProxy)
 	}
 	if hasInbound {
 		// NAS：强特征端口（NFS/AFP/群晖 DSM）单见即成立；只有 445/139 时
@@ -625,6 +637,29 @@ func (e *Engine) restoreServiceEvidenceLocked() {
 	}
 }
 
+// destMACOf 返回可作为"目的网卡 MAC"的二层证据，空表示没有。
+//
+// 只认**同网段的内网→内网**会话：同一个 /24 里的帧是二层直达，以太网目的 MAC
+// 就是目的网卡本身。跨网段会话里的目的 MAC 是最后一跳路由器，挂到目的节点上
+// 等于给一台无关机器装了别人的 MAC，比"不知道"更糟。
+//
+// 已知的例外：同一个 /24 被一台路由器劈成两半（代理 ARP）时，这里的判断会错。
+// 政务网里偶有这种配置，但代价只是"netspy 把目的 MAC 记到了目的节点上"，
+// 不影响 IP、端口、边和告警，可以接受。
+func destMACOf(s *model.Session) string {
+	if s == nil || s.DstMAC == "" || s.DstMAC == s.MAC || isGroupMAC(s.DstMAC) {
+		return ""
+	}
+	src, dst := s.FiveTuple.SrcIP, s.FiveTuple.DstIP
+	if !IsPrivate(src) || !IsPrivate(dst) {
+		return ""
+	}
+	if cidr24(src) != cidr24(dst) {
+		return ""
+	}
+	return s.DstMAC
+}
+
 // gatewayNodeLocked 返回网关 MAC 对应的节点，不存在则创建（调用方需持 e.mu）。
 //
 // 网关是内网里最该被看见的设备，但它在被动侧天然"隐身"：它的 IP 从不出现在
@@ -756,6 +791,7 @@ func (e *Engine) annotateIdentity(n *model.Node, gw map[string]int) {
 		Ports:      ports,
 		Peers:      peers,
 		GatewayFor: gwFor,
+		Forwarded:  hasLabel(n, LabelXFFProxy),
 		SeenSrc:    e.seenSrc[n.ID],
 		Inbound:    e.inboundSeen[n.ID],
 	})

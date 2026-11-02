@@ -48,7 +48,7 @@ func TestTopologyAgainstGroundTruth(t *testing.T) {
 					NodeKey: n.NodeKey,
 					IPs:     n.IPs, MAC: n.MAC,
 					FirstSeen: n.FirstSeen, Ports: n.Ports,
-					Labels: n.Labels, Members: n.Members,
+					Roles: n.Roles, Labels: n.Labels, Members: n.Members,
 				})
 			}
 			edges := make([]truthcheck.Edge, 0, len(pairs))

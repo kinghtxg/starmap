@@ -183,3 +183,37 @@ func TestSortChangesByIP(t *testing.T) {
 		}
 	}
 }
+
+// TestTrendStatsBucketsByLocalDay 分天必须按**本地日**，而不是库里存的那个 UTC 日。
+//
+// 这条用例是凌晨红的那个问题（TestTrendAPI 在 00:00–08:00 必红）的定点复现：
+// 库里统一存 UTC（dbx 在写入口转的），`substr(col,1,10)` 拿到的是 UTC 日期；
+// 而桶是按本地日建的。北京时间 01:00 的"半小时前"在 UTC 还是前一天，
+// 于是"今天新增"整段落到昨天，趋势图上今天永远 0。
+//
+// 时区**故意用 FixedZone 写死**，不依赖跑测试的机器：CI 在 UTC 上跑时，
+// 用 time.Local 会让这个问题永远复现不出来（偏移 0，两个日期恒等）。
+func TestTrendStatsBucketsByLocalDay(t *testing.T) {
+	st := newChangeStore(t)
+	cst := time.FixedZone("CST", 8*3600)
+	// 本地 2026-03-04 01:00 —— 对应的 UTC 是 2026-03-03 17:00，两天的日界正好错开
+	now := time.Date(2026, 3, 4, 1, 0, 0, 0, cst)
+	putPort(t, st, "10.0.0.9", 8080, now.Add(-30*time.Minute), now) // 本地 00:30，仍是"今天"
+
+	points, err := st.TrendStats(3, now)
+	if err != nil {
+		t.Fatalf("趋势查询失败: %v", err)
+	}
+	if len(points) != 3 {
+		t.Fatalf("序列长度应为 3，实际 %d", len(points))
+	}
+	if points[2].Date != "2026-03-04" {
+		t.Fatalf("最后一天应是本地今天 2026-03-04，实际 %q", points[2].Date)
+	}
+	if points[2].Ports != 1 {
+		t.Fatalf("本地今天 00:30 的端口应算在今天：期望 1，实际 %d（落到 UTC 日去了）", points[2].Ports)
+	}
+	if points[1].Ports != 0 {
+		t.Fatalf("不能两边都算：昨天应为 0，实际 %d", points[1].Ports)
+	}
+}

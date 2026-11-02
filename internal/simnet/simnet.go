@@ -50,6 +50,12 @@ type Host struct {
 	Location string
 	// Roles 期望被识别出的角色（gateway / nas / printer / proxy …），空表示不做断言。
 	Roles []string
+	// Labels 期望节点上出现的标签（xff-proxy / xff-client …），空表示不做断言。
+	//
+	// 与 Roles 分开是因为这两件事的性质不同：角色是"推断出来它是什么设备"，
+	// 标签是"这条观测事实确实被记下来了"。有的设备能被识别成什么角色取决于
+	// 业务端口，而标签只取决于采集到没采集到——混在一起就没法分别定位问题。
+	Labels []string
 }
 
 // Link 一条真实发生过的通信（有向：From 是客户端）。
@@ -67,6 +73,19 @@ type Link struct {
 	// 成一条，字节必然被算两次。这不是实现缺陷，是方法的上限；真值必须能生成
 	// 这种情形，产品才知道自己错在哪、该在哪里标注"跨 NAT 区间存在重复"。
 	NATSrc string
+	// ViaMAC 这条链路离开源网段时，以太网头的**目的 MAC**（第一跳网关/路由器的 MAC）。
+	//
+	// 这是被动侧唯一能证明"中间有一台设备在转发"的证据：网关自己的 IP 从不出现在
+	// 五元组里，能拿到的只有这个 MAC。只有与源同网段的探针才看得到二层，
+	// 跨三层的探针拿不到——所以填了 ViaMAC 也只对同段探针生效。
+	ViaMAC string
+	// ViaProxy 这条链路经一台七层代理（nginx/HAProxy/SLB）转发。
+	//
+	// 值为代理设备的 Host 名。服务端侧探针看到的源是代理地址，真实客户端只存在于
+	// X-Forwarded-For 里；客户端侧探针看到的是"连到代理"的另一条会话。
+	// 这里只造服务端侧那一条：真值要能测"XFF 还原得对不对"，不需要顺带把
+	// 字节翻倍的问题再引入一遍（那是 NAT 场景的活）。
+	ViaProxy string
 	// Port 是服务端端口；客户端临时端口由生成器分配，同一会话对多个观察者必须一致，
 	// 否则同一个会话会被当成两条，测出来的"重复计数"其实是自己造的假象。
 }
@@ -116,6 +135,21 @@ func (w *World) Host(name string) *Host {
 	return nil
 }
 
+// hostByIP 按地址反查设备（找不到返回 nil）。SNAT 场景用它找"是谁把地址改了"。
+func (w *World) hostByIP(ip string) *Host {
+	if ip == "" {
+		return nil
+	}
+	for i := range w.Hosts {
+		for _, got := range w.Hosts[i].IPs {
+			if got == ip {
+				return &w.Hosts[i]
+			}
+		}
+	}
+	return nil
+}
+
 // HostNames 返回所有设备名（排序后，便于稳定输出）。
 func (w *World) HostNames() []string {
 	out := make([]string, 0, len(w.Hosts))
@@ -154,6 +188,46 @@ func (w *World) Sessions() []model.Session {
 		}
 		start := w.StartAt.Add(time.Duration(rnd.Int63n(int64(span))))
 
+		// 经七层代理转发的链路：只造**服务端侧**那一条会话。
+		// 客户端侧看到的是"连到代理"，五元组完全不同；两条都造会让字节翻倍，
+		// 而这件事 NAT 场景已经单独测过，不该在这里混进来。
+		if l.ViaProxy != "" {
+			px := w.Host(l.ViaProxy)
+			if px == nil || len(px.IPs) == 0 {
+				continue
+			}
+			for _, p := range w.Probes {
+				if !p.sees(dst.Segment) {
+					continue // 只有服务端这侧看得到经代理进来的请求
+				}
+				s := model.Session{
+					FiveTuple: model.FiveTuple{
+						SrcIP: px.IPs[0], DstIP: dst.IPs[0],
+						SrcPort: ephemeral, DstPort: l.Port, Proto: l.Proto,
+					},
+					FirstSeen: start.Add(p.Skew),
+					LastSeen:  start.Add(p.Skew).Add(2 * time.Minute),
+					BytesUp:   l.Bytes / 3,
+					BytesDown: l.Bytes - l.Bytes/3,
+					Packets:   40,
+					Location:  p.Location,
+					ProbeID:   p.ID,
+					// 代理链的真相：客户端 → 代理 → 服务端。XFF[0] 是最原始客户端。
+					XFF:          []string{src.IPs[0]},
+					RealClientIP: src.IPs[0],
+					ProxyHops:    1,
+				}
+				if p.sees(px.Segment) {
+					s.MAC = px.MAC
+				}
+				if svc := dst.service(l.Port); svc != nil && !svc.TLS && svc.Product != "" {
+					s.HTTPServer = svc.Product
+				}
+				out = append(out, s)
+			}
+			continue
+		}
+
 		// 谁能看到这条会话：源网段或目的网段的探针
 		for _, p := range w.Probes {
 			if !p.sees(src.Segment) && !p.sees(dst.Segment) {
@@ -168,7 +242,14 @@ func (w *World) Sessions() []model.Session {
 			if p.sees(src.Segment) {
 				mac = src.MAC
 			} else if l.NATSrc != "" {
+				// SNAT 之后不只是源地址变了，**源 MAC 也被改写成 NAT 设备自己的网卡**：
+				// 报文是从它那块出口网卡上发出去的。这条证据是"出口地址"与"NAT 设备"
+				// 能认成同一台机器的唯一凭据；少了它，NAT 设备在图上会分裂成
+				// "一个只知道地址的节点"和"一个只知道 MAC 的空壳"两台设备。
 				srcIP = l.NATSrc
+				if dev := w.hostByIP(l.NATSrc); dev != nil {
+					mac = dev.MAC
+				}
 			}
 			s := model.Session{
 				FiveTuple: model.FiveTuple{
@@ -183,6 +264,12 @@ func (w *World) Sessions() []model.Session {
 				Packets:   40,
 				Location:  p.Location,
 				ProbeID:   p.ID,
+			}
+			// 首跳网关的可观测性：只有与源同网段的探针看得到以太网目的 MAC。
+			// 跨三层的探针什么都拿不到——这正是现场"出口设备在图上消失"的原因，
+			// 必须如实模拟，否则测出来的永远是产品做不到的那个上限。
+			if l.ViaMAC != "" && p.sees(src.Segment) {
+				s.DstMAC = l.ViaMAC
 			}
 			if svc := dst.service(l.Port); svc != nil {
 				// 明文 HTTP 才看得到 Server 头；TLS 流量拿不到，这一点必须如实模拟

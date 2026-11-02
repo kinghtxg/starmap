@@ -12,6 +12,7 @@ package truthcheck
 
 import (
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type Node struct {
 	MAC       string
 	FirstSeen time.Time
 	Ports     []int
+	Roles     []string
 	Labels    []string
 	Members   int
 }
@@ -121,11 +123,25 @@ func Check(w *simnet.World, nodes []Node, edges []Edge) *Report {
 			ipOwner[ip] = append(ipOwner[ip], n.Key)
 		}
 	}
+	// 公网地址会被按 /24 聚合成一个"外网节点"（这是产品明示的行为，不是缺陷），
+	// 所以查公网 IP 必须能落到那个聚合节点上，否则每个公网目标都会误报"没被发现"。
+	// 这是本包唯一一处复刻产品行为的地方，且只用于**定位**，不参与任何判定口径。
+	extAgg := map[string]string{}
+	for _, n := range nodes {
+		if hasLabel(n.Labels, "external-agg") {
+			for _, ip := range n.IPs {
+				extAgg[ip] = n.Key
+			}
+		}
+	}
 	find := func(ip string) string {
 		if v := ipOwner[ip]; len(v) > 0 {
 			return v[0]
 		}
-		return ""
+		if isPrivateIP(ip) {
+			return ""
+		}
+		return extAgg[cidr24Of(ip)]
 	}
 
 	// 真值里哪些 IP 是多台设备共用的（地址冲突）。判定"一个 IP 只能属于一个节点"
@@ -460,6 +476,12 @@ func Check(w *simnet.World, nodes []Node, edges []Edge) *Report {
 	}
 	sort.Strings(srvIPs)
 	for _, ip := range srvIPs {
+		// 公网目标不参与：它会被按 /24 聚合成"外网节点"，产品的口径是"公网侧
+		// 只给端口用途统计（OutPorts/InPorts），不填服务画像"。这是明示的设计，
+		// 拿内网节点的判据去要求它，测出来的是口径差异而不是缺陷。
+		if !isPrivateIP(ip) {
+			continue
+		}
 		key := find(ip)
 		if key == "" {
 			continue // 节点都没建出来，前面报过
@@ -488,6 +510,151 @@ func Check(w *simnet.World, nodes []Node, edges []Edge) *Report {
 	}
 	r.Metrics["可观测服务端"] = fmt.Sprint(len(observedSrvPort))
 	r.Metrics["服务端口漏识"] = fmt.Sprint(portMiss)
+
+	// ---- 8. 设备身份：真值点名要识别的角色/标签 ----
+	//
+	// 前面几节问的是"数量对不对"，这一节问的是"能不能说出它是什么"。
+	// 判据只认真值里写下的期望（Host.Roles / Host.Labels），没写期望的设备
+	// 不参与——替产品猜"这台应该被识别成什么"不是校验器该做的事，猜错就成了
+	// 拿自己的假设去要求产品。
+	byKey := map[string]Node{}
+	for _, n := range nodes {
+		byKey[n.Key] = n
+	}
+	roleMiss := 0
+	for i := range w.Hosts {
+		h := &w.Hosts[i]
+		if len(h.Roles) == 0 && len(h.Labels) == 0 {
+			continue
+		}
+		keys := map[string]bool{}
+		for _, ip := range h.IPs {
+			if k := find(ip); k != "" {
+				keys[k] = true
+			}
+		}
+		if len(keys) == 0 {
+			roleMiss++
+			r.Hard = append(r.Hard, Finding{
+				What: fmt.Sprintf("%s 完全没被发现（真值 IP %v）", h.Name, h.IPs),
+				Why:  fmt.Sprintf("真值期望它被识别成 roles=%v labels=%v，图上却没有任何节点承载它", h.Roles, h.Labels),
+			})
+			continue
+		}
+		for _, want := range h.Roles {
+			ok := false
+			for k := range keys {
+				if hasString(byKey[k].Roles, want) {
+					ok = true
+				}
+			}
+			if !ok {
+				roleMiss++
+				r.Hard = append(r.Hard, Finding{
+					What: fmt.Sprintf("%s 没被识别成「%s」", h.Name, want),
+					Why:  "角色错了，值班的人会按错的类别排查：把路由器当终端、把代理当普通 Web，方向一开始就偏了",
+				})
+			}
+		}
+		for _, want := range h.Labels {
+			ok := false
+			for k := range keys {
+				if hasLabel(byKey[k].Labels, want) {
+					ok = true
+				}
+			}
+			if !ok {
+				roleMiss++
+				r.Hard = append(r.Hard, Finding{
+					What: fmt.Sprintf("%s 没打上标签 %s", h.Name, want),
+					Why:  "标签是「这条观测事实确实被记下来了」的证据；少了它，界面无法提示这里的身份是推断出来的",
+				})
+			}
+		}
+	}
+	r.Metrics["角色/标签漏识"] = fmt.Sprint(roleMiss)
+
+	// ---- 8b. 出网路径：经网关上网的主机，图上必须有到网关的边 ----
+	//
+	// 只看"有没有边"，不看线型：画成虚线还是实线是展示选择，而"中间那一跳
+	// 有没有出现"是事实问题。缺了它，图上就是一台台主机直接连向公网网段，
+	// 排查"谁在往外连"时找不到那个必经点。
+	macKey := map[string]string{}
+	for _, n := range nodes {
+		if n.MAC != "" {
+			macKey[n.MAC] = n.Key
+		}
+	}
+	gwMiss := 0
+	for _, l := range w.Links {
+		if l.ViaMAC == "" {
+			continue
+		}
+		src, dst := w.Host(l.From), w.Host(l.To)
+		if src == nil || dst == nil || len(src.IPs) == 0 || len(dst.IPs) == 0 {
+			continue
+		}
+		if isPrivateIP(dst.IPs[0]) {
+			continue // 只有"目的在内网之外"的流量才走首跳网关
+		}
+		if !observedIP[src.IPs[0]] || !observedIP[dst.IPs[0]] {
+			continue
+		}
+		ck, gk := find(src.IPs[0]), macKey[l.ViaMAC]
+		if ck == "" || gk == "" {
+			continue // 端点没建出来，前面已经报过
+		}
+		if ck == gk {
+			continue
+		}
+		if !edgeBetween(edges, ck, gk) {
+			gwMiss++
+			r.Hard = append(r.Hard, Finding{
+				What: fmt.Sprintf("%s → 网关（%s）没有边", l.From, l.ViaMAC),
+				Why:  "探针看见了它把报文发给这台网关，图上却直连外网：出口设备在最需要它的地方消失了",
+			})
+		}
+	}
+	r.Metrics["出网路径缺边"] = fmt.Sprint(gwMiss)
+
+	// ---- 9. 七层转发：XFF 里的真实客户端必须回到图上 ----
+	//
+	// 这一节的判据完全来自观测：服务端侧看到的源是代理，真实客户端只写在
+	// 请求头里。能不能把它还原成节点、并连上关系边，是"能不能发现代理背后
+	// 那一大片终端"的全部意义。
+	xffMiss := 0
+	for _, l := range w.Links {
+		if l.ViaProxy == "" {
+			continue
+		}
+		px, cl := w.Host(l.ViaProxy), w.Host(l.From)
+		if px == nil || cl == nil || len(px.IPs) == 0 || len(cl.IPs) == 0 {
+			continue
+		}
+		if !observedIP[px.IPs[0]] {
+			continue // 这条链路没被任何探针看到，谈不上还原
+		}
+		pk, ck := find(px.IPs[0]), find(cl.IPs[0])
+		if pk == "" {
+			continue // 代理自己都没建出来，前面报过
+		}
+		if ck == "" {
+			xffMiss++
+			r.Hard = append(r.Hard, Finding{
+				What: fmt.Sprintf("XFF 里的真实客户端 %s 没有还原成节点", cl.IPs[0]),
+				Why:  "服务端侧只看得见代理地址；不还原请求头，图上就是「一台代理访问了所有业务」，真正发起请求的终端一台都不存在",
+			})
+			continue
+		}
+		if ck != pk && !edgeBetween(edges, ck, pk) {
+			xffMiss++
+			r.Hard = append(r.Hard, Finding{
+				What: fmt.Sprintf("客户端 %s 与代理 %s 之间没有关系边", cl.IPs[0], px.IPs[0]),
+				Why:  "还原出节点却不连线，等于知道「有这么台机器」却不知道「它经谁转发」——溯源到代理这一跳就断了",
+			})
+		}
+	}
+	r.Metrics["XFF 漏还原"] = fmt.Sprint(xffMiss)
 
 	return r
 }
@@ -526,4 +693,62 @@ func hasPort(ports []int, want int) bool {
 		}
 	}
 	return false
+}
+
+func hasString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// edgeBetween 两个节点之间是否有任意一条边（不分方向、不分类型）。
+func edgeBetween(edges []Edge, a, b string) bool {
+	for _, e := range edges {
+		if (e.Src == a && e.Dst == b) || (e.Src == b && e.Dst == a) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPrivateIP 判断是否内网地址（RFC1918 + 链路本地 + IPv6 ULA）。
+//
+// 这里刻意自己实现，不去 import 产品包：判断"什么算内网"是口径问题，
+// 一旦和产品共用同一份代码，产品改了口径校验器会跟着一起错，测出来永远绿。
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		switch {
+		case v4[0] == 10:
+			return true
+		case v4[0] == 172 && v4[1]&0xf0 == 16:
+			return true
+		case v4[0] == 192 && v4[1] == 168:
+			return true
+		case v4[0] == 169 && v4[1] == 254:
+			return true
+		case v4[0] == 127:
+			return true
+		}
+		return false
+	}
+	return ip[0]&0xfe == 0xfc // fc00::/7
+}
+
+// cidr24Of 返回 IP 所属的 /24（IPv6 为 /64），与产品对公网地址的聚合口径一致。
+func cidr24Of(ipStr string) string {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }

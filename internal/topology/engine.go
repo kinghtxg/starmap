@@ -846,7 +846,27 @@ func (e *Engine) Ingest(s *model.Session) {
 		now = time.Now()
 	}
 	srcID := e.nodeForLocked(s.FiveTuple.SrcIP, s.MAC, now)
-	dstID := e.nodeForLocked(s.FiveTuple.DstIP, "", now)
+	// 网关归一（V1.10）：同网段会话的以太网目的 MAC 就是目的网卡的 MAC，
+	// 把它作为目的节点的"MAC 提示"交给 nodeForLocked，走已有的同 MAC 合并逻辑。
+	//
+	// 为什么必须在这里给、而不是事后归一：网关的两条证据从不落在同一条会话上——
+	// 它的 LAN IP 只在"别人连它"的会话里当目的地址，它的 MAC 只在"它转发公网流量"
+	// 的会话里当二层目的 MAC（以及它自己发包时当源 MAC）。谁先到就由谁建节点，
+	// 后到的证据只能另建一个，于是同一台路由器在图上分成两台：一台有名有姓的
+	// "10.8.1.1"、一台只有 MAC 的空壳，而后者才是真正在给全网转发的那台。
+	// 先建后建都能收敛成同一个节点的唯一办法，是让"IP + MAC"在**创建节点的那一刻**
+	// 就一起交进去。
+	dstMAC := destMACOf(s)
+	if dstMAC != "" {
+		// 目的节点已经带着另一个 MAC：那是 IP 冲突/ARP 欺骗，别把第三个 MAC 搅进来，
+		// 交给 nodeForLocked 原有的冲突判定。
+		if id, ok := e.ipNode[s.FiveTuple.DstIP]; ok {
+			if n := e.nodes[id]; n != nil && n.MAC != "" && n.MAC != dstMAC {
+				dstMAC = ""
+			}
+		}
+	}
+	dstID := e.nodeForLocked(s.FiveTuple.DstIP, dstMAC, now)
 	ek := edgeKeyOf(&model.Edge{SrcID: srcID, DstID: dstID, Protocol: s.FiveTuple.Proto})
 
 	// crashBridge：跨进程启动的在途会话，但底数没能恢复。

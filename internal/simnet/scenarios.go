@@ -128,6 +128,10 @@ func MultiObserver(seed int64, now time.Time) *World {
 //
 // 断言里因此用 MaxByteRatio 放宽上限，同时把比值本身留在报告里——哪天有人
 // 声称"字节守恒"，这个数字就是打脸的依据。
+//
+// 这个场景刻意只造"跨 NAT 的同一份载荷"，不掺别的流量：它的用处是把字节比
+// 钉在 2.000 上，任何新加的链路都会让这个数字失去解释力。设备身份（网关角色、
+// NAT 出口地址归一）由 Egress 场景负责，那里才有真实网络的完整证据链。
 func NAT(seed int64, now time.Time) *World {
 	w := &World{
 		Name: "nat", StartAt: now.Add(-time.Hour), Span: 10 * time.Minute, Seed: seed,
@@ -141,7 +145,6 @@ func NAT(seed int64, now time.Time) *World {
 	w.AddHost(Host{
 		Name: "nat", MAC: MACOf(1), IPs: []string{IPIn(segIn, 1), natOut},
 		Segment: segIn, Location: "机房 A 柜 3 口",
-		Roles: []string{"gateway"},
 	})
 	for i := 1; i <= 5; i++ {
 		w.AddHost(Host{
@@ -260,6 +263,122 @@ func MACDrift(seed int64, now time.Time) *World {
 	return w
 }
 
+// Egress 一台承担"网关 + NAT + DNS"三合一的出口路由器，办公网通过它访问服务器区与公网。
+//
+// 这是政务网里最常见的形态：一台设备既是全网默认网关，又是 SNAT 出口，还兼着
+// 内部 DNS。它回答了三个问题，缺一条都不算"看见出口"：
+//   - **路由器本身**要被发现（1 个节点，带 MAC）；
+//   - **NAT 出口地址**要归到同一台设备上（10.8.1.1 与 10.8.9.2 同在它身上，
+//     一个是内网口、一个是 NAT 后的出口口），否则出口在图上是一台陌生机器；
+//   - **出口方向**要成边（每台主机 → 网关），否则图上是"主机直连公网"，
+//     中间那一跳凭空消失——这正是现场排查"谁在上外网"时最先要找的东西。
+//
+// 三条证据分别来自三个方向，必须都造出来才能验证归一是否正确：
+//   - 别人连它（DNS 查询）→ 只能看到它的**内网 IP 在目的端**；
+//   - 它自己发包（syslog）→ 才能看到**它的 MAC 当源**；
+//   - 它转发公网流量 → 只有**以太网目的 MAC** 是它的 MAC，IP 一个都不出现。
+//
+// 只有第三条时，产品只能建一个"只有 MAC 的空壳"；只有第一条时，只能建一个
+// "没有 MAC 的节点"。两者必须以同一台设备收场，否则图上凭空多一台幽灵。
+//
+// 注：公网侧出口地址（203.0.113.x）在局域网探针上不可见——报文出了 WAN 口才有它，
+// 那时源 MAC 仍是这台路由器。这是部署位置决定的，不是缺陷，故本场景不造 WAN 探针。
+func Egress(seed int64, now time.Time) *World {
+	w := &World{
+		Name: "egress", StartAt: now.Add(-time.Hour), Span: 20 * time.Minute, Seed: seed,
+		MaxByteRatio: 1.6, // 办公→服务器区被两段各看一次；上网与日志只有一份，整体略高于 1
+	}
+	segLan, segSrv, segNet := "10.8.1.0/24", "10.8.9.0/24", "198.51.100.0/24"
+	w.AddProbe(Probe{ID: "plan", Location: "A 栋 3 层弱电间", Segments: []string{segLan}})
+	w.AddProbe(Probe{ID: "psrv", Location: "核心机房", Segments: []string{segSrv}})
+
+	lanIP, natIP := IPIn(segLan, 1), IPIn(segSrv, 2)
+	w.AddHost(Host{
+		Name: "edge", MAC: MACOf(200), IPs: []string{lanIP, natIP}, Segment: segLan,
+		Listen: []Service{
+			{Port: 53, Proto: "tcp"},
+			{Port: 22, Proto: "tcp"},
+		},
+		Location: "A 栋 3 层弱电间 1 柜 1 口",
+		Roles:    []string{"gateway"},
+	})
+	// 日志服务器：路由器主动给它的流量，是"路由器自己的 MAC"唯一的来源
+	w.AddHost(Host{
+		Name: "log", MAC: MACOf(210), IPs: []string{IPIn(segLan, 250)}, Segment: segLan,
+		Listen: []Service{{Port: 514, Proto: "udp"}}, Location: "A 栋 3 层 2 柜 5 口",
+	})
+	w.AddHost(Host{
+		Name: "app", MAC: MACOf(220), IPs: []string{IPIn(segSrv, 20)}, Segment: segSrv,
+		Listen:   []Service{{Port: 443, Proto: "tcp", TLS: true}},
+		Location: "核心机房 B 柜 8 口",
+	})
+	// 公网目标：只有"目的在内网之外"才能证明谁在给全网做首跳转发
+	w.AddHost(Host{
+		Name: "pubapi", IPs: []string{"198.51.100.20"}, Segment: segNet,
+		Listen: []Service{{Port: 443, Proto: "tcp", TLS: true}},
+	})
+
+	for i := 1; i <= 6; i++ {
+		name := "pc" + itoa(i)
+		w.AddHost(Host{
+			Name: name, MAC: MACOf(10 + i), IPs: []string{IPIn(segLan, 10+i)},
+			Segment: segLan, Location: "A 栋 3 层",
+		})
+		// 全网都用网关当 DNS：这是"网关的内网 IP"被看见的唯一途径
+		w.AddLink(Link{From: name, To: "edge", Port: 53, Proto: "tcp", Bytes: 6000, ViaMAC: MACOf(200)})
+		// 经 NAT 访问服务器区：两段各被看见一次，出口地址归到同一台设备
+		w.AddLink(Link{
+			From: name, To: "app", Port: 443, Proto: "tcp", Bytes: 100000,
+			NATSrc: natIP, ViaMAC: MACOf(200),
+		})
+		// 上公网：目的在内网之外，以太网目的 MAC 就是首跳网关
+		w.AddLink(Link{From: name, To: "pubapi", Port: 443, Proto: "tcp", Bytes: 120000, ViaMAC: MACOf(200)})
+	}
+	// 路由器自己外发日志：源 MAC 是自己，这是把它从"空壳"变成"有名有姓"的关键一条
+	w.AddLink(Link{From: "edge", To: "log", Port: 514, Proto: "udp", Bytes: 4000})
+	return w
+}
+
+// Proxy 七层代理（nginx/HAProxy/SLB）：真实客户端只存在于 X-Forwarded-For 里。
+//
+// 期望：
+//   - 代理本身是 **1 个节点**，带上代理角色（它是全网流量的必经点，不能显示"未识别"）；
+//   - 每台真实客户端都在图上，带 xff-client 标记，并与代理之间有关系边；
+//   - 字节不翻倍：这里只造服务端侧那一条会话（客户端→代理是另一条五元组，
+//     造出来会把 NAT 场景已经测过的"重复计入"再混进来，掩盖真正的判据）。
+//
+// 现场对应：政务云里业务系统前面挂一台 WAF/负载均衡，服务端的访问日志里
+// 源地址永远是 WAF 的地址。不还原 XFF，图上是"一台机器访问了所有业务"，
+// 而真正的客户端（可能是被攻陷的终端）一台都看不见。
+func Proxy(seed int64, now time.Time) *World {
+	w := &World{Name: "proxy", StartAt: now.Add(-time.Hour), Span: 15 * time.Minute, Seed: seed}
+	segOffice, segApp := "10.9.1.0/24", "10.9.2.0/24"
+	w.AddProbe(Probe{ID: "poffice", Location: "办公区", Segments: []string{segOffice}})
+	w.AddProbe(Probe{ID: "papp", Location: "应用区", Segments: []string{segApp}})
+
+	w.AddHost(Host{
+		Name: "waf", MAC: MACOf(150), IPs: []string{IPIn(segApp, 10)}, Segment: segApp,
+		Listen:   []Service{{Port: 80, Proto: "tcp", Product: "nginx/1.20.1"}},
+		Location: "应用区 DMZ 1 柜 2 口",
+		Roles:    []string{"proxy"}, Labels: []string{"xff-proxy"},
+	})
+	w.AddHost(Host{
+		Name: "app", MAC: MACOf(160), IPs: []string{IPIn(segApp, 20)}, Segment: segApp,
+		Listen:   []Service{{Port: 80, Proto: "tcp", Product: "Tomcat"}},
+		Location: "应用区 2 柜 5 口",
+	})
+	for i := 1; i <= 3; i++ {
+		w.AddHost(Host{
+			Name: "c" + itoa(i), MAC: MACOf(20 + i), IPs: []string{IPIn(segOffice, 10+i)},
+			Segment:  segOffice,
+			Location: "办公区",
+			Labels:   []string{"xff-client"},
+		})
+		w.AddLink(Link{From: "c" + itoa(i), To: "app", Port: 80, Proto: "tcp", Bytes: 150000, ViaProxy: "waf"})
+	}
+	return w
+}
+
 // All 返回全部场景（顺序固定，便于回归比对）。
 func All(seed int64, now time.Time) []*World {
 	return []*World{
@@ -271,6 +390,8 @@ func All(seed int64, now time.Time) []*World {
 		PartialObservation(seed, now),
 		IPConflict(seed, now),
 		MACDrift(seed, now),
+		Egress(seed, now),
+		Proxy(seed, now),
 	}
 }
 

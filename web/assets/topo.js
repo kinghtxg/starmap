@@ -124,15 +124,18 @@
    * 会被当成"终端"；一台刷视频的 PC 连接数爆表，会被当成"服务器"。
    * 现在优先用后端角色，连接度只在没有角色信息时兜底。
    */
+  // proxy：七层代理/负载均衡。它既不是路由器（不做三层转发）也不是服务器
+  // （不提供业务），是"所有请求都要经过的那一跳"。放在汇聚层、给独立图标，
+  // 是因为排查"为什么源地址全是同一个"时第一眼就得认出它。
   var ROLE_TYPE = {
-    gateway: 'router', nas: 'nas', dns: 'dns', db: 'db', web: 'web',
+    gateway: 'router', proxy: 'proxy', nas: 'nas', dns: 'dns', db: 'db', web: 'web',
     remote: 'remote', server: 'app', host: 'pc', external: 'cloud'
   };
   var ROLE_TIER = {
-    gateway: 1, nas: 3, dns: 3, db: 3, web: 3, remote: 3, server: 3, host: 4, external: 0
+    gateway: 1, proxy: 2, nas: 3, dns: 3, db: 3, web: 3, remote: 3, server: 3, host: 4, external: 0
   };
   var ROLE_LABEL = {
-    gateway: '网关/路由器', nas: '存储/NAS', dns: 'DNS 服务器', db: '数据库',
+    gateway: '网关/路由器', proxy: '七层代理', nas: '存储/NAS', dns: 'DNS 服务器', db: '数据库',
     web: 'Web 站点', remote: '远程管理', server: '应用服务', host: '终端', external: '外部网络'
   };
   function roleLabel(r) { return ROLE_LABEL[r] || TYPE_LABEL[ROLE_TYPE[r]] || r; }
@@ -483,8 +486,11 @@
     });
 
     // 2) BFS：以核心设备为源，算网络层级
+    //
+    // 代理也算"核心设备"：它是流量的必经点，不是终端。不把它算进源，一张
+    // "网关在别处、只有代理在中间"的图会从某个随机高点出发，把代理排到终端层去。
     var src = ids.filter(function (i) {
-      return info[i].type === 'router' || info[i].type === 'switch_';
+      return info[i].type === 'router' || info[i].type === 'switch_' || info[i].type === 'proxy';
     });
     if (!src.length) {
       var best = null, bd = -1;

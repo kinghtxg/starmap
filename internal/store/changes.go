@@ -13,6 +13,7 @@ package store
 // 再存一份"每次扫描的快照"会让两处数据开始漂移，而漂移从来不会自愈。
 
 import (
+	"fmt"
 	"net/netip"
 	"sort"
 	"strings"
@@ -21,12 +22,31 @@ import (
 	"starmap/internal/model"
 )
 
-// dayExpr 从 DATETIME 列取日期前缀。
+// dayExpr 把 DATETIME 列折成**本地日期**（YYYY-MM-DD），供按天分组用。
 //
-// 必须用 substr 而不是 date()：驱动把 time.Time 绑成 RFC3339（带 'T'），
-// SQLite 的 date() 只认空格分隔，会静默返回 NULL——所有行落进同一个 NULL 桶，
-// 趋势图变成一条平线而接口仍然 200。见 timefmt_test.go。
-func dayExpr(col string) string { return `substr(` + col + `,1,10)` }
+// # 为什么不是 substr(col,1,10)
+//
+// 两条约束叠在一起，substr 就错了：
+//
+//  1. 驱动落库写的是 `time.Time.String()`，形如 `2026-03-04 15:04:05.123 +0000 UTC`。
+//     SQLite 的 date() 认不出尾部那个 ` +0000 UTC`，会静默返回 NULL（见 timefmt_test.go）。
+//  2. 1.7.0 起写入口 dbx 把时间统一转成 UTC 再下发，所以前缀是 **UTC 日期**。
+//
+// 于是 `substr(1,10)` 拿到的是 UTC 日，而 TrendStats 的桶是按**本地日**建的。
+// 两个日期只有在北京时间 08:00~24:00 才重合——凌晨那几个小时，"今天"的新增
+// 会整段落到昨天，趋势图上今天永远是 0（TestTrendAPI 凌晨必红的根因）。
+//
+// 解法：先把可解析的前 19 字节（`YYYY-MM-DD HH:MM:SS`）切出来交给 strftime，
+// 再按服务器时区偏移平移。偏移量由调用方用 now.Zone() 算出来传进来，
+// 不写死 +8——同一份二进制换到 UTC 机器上也要对。
+//
+// 注意 WHERE 子句**不能**套这个表达式：一旦把列包进函数，索引就用不上了。
+// 范围过滤仍然直接比列（见 TrendStats 里的 since），多带进来的边界行
+// 会因为不在 buckets 里被自然丢弃。
+func dayExpr(col string, offsetSec int) string {
+	return `strftime('%Y-%m-%d', substr(` + col + `,1,19), '` +
+		fmt.Sprintf("%+d seconds", offsetSec) + `')`
+}
 
 // ChangeWindow 变更视图的时间窗口。
 type ChangeWindow struct {
@@ -100,7 +120,11 @@ func (s *Store) TrendStats(days int, now time.Time) ([]model.TrendPoint, error) 
 	// 从 days-1 天前的那一天零点起算，保证最后一天是"今天"。
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	start := today.AddDate(0, 0, -days+1)
-	since := start.Format("2006-01-02")
+	// 起点按 UTC 给：库里存的是 UTC 串，"本地零点"对应 UTC 的前一天某时，
+	// 用本地日期串去比会把窗口起点往后砍掉最多一个时区宽（+8 就是 8 小时）。
+	// 宁可多带一天的量——桶是按本地日建的，多出来的日期会自动丢弃。
+	since := start.UTC().Format("2006-01-02")
+	_, offSec := now.Zone()
 
 	buckets := make(map[string]*model.TrendPoint, days)
 	out := make([]model.TrendPoint, days)
@@ -117,19 +141,19 @@ func (s *Store) TrendStats(days int, now time.Time) ([]model.TrendPoint, error) 
 	}
 	list := []series{
 		{
-			sql: `SELECT ` + dayExpr("created_at") + ` d, COUNT(*) FROM assets
+			sql: `SELECT ` + dayExpr("created_at", offSec) + ` d, COUNT(*) FROM assets
 			      WHERE created_at >= ? GROUP BY d`,
 			put:  func(p *model.TrendPoint, n int) { p.Assets = n },
 			desc: "资产",
 		},
 		{
-			sql: `SELECT ` + dayExpr("first_seen") + ` d, COUNT(*) FROM ports
+			sql: `SELECT ` + dayExpr("first_seen", offSec) + ` d, COUNT(*) FROM ports
 			      WHERE first_seen >= ? GROUP BY d`,
 			put:  func(p *model.TrendPoint, n int) { p.Ports = n },
 			desc: "端口",
 		},
 		{
-			sql: `SELECT ` + dayExpr("created_at") + ` d, COUNT(*) FROM events
+			sql: `SELECT ` + dayExpr("created_at", offSec) + ` d, COUNT(*) FROM events
 			      WHERE created_at >= ? GROUP BY d`,
 			put:  func(p *model.TrendPoint, n int) { p.Events = n },
 			desc: "事件",
