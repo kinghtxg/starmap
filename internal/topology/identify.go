@@ -207,8 +207,14 @@ type roleEvidence struct {
 	Ports []int
 	// Peers 本次进程内主动连过它的对端数量。
 	Peers int
-	// GatewayFor 有多少台主机把它的 MAC 当作公网出口首跳。
+	// GatewayFor 有多少台主机把它的 MAC 当作公网出口首跳（只统计本进程看到的）。
 	GatewayFor int
+	// GatewaySeen 历史上/本进程曾观测到它在做首跳转发（节点上的持久标签）。
+	//
+	// 与 GatewayFor 分开是因为两者的时效不同：GatewayFor 随流量实时变化，
+	// 进程重启后归零；GatewaySeen 来自落盘的证据，重启后仍在。判定角色时
+	// 两者取"或"——只要有一次被证明过，它就是网关，不能在重启后变回"未识别"。
+	GatewaySeen bool
 	// Forwarded 观测到它替别的客户端转发过请求（请求里带 X-Forwarded-For）。
 	//
 	// 这是"七层代理"的定义性行为：被代理的请求在服务端侧只留下代理的地址，
@@ -243,7 +249,7 @@ func inferRoles(ev roleEvidence) []string {
 		return false
 	}
 
-	if ev.GatewayFor > 0 {
+	if ev.GatewayFor > 0 || ev.GatewaySeen {
 		add(RoleGateway)
 	}
 	if ev.Forwarded {
@@ -788,12 +794,13 @@ func (e *Engine) annotateIdentity(n *model.Node, gw map[string]int) {
 	n.InboundPeers = peers
 	n.GatewayFor = gwFor
 	n.Roles = inferRoles(roleEvidence{
-		Ports:      ports,
-		Peers:      peers,
-		GatewayFor: gwFor,
-		Forwarded:  hasLabel(n, LabelXFFProxy),
-		SeenSrc:    e.seenSrc[n.ID],
-		Inbound:    e.inboundSeen[n.ID],
+		Ports:       ports,
+		Peers:       peers,
+		GatewayFor:  gwFor,
+		GatewaySeen: hasLabel(n, LabelGateway),
+		Forwarded:   hasLabel(n, LabelXFFProxy),
+		SeenSrc:     e.seenSrc[n.ID],
+		Inbound:     e.inboundSeen[n.ID],
 	})
 	// 没有命中任何角色时留空，让前端显示"未识别"，而不是替用户下一个没依据的结论
 	n.Role = ""

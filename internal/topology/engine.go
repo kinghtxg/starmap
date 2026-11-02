@@ -37,6 +37,17 @@ const (
 	// ProtoXFF 指向"经该代理转发"的关系边（无字节数，仅表达归属/路径）。
 	ProtoXFF = "xff"
 
+	// LabelGateway 首跳网关的**持久证据**：这台设备的 MAC 被别的机器当作公网出口。
+	//
+	// 为什么必须落成标签：gatewayMAC 是内存表，进程一重启就空了。而网关恰好总在
+	// 一个人最多的 /24 里，重启后"它是不是网关"判不出来 → 它被网段聚合吞掉 →
+	// 图上出口消失。也就是说**重启那一刻正是最需要看见出口的时候**，却刚好看不见。
+	// 标签随节点落盘，重启后仍然能作为可见性与角色的依据。
+	//
+	// 代价：标签是单调的，一台不再转发的设备会一直带着它。这是有意的取舍——
+	// "历史上确实当过出口"本身也是一个值得知道的事实，而误判成出口比漏判安全。
+	LabelGateway = "gateway"
+
 	// LabelIPConflict 同一 IP 上出现两个不同 MAC 的节点。
 	//
 	// 取值与 model.EventTypeIPConflict 一致（snake_case）而不是跟 subnet-agg 那种
@@ -971,7 +982,14 @@ func (e *Engine) Ingest(s *model.Session) {
 			e.gatewayMAC[srcID] = s.DstMAC
 			// 为网关 MAC 建（或复用）节点：被动侧看不到网关的 IP，
 			// 只有这个 MAC 能证明"中间确实有一台设备在转发"。
-			e.gatewayNodeLocked(s.DstMAC, now)
+			if gid := e.gatewayNodeLocked(s.DstMAC, now); gid != 0 {
+				// 同时把证据落成标签：gatewayMAC 是内存表，重启就空，
+				// 而重启后如果判不出"它是网关"，它会被网段聚合吞掉（见 LabelGateway）。
+				if g := e.nodes[gid]; g != nil && !contains(g.Labels, LabelGateway) {
+					g.Labels = append(g.Labels, LabelGateway)
+					e.dirtyNodes[gid] = true
+				}
+			}
 		}
 	}
 
@@ -1684,13 +1702,21 @@ func isRiskAnchor(n *model.Node) bool {
 
 // visibleAsSelf 判断节点是否"必须以自身身份出现在拓扑里"（不参与网段聚合）。
 //
-// 两类：
+// 三类：
 //   - 风险锚点（中/高风险）：异常设备被聚合吞掉等于藏起最该看见的那台（V1.6）
 //   - 七层转发节点：它是个结构性的收口点，聚合掉它等于藏起"背后一片客户端"的入口（V1.8）
+//   - **首跳网关**：它是全网上网的必经点，而且恰好总在一个人最多的 /24 里。
+//     办公网几十上百台主机必然触发聚合，网关如果跟着被折叠成网段节点，图上就是
+//     "一堆主机直接连公网"——出口设备在最需要它的部署规模下消失（V1.10）。
+//     判定用 gw（MAC → 被多少台主机当作首跳），不用 n.Role：聚合发生在角色推断之前。
 //
-// 注意：转发节点不是"异常"，所以不置 Anchor 字段（那是风险语义，前端据此画红虚环）。
-func visibleAsSelf(n *model.Node) bool {
-	return isRiskAnchor(n) || hasLabel(n, LabelXFFProxy)
+// 注意：转发节点和网关都不是"异常"，所以不置 Anchor 字段（那是风险语义，
+// 前端据此画红虚环）。
+func (e *Engine) visibleAsSelf(n *model.Node, gw map[string]int) bool {
+	if isRiskAnchor(n) || hasLabel(n, LabelXFFProxy) || hasLabel(n, LabelGateway) {
+		return true
+	}
+	return n.MAC != "" && gw[n.MAC] > 0
 }
 
 // aggNodeLocked 构造网段聚合虚拟节点（调用方需持有 e.mu）。
@@ -1751,7 +1777,7 @@ func (e *Engine) Snapshot() model.TopoSnapshot {
 					break
 				}
 			}
-			if hidden && !visibleAsSelf(n) {
+			if hidden && !e.visibleAsSelf(n, gw) {
 				continue
 			}
 		}
@@ -2082,6 +2108,7 @@ func (e *Engine) ownershipEdgesLocked(existing []VisibleEdge) []VisibleEdge {
 
 func (e *Engine) visibleMapLocked() map[int64]string {
 	visible := map[int64]string{}
+	gw := e.gatewayCountLocked()
 	for _, n := range e.nodes {
 		if !hasLabel(n, LabelExternalAg) {
 			aggCIDR := ""
@@ -2092,7 +2119,7 @@ func (e *Engine) visibleMapLocked() map[int64]string {
 					break
 				}
 			}
-			if aggCIDR != "" && !visibleAsSelf(n) {
+			if aggCIDR != "" && !e.visibleAsSelf(n, gw) {
 				// V1.6：风险锚点不折叠，保持自身身份，从而与两个网段聚合节点同时相连，
 				// 在图上直接呈现"一机跨两网"的拓扑签名。
 				// V1.8：七层转发节点同样常驻，否则聚合会把"代理 + 背后一片客户端"一起吞掉。

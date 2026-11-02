@@ -1,6 +1,7 @@
 package topology
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -90,6 +91,55 @@ func TestGatewayIdentityConvergesRegardlessOfOrder(t *testing.T) {
 				t.Fatalf("10.8.1.1 应只属于 1 个节点，实际 %d 个", owners)
 			}
 		})
+	}
+}
+
+// TestGatewaySurvivesAggregation 网关不能被网段聚合吞掉。
+//
+// 这个缺陷只有"真部署规模"才暴露：网关总在一个人最多的 /24 里（办公网），
+// 而那个 /24 一旦超过聚合阈值就会被折叠成一个网段节点。网关如果跟着被折叠，
+// 图上就是"一堆主机直接连公网"——恰恰在最需要看见出口的规模下，出口消失了。
+// 用 5 台主机 + 阈值 3 模拟"办公网必然聚合"。
+func TestGatewaySurvivesAggregation(t *testing.T) {
+	base := time.Now().Truncate(time.Second)
+	e := New(model.SystemConfig{AggregateThreshold: 3, AgingSeconds: 86400})
+	e.Ingest(&model.Session{
+		FiveTuple: model.FiveTuple{SrcIP: "10.8.1.10", DstIP: "10.8.1.1", SrcPort: 40010, DstPort: 53, Proto: "tcp"},
+		MAC:       "02:00:00:00:00:0a", DstMAC: gwMAC,
+		FirstSeen: base, LastSeen: base.Add(time.Minute),
+		BytesUp: 3000, BytesDown: 6000, Packets: 20,
+	})
+	for i := 11; i <= 15; i++ {
+		e.Ingest(&model.Session{
+			FiveTuple: model.FiveTuple{
+				SrcIP: "10.8.1." + strconv.Itoa(i), DstIP: "10.8.1.1", SrcPort: uint16(41000 + i), DstPort: 53, Proto: "tcp",
+			},
+			MAC: "02:00:00:00:01:" + strconv.Itoa(i), DstMAC: gwMAC,
+			FirstSeen: base, LastSeen: base.Add(time.Minute),
+			BytesUp: 3000, BytesDown: 6000, Packets: 20,
+		})
+		// 同时上公网：这是"网关在给全网做首跳"的证据
+		e.Ingest(&model.Session{
+			FiveTuple: model.FiveTuple{
+				SrcIP: "10.8.1." + strconv.Itoa(i), DstIP: "198.51.100.20", SrcPort: uint16(42000 + i), DstPort: 443, Proto: "tcp",
+			},
+			MAC: "02:00:00:00:01:" + strconv.Itoa(i), DstMAC: gwMAC,
+			FirstSeen: base, LastSeen: base.Add(time.Minute),
+			BytesUp: 20000, BytesDown: 60000, Packets: 40,
+		})
+	}
+	var gwNode *model.Node
+	for _, n := range e.Snapshot().Nodes {
+		if n.MAC == gwMAC {
+			nn := n
+			gwNode = &nn
+		}
+	}
+	if gwNode == nil {
+		t.Fatal("办公网聚合之后网关被吞掉了：图上只剩一堆主机直连公网，找不到出口设备")
+	}
+	if !contains(gwNode.Roles, RoleGateway) {
+		t.Fatalf("网关应识别成 %s，实际 %v", RoleGateway, gwNode.Roles)
 	}
 }
 

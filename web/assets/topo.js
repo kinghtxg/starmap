@@ -855,8 +855,9 @@
           if (anchor) tags.push('异常');
           if (isConflict) tags.push('IP 冲突');
           if (isXffClient) tags.push('经代理');
-          // 转发设备直接以「代理转发」定型，不再叠一个"七层转发"标签自我重复
-          var base = isProxy ? '代理转发' : (t.role ? roleLabel(t.role) : TYPE_LABEL[t.type]);
+          // 转发设备现在有正式角色（proxy），统一走 roleLabel，不再单独写死一个
+          // "代理转发"——否则 tooltip 里会出现"代理转发 · 七层代理"，同一件事说两遍。
+          var base = t.role ? roleLabel(t.role) : TYPE_LABEL[t.type];
           sub = base + (tags.length ? ' · ' + tags.join(' · ') : '');
         }
         // 红点必须能解释自己：国外/隧道/风险 → 待核查；加过白的 → 已加白
