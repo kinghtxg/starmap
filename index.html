@@ -184,7 +184,7 @@ footer .links a:hover{color:var(--ink)}
       <a href="#join">参与共建</a>
     </div>
     <div class="nav-cta">
-      <a class="gh" href="#">
+      <a class="gh" href="https://github.com/kinghtxg/starmap" target="_blank" rel="noopener">
         <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
         GitHub
       </a>
@@ -200,9 +200,9 @@ footer .links a:hover{color:var(--ink)}
     <div class="hero-grid"></div>
   </div>
   <div class="wrap">
-    <div class="hero-tag"><span class="dot"></span>Open Source · Intranet Asset Discovery · Apache-2.0</div>
+    <div class="hero-tag"><span class="dot"></span>v1.8.0 · Open Source · Intranet Asset Discovery · Apache-2.0</div>
     <h1>让内网的每一台设备，<br>都<em>看得见、对得上账</em>。</h1>
-    <p class="hero-sub">StarMap 星图被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备；1.2 起内置端口扫描与服务指纹，把只在监听、从不通信的设备也盘出来。对可疑行为只打标签、不定性——一款部署在内网、持续回答「网络里到底有什么」的资产测绘引擎。</p>
+    <p class="hero-sub">StarMap 星图被动感知网内流量，自动测绘资产拓扑、登记主机台账、发现账外设备、认出出口与代理；1.2 起内置端口扫描与服务指纹，把只在监听、从不通信的设备也盘出来。对可疑行为只打标签、不定性——一款部署在内网、持续回答「网络里到底有什么」的资产测绘引擎。</p>
     <div class="hero-cta">
       <a class="btn btn-primary" href="#quickstart">快速开始 →</a>
       <a class="btn btn-ghost" href="#architecture">查看技术架构</a>
@@ -298,13 +298,14 @@ footer .links a:hover{color:var(--ink)}
     <table class="matrix">
       <tr><th>能力</th><th>说明</th><th>状态</th></tr>
       <tr><td><span class="tag">ingest</span></td><td>三路数据接入：PCAP/PCAPNG 导入 · 网卡实时抓包 · 远端探针上报</td><td>✅ 可用</td></tr>
-      <tr><td><span class="tag">topology</span></td><td>拓扑自动测绘：同 MAC 多 IP 合并 · /24 聚合下钻 · 边老化 · NAT 修复</td><td>✅ 可用</td></tr>
+      <tr><td><span class="tag">topology</span></td><td>拓扑自动测绘：同 MAC 多 IP 合并 · 网关 IP/MAC 归一 · /24 聚合下钻 · 边老化 · NAT 修复</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">assets</span></td><td>主机资产库：账外资产自动登记 · 归档归属信息 · 离线自动清理</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">ports</span></td><td>端口记录：流量自动提取 + 内置扫描 / nmap 主动扫描（双来源），带服务指纹</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">probe</span></td><td>独立探针：约 14MB 单文件，Linux AF_PACKET / Windows wpcap / 管道命令 / pcap 回放，零 CGO</td><td>✅ 1.4 起</td></tr>
       <tr><td><span class="tag">timeline</span></td><td>时间维度：发现任务账落库 · 资产与站点变更视图 · 趋势与变更导出</td><td>✅ 1.6 起</td></tr>
       <tr><td><span class="tag">sites</span></td><td>站点资产：把「有 HTTP 响应的端点」收成一级资产，标注证书到期 / 自签 / 明文，可挂名称、归属单位与标签</td><td>✅ 1.7 起</td></tr>
       <tr><td><span class="tag">report</span></td><td>报表出口：自包含 HTML 报表（拓扑概览 / 账实对照 / 站点清单）+ 带 BOM 的 CSV 导出</td><td>✅ 1.7 起</td></tr>
+      <tr><td><span class="tag">egress</span></td><td>出口与代理识别：首跳网关独立成节点（IP/MAC 归一、不被 /24 聚合吞掉、证据随节点持久化，重启后仍在）· 七层代理角色与 XFF 真实客户端还原</td><td>✅ 1.8 起</td></tr>
       <tr><td><span class="tag">discover</span></td><td>主动发现：内置 TCP 端口扫描（三档）· 服务指纹（HTTP/TLS/banner/favicon）· 时间窗口与限速</td><td>✅ 1.2 起</td></tr>
       <tr><td><span class="tag">detect</span></td><td>风险特征打标：frp / clash / reverse_proxy / unknown_egress / multi_net</td><td>✅ 可用</td></tr>
       <tr><td><span class="tag">review</span></td><td>复核闭环：确认 / 误报加白 / 暂缓 · 白名单四维度抑制 · 全量审计</td><td>✅ 可用</td></tr>
@@ -321,8 +322,11 @@ footer .links a:hover{color:var(--ink)}
     </div>
     <div class="grid grid-2">
       <div>
-        <div class="code-hd">构建 & 运行</div>
-        <pre class="code"><span class="c"># 纯 Go 构建，无需 CGO</span>
+        <div class="code-hd">下载 · 构建 · 运行</div>
+        <pre class="code"><span class="c"># 四平台预编译二进制（Windows / Linux amd64+arm64 / macOS arm64）</span>
+<span class="c"># https://github.com/kinghtxg/starmap/releases/latest</span>
+
+<span class="c"># 或从源码构建，纯 Go，无需 CGO</span>
 CGO_ENABLED=0 go build -o starmap ./cmd/starmap
 ./starmap -config configs/config.yaml
 <span class="c"># 打开 http://127.0.0.1:8080</span></pre>
@@ -349,6 +353,7 @@ bash scripts/e2e.sh</pre>
       <p class="sec-lead">界面与自家「刻本」同一套设计令牌：浅色画布、克制的描边与阴影、动效 120ms。零外网依赖，图标全部内联 SVG。</p>
     </div>
     <div class="shots">
+      <figure><img src="screenshots/topology-egress.png" alt="出口与代理"><figcaption>出口可见 —— 网关独立成节点（不被网段聚合吞掉），办公网折叠成网段，代理带独立角色</figcaption></figure>
       <figure><img src="screenshots/topology.png" alt="拓扑总览"><figcaption>拓扑总览 —— 分层布局、设备图标、风险三色描边、minimap、下钻</figcaption></figure>
       <figure><img src="screenshots/assets.png" alt="主机资产"><figcaption>主机资产 —— 账外资产发现与归档登记</figcaption></figure>
       <figure><img src="screenshots/events.png" alt="事件工作台"><figcaption>风险事件 —— 特征打标与复核闭环（只打标签，不定性）</figcaption></figure>
@@ -379,7 +384,8 @@ bash scripts/e2e.sh</pre>
       <div class="item"><div class="phase">1.5 · DONE</div><div><h3>会看图</h3><p>设备类型识别、公网地址折叠、自有情报与端口明细；并把「探针重发当增量」造成的十几倍流量放大修掉。</p></div></div>
       <div class="item"><div class="phase">1.6 · DONE</div><div><h3>时间维度与容量</h3><p>发现任务账落库（重启不归零、取消是真打断）、资产与站点变更视图、趋势与导出；事件/审计/会话三张只增不减的表补上回收路径。</p></div></div>
       <div class="item"><div class="phase">1.7 · DONE</div><div><h3>站点资产与时间口径</h3><p>站点收成一级资产（证书到期 / 自签 / 明文标注 + 人工归属）；13 张表 22 个时间列统一 UTC；HTML 报表与 CSV 导出。</p></div></div>
-      <div class="item"><div class="phase">NEXT</div><div><h3>告警通道与站点分页</h3><p>通知出口（Webhook / 邮件，把"看见"接到"通知到"）、站点列表服务端分页、流式 PCAP 解析、更多协议与指纹规则。</p></div></div>
+      <div class="item"><div class="phase">1.8 · DONE</div><div><h3>出口与代理识别</h3><p>同一台网关不再劈成两行（IP/MAC 归一，与证据到达顺序无关）、/24 聚合不再吞掉出口、网关证据随节点持久化（重启后仍在）、七层代理角色与 XFF 真实客户端还原；模拟器新增 egress / proxy 两个真值场景，七层转发与 NAT 源 MAC 的保真度一并修正。</p></div></div>
+      <div class="item"><div class="phase">NEXT</div><div><h3>告警通道与 WAN 侧采集</h3><p>通知出口（Webhook / 邮件，把「看见」接到「通知到」）、站点列表服务端分页、流式 PCAP 解析、出口链路外侧采集点（公网出口地址只有在那里才看得见），以及更多协议与指纹规则。</p></div></div>
     </div>
   </div>
 </section>
@@ -391,6 +397,8 @@ bash scripts/e2e.sh</pre>
       <h2 class="sec-title">项目动态</h2>
     </div>
     <div class="news">
+      <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.8.0"><div class="date">2026-11-10</div><div class="t">1.8.0 发布：出口与代理——图终于能说出「谁是路由器、谁在转发」</div><div class="d">四个缺陷是同一类问题：<strong>出口设备就在数据里，只是图不告诉你</strong>。① <strong>一台网关被劈成两行</strong>——LAN IP 只在「别人连它」的会话里当目的地址，MAC 只在「它转发公网流量」的会话里当二层目的 MAC，谁先到谁建节点，于是「有名有姓的 10.8.1.1」和「只有 MAC 的空壳」并存，按 IP 汇总的报表直接翻倍；修法不是事后合并节点，而是<strong>创建时就把 IP 和 MAC 一起交进去</strong>，与证据到达顺序无关。② 归一之后它又被 /24 聚合吞掉——而网关总在人最多的办公网里，<strong>恰恰在真部署规模下，出口消失了</strong>。③ 重启后它再次消失：判定只记在内存表里，重启即空，而重启那一刻正是最需要看图的时候；证据改为落成节点标签随节点持久化。④ 全网流量必经的代理一直显示「未识别」：XFF 还原只打了标签、没给角色。附带修掉趋势按 UTC 建桶（窗口偏 8 小时）与一个<strong>只在凌晨 0–1 点发作</strong>的测试缺陷。模拟器新增 egress / proxy 两个真值场景，共 10 个世界、7 个变异测试。</div></a>
+      <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.7.2"><div class="date">2026-11-01</div><div class="t">1.7.2 发布：保存按钮在 4400px 之外、任务时间印成 0001 年</div><div class="d">三个「接口 200、单测全绿、界面上不报错」的问题，只有<strong>以用户的方式真点一遍</strong>才会露出来：配置页 30+ 项，页头不吸顶，滚到底部时「保存配置」按钮在视口外 <strong>4400px</strong>——改完配置其实存不了；任务详情把零值时间序列化出来，界面写着「结束时间 0001-01-01」；自包含报表没声明 icon，离线交付时控制台带一条 404。除修之外补了一道可重复执行的视觉闸门 <code>scripts/visual-audit.py</code>：「看起来是对的」从此要变成「量出来是对的」。</div></a>
       <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.7.1"><div class="date">2026-11-01</div><div class="t">1.7.1 发布：三笔「不报警」的账</div><div class="d">三个问题，共同点是<strong>出错时没有任何地方报警</strong>：① 强杀重启后仍在持续的会话被整笔重算（上报 1,000,000 字节 → 结束进程 → 重启 → 同一份快照再报一次 → 又涨 1,000,000），修法是基准改两档落盘 + 认出"跨进程启动的在途会话"；② WAL checkpoint 后<strong>不会自动缩容</strong>，一次灌入撑到 193MB 就永远是 193MB（主库才 145MB），而磁盘写满时 SQLite 是写入静默失败、接口照回 200；③ 站点列表每次跑两遍全表聚合，改成"没被截断就不问库"。这一版的判据比代码更值得看：pragma 拼错不报错只能读回实际值、耗时断言改成执行计划断言、缓存要测的是失效而不是命中。</div></a>
       <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.7.0"><div class="date">2026-11-01</div><div class="t">1.7.0 发布：站点资产、时间口径统一与 HTML 报表</div><div class="d">把 <code>ports</code> 上「有 HTTP 响应的端点」收成一级资产——<strong>派生视图不建表</strong>，人工标注（名称 / 归属单位 / 标签）落在独立的 <code>site_meta</code>，所以「什么是站点」这条规则改了不用回填数据；证书到期 / 自签 / 明文三色标注，<code>cert_expiry</code> 为空才是「无证书情报」的判据（剩余天数 -1 同时是「昨天到期」的合法答案）。判据经真机修正过：<strong>有证书不等于有站点</strong>——RDP 3389 会完成 TLS 握手并带回 <code>CN=机器名</code> 的自签证书。另修 13 张表 22 个时间列的口径分裂（同一时刻在不同列表差 8 小时，因为写入时一半是 time.Time、一半是本地时区字符串），在写入层统一归一化为 UTC 并做一次存量迁移。新增自包含 HTML 报表与带 BOM 的 CSV 导出。</div></a>
       <a class="item" href="https://github.com/kinghtxg/starmap/releases/tag/v1.6.1"><div class="date">2026-11-01</div><div class="t">1.6.1 发布：误报风暴、写锁争用与落盘两档</div><div class="d">来自一次不设终点的长跑压测（9 轮、每轮 4~8 分钟持续上报，不重启）。四件事互相掩护：多网融合规则把「访问过的域」当成「接入的域」，4 万节点的网络里这条规则一轮产出 <strong>39,188 条 high</strong>、占全量候选 99.7%（政务网里"10.x 访问 172.16.x"是最普通的业务流量）→ 候选数=节点数 → 去重索引与写库跟着膨胀 → 写锁占满 → 探针上报变成秒级。规则维度改为只看设备自有地址后，再修写路径：端口状态分块刷新、会话基准两档落盘。顺带修掉五元组复用判据过松导致的流量回退。</div></a>
